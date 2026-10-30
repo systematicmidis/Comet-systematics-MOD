@@ -1,0 +1,135 @@
+#pragma once
+#include "../App/Progress.h"
+#include "ProgressInputStream.h"
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include "MIDISequence.h"
+
+class AbstractMIDILoader : public Progress
+{
+public:
+	virtual ~AbstractMIDILoader() = default;
+	static void Read(std::ifstream* is, size_t size, uint8_t* buf)
+	{
+		is->read(reinterpret_cast<char*>(buf), size);
+	}
+	static inline uint32_t ReadVariableLengthValue(InputStream* is)
+	{
+		uint32_t value = 0;
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t b = is->ReadByte();
+			value = (value << 7) | (b & 0x7F);
+			if ((b & 0x80) == 0) return value;
+		}
+		return value;
+	}
+	static inline uint32_t ReadVariableLengthValue(const uint8_t*& p, const uint8_t* end)
+	{
+		uint32_t value = *p++;
+		if (value & 0x80)
+		{
+			value &= 0x7F;
+			uint8_t c;
+			do
+			{
+				c = *p++;
+				value = (value << 7) | (c & 0x7F);
+			} while (c & 0x80);
+		}
+		return value;
+	}
+
+	static uint16_t ToShort(uint8_t* bytes)
+	{
+		uint16_t res = 0;
+		for (int i = 0; i < 2; i++)
+		{
+			res = (res << 8) | static_cast<uint32_t>(bytes[i]);
+		}
+		return res;
+	}
+	static uint32_t ToInt(uint8_t* bytes)
+	{
+		uint32_t res = 0;
+		for (int i = 0; i < 4; i++)
+		{
+			res = (res << 8) | static_cast<uint32_t>(bytes[i]);
+		}
+		return res;
+	}
+	static uint64_t ToLong(uint8_t* bytes)
+	{
+		uint64_t res = 0;
+		for (int i = 0; i < 8; i++)
+		{
+			res = (res << 8) | static_cast<uint64_t>(bytes[i]);
+		}
+		return res;
+	}
+
+	AbstractMIDILoader(const char* name) : Progress(name) {}
+	void SetLoadOnlyNotes(bool loadOnlyNotes)
+	{
+		this->loadOnlyNotes = loadOnlyNotes;
+	}
+	virtual std::shared_ptr<MIDISequence> Load(bool timeBasedLoading = false) = 0;
+	virtual void Stop() { Progress::Stop(); }
+
+protected:
+	bool loadOnlyNotes = false;
+
+	struct MIDIStreamInfo
+	{
+		std::string name;
+
+		std::shared_ptr<ProgressInputStream> stream;
+	};
+
+	struct ParsedTrack
+	{
+		NoteSequence notes;
+		std::vector<MIDIMessageEvent> messages;
+		std::vector<TempoEvent> tempos;
+		std::vector<TimeSignatureEvent> timeSignatures;
+		std::string name;
+		long length = 0;
+		bool multiChannel = false;
+	};
+
+	// Track name meta events are free-form bytes; keep them short and printable so they can be
+	// listed in the settings without dragging control characters into the UI.
+	static std::string SanitizeTrackName(const uint8_t* data, uint32_t length)
+	{
+		std::string name;
+		name.reserve(std::min<std::size_t>(length, 64));
+
+		for (uint32_t i = 0; i < length && name.size() < 64; i++)
+		{
+			const uint8_t c = data[i];
+			if (c >= 32 && c < 127)
+				name.push_back((char)c);
+		}
+
+		while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(name.begin());
+		while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+
+		return name;
+	}
+
+	MIDIStreamInfo OpenMIDIFileStream(const std::filesystem::path& path)
+	{
+		bool exists = std::filesystem::exists(path);
+		if (!exists || std::filesystem::is_directory(path))
+		{
+			throw std::runtime_error("File doesn't exist or not a file!");
+		}
+		MIDIStreamInfo info;
+		auto filenameU8 = path.filename().u8string();
+		info.name = std::string(reinterpret_cast<const char*>(filenameU8.c_str()));
+		info.stream = std::make_shared<ProgressInputStream>(path);
+		std::cout << "MIDI file stream opened: " << info.name << std::endl;
+		return info;
+	}
+};

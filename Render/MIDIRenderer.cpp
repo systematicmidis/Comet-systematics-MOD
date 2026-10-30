@@ -1,0 +1,1135 @@
+#include "MIDIRenderer.h"
+#include "Comet.h"
+#include "Render/Renderer/PrimitiveShaders.h"
+#include "../App/MIDIApp.h"
+#include "ResourcePack/ResourcePack.h"
+#include "ResourcePack/DefaultResourcePack.h"
+#include "ResourcePack/ResourcePackList.h"
+#include "MIDI/TempoMap.h"
+#include "MIDI/Timer/MIDITimer.h"
+#include "Utils.h"
+#include <algorithm>
+#include "App/Dialog/DialogMacros.h"
+
+#pragma region Shaders
+
+static constexpr const char* keyboardvert = R"(#version 330 core
+layout (location = 0) in vec2 aPos;
+
+// instance data
+layout (location = 1) in float kLeft;
+layout (location = 2) in float kRight;
+layout (location = 3) in uint kMeta;
+
+out vec2 uv;
+flat out uint meta;
+
+uniform float kbHeight;
+uniform float kbWhiteHeight;
+uniform float kbBlackHeight;
+
+out float kWidth;
+
+void main()
+{
+	bool black   = (kMeta & (1u << 25)) != 0u;
+
+	float x = mix(kLeft, kRight, aPos.x);
+	float y = kbHeight - aPos.y * (black ? kbBlackHeight : kbWhiteHeight);
+
+	gl_Position = vec4(x * 2.0f - 1.0f, (y * 2.0f - 1.0f), 0.0f, 1.0f);
+	uv = aPos;
+	meta = kMeta;
+	kWidth = kRight - kLeft;
+})";
+
+static constexpr const char* keyboardfrag = R"(#version 330
+
+uniform sampler2D blackKey;
+uniform sampler2D whiteKey;
+uniform sampler2D blackKeyPressed;
+uniform sampler2D whiteKeyPressed;
+uniform sampler2D blackKeyMask;
+uniform sampler2D whiteKeyMask;
+uniform sampler2D blackKeyPressedMask;
+uniform sampler2D whiteKeyPressedMask;
+
+uniform vec3 barColor;
+
+flat in uint meta;
+in vec2 uv;
+in float kWidth;
+
+uniform float whiteKeyBorderPixelWidth; // how much pixels the border should take up when rendering
+uniform float borderPercentageNorm; // 0.0-1.0 of how much the border takes up the texure
+
+out vec4 fragColor;
+
+void main()
+{
+	vec3 color = vec3(
+		float((meta & 0xFF0000u) >> 16u), 
+		float((meta & 0xFF00u) >> 8u),
+		float(meta & 0xFFu)
+	) / 255.0f;
+
+	bool pressed = (meta & (1u << 24)) != 0u;
+    bool black   = (meta & (1u << 25)) != 0u;
+
+	float uvPerPixel = fwidth(uv.x);
+    float keyWidthPixels = 1.0 / uvPerPixel;
+
+	float actualBorderPx = min(whiteKeyBorderPixelWidth, keyWidthPixels * 0.5);
+
+	float pixelX = uv.x * keyWidthPixels;
+	float adjustedU = uv.x;
+
+	if (pixelX < actualBorderPx)
+	{
+		// Left Border (maps to 0.0 -> borderPercentageNorm)
+        adjustedU = mix(0.0, borderPercentageNorm, pixelX / actualBorderPx);
+	}
+	else if (pixelX > keyWidthPixels - actualBorderPx)
+	{
+		float distFromRight = keyWidthPixels - pixelX;
+        adjustedU = mix(1.0, 1.0 - borderPercentageNorm, distFromRight / actualBorderPx);
+	}
+	else
+	{
+		float middlePixelWidth = keyWidthPixels - (2.0 * actualBorderPx);
+        float distFromLeftBorder = pixelX - actualBorderPx;
+        adjustedU = mix(borderPercentageNorm, 1.0 - borderPercentageNorm, distFromLeftBorder / middlePixelWidth);
+	}
+
+	vec2 sliceUV = vec2(adjustedU, uv.y);
+
+	vec3 texColor;
+
+	if (!pressed)
+	{
+		if (black)
+		{
+			vec2 blackKeyMaskRG = texture(blackKeyMask, uv).rg;
+			texColor = texture(blackKey, uv).rgb;
+			vec3 texColorBar = texColor * barColor;
+			texColor = mix(texColor, texColorBar, blackKeyMaskRG.g);
+		}
+		else
+		{
+			vec2 whiteKeyMaskRG = texture(whiteKeyMask, uv).rg;
+			texColor = texture(whiteKey, sliceUV).rgb;
+			vec3 texColorBar = texColor * barColor;
+			texColor = mix(texColor, texColorBar, whiteKeyMaskRG.g);
+		}
+	}
+	else
+	{
+		if (black)
+		{
+			vec2 blackKeyPressedMaskRG = texture(blackKeyPressedMask, uv).rg;
+
+			texColor = texture(blackKeyPressed, uv).rgb;
+			vec3 texColorBar = texColor * barColor;
+			vec3 texColorNote = texColor * color;
+			texColor = mix(texColor, texColorBar, blackKeyPressedMaskRG.g);
+			texColor = mix(texColor, texColorNote, blackKeyPressedMaskRG.r);
+		}
+		else
+		{
+			vec2 whiteKeyPressedMaskRG = texture(whiteKeyPressedMask, uv).rg;
+
+			texColor = texture(whiteKeyPressed, sliceUV).rgb;
+			vec3 texColorBar = texColor * barColor;
+			vec3 texColorNote = texColor * color;
+			texColor = mix(texColor, texColorBar, whiteKeyPressedMaskRG.g);
+			texColor = mix(texColor, texColorNote, whiteKeyPressedMaskRG.r);
+		}
+	}
+
+	fragColor = vec4(texColor, 1.0);
+})";
+
+static constexpr const char* notesvert = R"(#version 330
+
+layout (location = 0) in vec2 aPos;
+
+// instance data
+layout (location = 1) in float nLeft;
+layout (location = 2) in float nRight;
+layout (location = 3) in float nStart;
+layout (location = 4) in float nEnd;
+layout (location = 5) in uint nColor;
+
+out vec2 uv;
+flat out uint color;
+out float noteHeight;
+
+uniform float kbHeight;
+
+void main()
+{
+	float x = mix(nLeft, nRight, aPos.x);
+	float y = mix(nStart, nEnd, aPos.y);
+	y = y * (1.0f - kbHeight) + kbHeight;
+
+	gl_Position = vec4(x * 2.0f - 1.0f, y * 2.0f - 1.0f, 0.0f, 1.0f);
+	uv = aPos;
+	color = nColor;
+	noteHeight = nEnd - nStart;
+})";
+
+static constexpr const char* notesfrag = R"(#version 330
+
+in vec2 uv;
+flat in uint color;
+in float noteHeight;
+
+out vec4 fragColor;
+
+uniform sampler2D note;
+uniform sampler2D noteBlack;
+uniform sampler2D noteEdge;
+uniform float noteBorderWidth;
+
+void main()
+{
+	bool isBlack = (color & 0x1000000u) != 0u;
+	vec3 nCol = vec3(
+		float((color & 0xFF0000u) >> 16u), 
+		float((color & 0xFF00u) >> 8u),
+		float(color & 0xFFu)
+	) / 255.0f;
+
+	vec3 noteTex;
+	if (isBlack)
+	{
+		noteTex = texture(noteBlack, uv).rgb;
+	}
+	else
+	{
+		noteTex = texture(note, uv).rgb;
+	}
+
+	float uvBorderThickness = noteBorderWidth / noteHeight;
+
+	vec4 edgeTex = vec4(0.0);
+
+	if (uv.y < uvBorderThickness)
+	{
+		float normY = uv.y / uvBorderThickness;
+		edgeTex = texture(noteEdge, vec2(uv.x, normY));
+	}
+	else if (uv.y > (1.0 - uvBorderThickness))
+    {
+        float normY = (1.0 - uv.y) / uvBorderThickness;
+        edgeTex = texture(noteEdge, vec2(uv.x, normY));
+    }
+
+	vec3 finalColor = mix(noteTex, edgeTex.rgb, edgeTex.a) * nCol;
+
+	fragColor = vec4(finalColor, 1.0f);
+})";
+
+#pragma endregion
+
+void CheckGLError(const char* label)
+{
+	GLenum err;
+	while ((err = glGetError()) != GL_NO_ERROR)
+	{
+		std::cout << "OpenGL Error at " << label << ": " << err << std::endl;
+	}
+}
+
+const std::array<float, 8> QUAD_VERTICES = {
+	0.0f, 1.0f,
+	1.0f, 1.0f,
+	1.0f, 0.0f,
+	0.0f, 0.0f,
+};
+
+const std::array<unsigned int, 6> QUAD_INDICES = {
+	0, 1, 3,
+	1, 2, 3
+};
+
+void MIDIRenderer::LoadSequence(std::shared_ptr<MIDISequence> sequence)
+{
+	std::lock_guard<std::mutex> lock(renderMutex);
+
+	if (seq != sequence) AbstractMIDIRenderer::UnloadSequence();
+	AbstractMIDIRenderer::LoadSequence(sequence);
+
+	colors.LoadColors();
+	seq = sequence;
+	lastTime = 0;
+
+	for (auto& id : startBlockIDs)
+		id = 0;
+}
+
+void MIDIRenderer::UnloadSequence()
+{
+	std::lock_guard<std::mutex> lock(renderMutex);
+	AbstractMIDIRenderer::UnloadSequence();
+}
+
+void MIDIRenderer::LoadResourcePack(std::shared_ptr<ResourcePack> pack, bool loadColors)
+{
+	if (pack == nullptr)
+	{
+		std::cout << "Attempt to load a null resource pack." << std::endl;
+		return;
+	}
+
+	#pragma region Note textures
+	auto textureNoteStream = pack->GetStream("note.png");
+	textureNote = std::make_unique<GPUImage>(textureNoteStream);
+
+	auto textureNoteBlackStream = pack->GetStream("noteBlack.png");
+	textureNoteBlack = textureNoteBlackStream != nullptr
+		? std::make_unique<GPUImage>(textureNoteBlackStream)
+		: std::make_unique<GPUImage>(pack->GetStream("note.png"));
+
+	auto textureNoteEdgeStream = pack->GetStream("noteEdge.png");
+	textureNoteEdge = textureNoteEdgeStream != nullptr
+		? std::make_unique<GPUImage>(textureNoteEdgeStream)
+		: std::make_unique<GPUImage>(pack->GetStream("note.png"));
+	#pragma endregion
+
+	#pragma region Key textures + masks
+	textureKeyWhite = std::make_unique<GPUImage>(pack->GetStream("keyWhite.png"));
+	textureKeyBlack = std::make_unique<GPUImage>(pack->GetStream("keyBlack.png"));
+	textureKeyWhitePressed = std::make_unique<GPUImage>(pack->GetStream("keyWhitePressed.png"));
+	textureKeyBlackPressed = std::make_unique<GPUImage>(pack->GetStream("keyBlackPressed.png"));
+
+	LoadMaskTexture(pack.get(), textureKeyWhiteMask, "keyWhiteMask.png");
+	LoadMaskTexture(pack.get(), textureKeyBlackMask, "keyBlackMask.png");
+	LoadMaskTexture(pack.get(), textureKeyWhiteMaskPressed, "keyWhitePressedMask.png");
+	LoadMaskTexture(pack.get(), textureKeyBlackMaskPressed, "keyBlackPressedMask.png");
+	#pragma endregion
+	// attempt to load note colors
+	// TODO: move this to its own function
+	if (loadColors)
+	{
+		auto noteColorStream = pack->GetStream("noteColors.png");
+		bool canLoadNoteColors = noteColorStream != nullptr;
+		if (!canLoadNoteColors)
+		{
+#ifdef COMET_DEBUG
+			std::cout << "Pack has no noteColors.png. Will use randomized colors" << std::endl;
+#endif
+			colors.ResetColors();
+		}
+		else
+		{
+			bool loopColors = pack->GetNoteInfo()->loopColors;
+			colors.LoadColors(noteColorStream, loopColors);
+#ifdef COMET_DEBUG
+			std::cout << "Loaded " << colors.GetNumLoadedColors() << " color(s) with looping " << (loopColors ? "enabled" : "disabled") << std::endl;
+#endif
+		}
+	}
+
+	this->pack = pack;
+
+	if (initialized) CalcKeyPosAndWidth();
+	std::cout << "Loaded pack " << pack->GetName() << std::endl;
+}
+
+void MIDIRenderer::LoadMaskTexture(ResourcePack* pack, std::unique_ptr<GPUImage>& mask, const char* name)
+{
+	// load masks and fallback if they dont exist (backwards compatibility woah)
+	std::vector<unsigned char> fallbackMask{ 255, 0, 0, 255 };
+
+	mask = std::make_unique<GPUImage>(pack->GetStream(name));
+	if (!mask->IsValidTexture())
+	{
+		mask = std::make_unique<GPUImage>(fallbackMask, 1, 1);
+	}
+}
+
+void MIDIRenderer::Initialize()
+{
+	static_assert(sizeof(RenderKeyboardKey) == 12);
+	static_assert(offsetof(RenderKeyboardKey, left) == 0);
+	static_assert(offsetof(RenderKeyboardKey, right) == 4);
+	static_assert(offsetof(RenderKeyboardKey, meta) == 8);
+
+	AbstractMIDIRenderer::Initialize();
+
+#pragma region Load resource pack
+	// we can load the resource pack
+	auto config = app->GetConfig();
+	auto defaultPack = DefaultResourcePack::Instance();
+	if (auto pack = std::dynamic_pointer_cast<ResourcePack>(defaultPack))
+	{
+		LoadResourcePack(pack, config->render.GetUseColorsFromImage());
+	}
+#pragma endregion
+
+#pragma region Keyboard shader creation
+
+	std::unique_ptr<ShaderProgram> kbProgram = ShaderProgram::Create(keyboardvert, keyboardfrag);
+	std::unique_ptr<VertexArray> kbVao = std::make_unique<VertexArray>();
+	std::unique_ptr<Buffer> kbVbo = std::make_unique<Buffer>(GL_ARRAY_BUFFER);
+	std::unique_ptr<Buffer> kbInstance = std::make_unique<Buffer>(GL_ARRAY_BUFFER);
+	std::unique_ptr<Buffer> kbEbo = std::make_unique<Buffer>(GL_ELEMENT_ARRAY_BUFFER);
+
+	{
+		VertexArrayBind vaoBind(*kbVao);
+
+		// static quad verts
+		kbVbo->Bind();
+		kbVbo->SetData(QUAD_VERTICES, GL_STATIC_DRAW);
+
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, (void*)0);
+
+		// index buffer
+		kbEbo->Bind();
+		kbEbo->SetData(QUAD_INDICES, GL_STATIC_DRAW);
+
+		// instance buffer
+		kbInstance->Bind();
+		kbInstance->SetData(keyboardData, GL_DYNAMIC_DRAW);
+
+		kbVao->SetFloatAttribute(1, 1, sizeof(RenderKeyboardKey), offsetof(RenderKeyboardKey, left));
+		kbVao->SetFloatAttribute(2, 1, sizeof(RenderKeyboardKey), offsetof(RenderKeyboardKey, right));
+		kbVao->SetIntAttribute(3, 1, sizeof(RenderKeyboardKey), offsetof(RenderKeyboardKey, meta));
+
+		glVertexAttribDivisor(1, 1);
+		glVertexAttribDivisor(2, 1);
+		glVertexAttribDivisor(3, 1);
+	}
+
+#pragma endregion
+
+#pragma region Note shader creation
+
+	std::unique_ptr<ShaderProgram> notesProgram = ShaderProgram::Create(notesvert, notesfrag);
+	std::unique_ptr<VertexArray> notesVao = std::make_unique<VertexArray>();
+	std::unique_ptr<Buffer> notesVbo = std::make_unique<Buffer>(GL_ARRAY_BUFFER);
+	std::unique_ptr<Buffer> notesInstance = std::make_unique<Buffer>(GL_ARRAY_BUFFER);
+	std::unique_ptr<Buffer> notesEbo = std::make_unique<Buffer>(GL_ELEMENT_ARRAY_BUFFER);
+
+	{
+		VertexArrayBind vaoBind(*notesVao);
+
+		// static quad verts
+		notesVbo->Bind();
+		notesVbo->SetData(QUAD_VERTICES, GL_STATIC_DRAW);
+
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, (void*)0);
+
+		// index buffer
+		notesEbo->Bind();
+		notesEbo->SetData(QUAD_INDICES, GL_STATIC_DRAW);
+
+		// instance buffer
+		notesInstance->Bind();
+		notesInstance->SetData(renderNotes, GL_DYNAMIC_DRAW);
+
+		notesVao->SetFloatAttribute(1, 1, sizeof(RenderNote), offsetof(RenderNote, left));
+		notesVao->SetFloatAttribute(2, 1, sizeof(RenderNote), offsetof(RenderNote, right));
+		notesVao->SetFloatAttribute(3, 1, sizeof(RenderNote), offsetof(RenderNote, start));
+		notesVao->SetFloatAttribute(4, 1, sizeof(RenderNote), offsetof(RenderNote, end));
+		notesVao->SetIntAttribute(5, 1, sizeof(RenderNote), offsetof(RenderNote, color));
+
+		glVertexAttribDivisor(1, 1);
+		glVertexAttribDivisor(2, 1);
+		glVertexAttribDivisor(3, 1);
+		glVertexAttribDivisor(4, 1);
+		glVertexAttribDivisor(5, 1);
+	}
+
+#pragma endregion
+
+	std::array<KeyboardMeta, MIDI_KEYS> kbMetas;
+	kbMetas.fill(KeyboardMeta(0, false, false));
+	std::vector<uint8_t> blackIDs;
+	blackIDs.reserve(53);
+	std::vector<uint8_t> whiteIDs;
+	whiteIDs.reserve(75);
+
+	uint8_t keyID = 0;
+	for (uint8_t key = 0; key < MIDI_KEYS; key++)
+	{
+		bool black = KEY_IS_BLACK(key);
+		if (black) blackIDs.push_back(key);
+		else whiteIDs.push_back(key);
+		kbMetas[key].MarkBlack(black);
+	}
+
+	int i = 0;
+	for (auto& white : whiteIDs)
+	{
+		kbIDs[i++] = white;
+	}
+	for (auto& black : blackIDs)
+	{
+		kbIDs[i++] = black;
+	}
+
+	// bind textures
+	{
+		ShaderBind kbBind(*kbProgram);
+
+		{
+			TextureBind kbWhiteBind(*textureKeyWhite, 0);
+			kbProgram->SetInt("whiteKey", 0);
+		}
+
+		{
+			TextureBind kbBlackBind(*textureKeyBlack, 1);
+			kbProgram->SetInt("blackKey", 1);
+		}
+
+		{
+			TextureBind kbWhitePressedBind(*textureKeyWhitePressed, 2);
+			kbProgram->SetInt("whiteKeyPressed", 2);
+		}
+
+		{
+			TextureBind kbBlackPressedBind(*textureKeyBlackPressed, 3);
+			kbProgram->SetInt("blackKeyPressed", 3);
+		}
+
+		{
+			TextureBind kbWhiteMaskBind(*textureKeyWhiteMask, 4);
+			kbProgram->SetInt("whiteKeyMask", 4);
+		}
+
+		{
+			TextureBind kbBlackMaskBind(*textureKeyBlackMask, 5);
+			kbProgram->SetInt("blackKeyMask", 5);
+		}
+
+		{
+			TextureBind kbWhiteMaskPressedBind(*textureKeyWhiteMaskPressed, 6);
+			kbProgram->SetInt("whiteKeyPressedMask", 6);
+		}
+
+		{
+			TextureBind kbBlackMaskPressedBind(*textureKeyBlackMaskPressed, 7);
+			kbProgram->SetInt("blackKeyPressedMask", 7);
+		}
+	}
+
+#pragma region Keyboard data setup
+	keyboardProgram = std::move(kbProgram);
+	keyboardVBO = std::move(kbVbo);
+	keyboardVAO = std::move(kbVao);
+	keyboardIBO = std::move(kbInstance);
+	keyboardEBO = std::move(kbEbo);
+	keyMetas = std::move(kbMetas);
+
+	keyboardBackground = std::make_unique<Quad>();
+	keyboardBackground->SetShader(SINGLE_COLOR_SHADER);
+	keyboardBackground->SetColor(glm::vec3(0.0, 0.0, 0.0));
+#pragma endregion
+
+#pragma region Note data setup
+
+	{
+		ShaderBind notesBind(*notesProgram);
+		notesProgram->SetFloat("kbHeight", keyboardHeight);
+
+		{
+			TextureBind noteTextureBind(*textureNote, 0);
+			notesProgram->SetInt("note", 0);
+		}
+
+		{
+			TextureBind noteBlackTextureBind(*textureNoteBlack, 1);
+			notesProgram->SetInt("noteBlack", 1);
+		}
+
+		{
+			TextureBind noteEdgeTextureBind(*textureNoteEdge, 2);
+			notesProgram->SetInt("noteEdge", 2);
+		}
+	}
+
+	this->notesProgram = std::move(notesProgram);
+	this->notesVBO = std::move(notesVbo);
+	this->notesVAO = std::move(notesVao);
+	this->notesIBO = std::move(notesInstance);
+	this->notesEBO = std::move(notesEbo);
+#pragma endregion
+
+	initialized = true;
+
+	CalcKeyPosAndWidth();
+	UpdateKeyboardInstance();
+	keyboardDirty = true;
+
+	InitializeFromConfig();
+}
+
+void MIDIRenderer::InitializeFromConfig()
+{
+	auto config = app->GetConfig();
+
+	ImVec4 barColor = config->render.GetBarColor();
+	SetBarColor(barColor.x, barColor.y, barColor.z);
+
+	ImVec4 bgColor = config->render.GetBackground();
+	SetBackgroundColor(bgColor.x, bgColor.y, bgColor.z);
+}
+
+void MIDIRenderer::Render(double deltaTime)
+{
+	if (!initialized) return;
+	MIDIPlayerConfig* config = app->GetConfig();
+	
+	if (config->render.ConsumeKeyRangeChanged())
+		CalcKeyPosAndWidth();
+
+	sceneFramebuffer->Bind();
+	// lowkey forgot to clear the framebuffer at the start of each render, oops
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	RenderNotes();
+	RenderKeyboard();
+	sceneFramebuffer->Unbind();
+
+	if (!seq)
+		noteCounterInfo->tick.value = 0;
+}
+
+void MIDIRenderer::RenderSettings()
+{
+	MIDIPlayerConfig* config = app->GetConfig();
+
+	if (ImGui::BeginTabBar("##midiRenderSettings"))
+	{
+		if (ImGui::BeginTabItem("Piano"))
+		{
+			auto colors = config->render.GetBarColor();
+
+			BEGIN_SECTION("##pianoSettings")
+			{
+				SETUP_SECTION;
+
+				SECTION_ENTRY(SECTION_LABEL("Bar color"),
+					{
+						float barColor[3]{ colors.x, colors.y, colors.z };
+						if (ImGui::ColorEdit3("##barColor", barColor))
+						{
+							config->render.SetBarColor(barColor[0], barColor[1], barColor[2]);
+							SetBarColor(barColor[0], barColor[1], barColor[2]);
+						}
+					});
+
+				END_SECTION;
+			}
+
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Resource Packs"))
+		{
+			ResourcePackList* packList = app->GetPackList();
+			auto* config = app->GetConfig();
+			if (packList != nullptr)
+			{
+				if (ImGui::Button("Refresh Pack List"))
+				{
+					packList->RefreshList();
+					std::shared_ptr<ResourcePack> activePack = packList->GetActivePack();
+					LoadResourcePack(activePack, !config->render.GetUseColorsFromImage());
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Open pack folder"))
+				{
+					Utils::OpenFolder(RESOURCE_PACK_FOLDER);
+				}
+
+				ImGui::Separator();
+
+				auto& packs = packList->GetPackList();
+				size_t packIdx = 0;
+				for (const auto& pack : packs)
+				{
+					ImGui::BeginGroup();
+					ImGui::Text(pack->GetName());
+					ImGui::Text("By %s", pack->GetAuthor());
+					ImGui::Text(pack->GetDescription());
+
+					bool isActivePack = pack == packList->GetActivePack();
+					ImGui::BeginDisabled(isActivePack);
+					if (isActivePack) ImGui::Button("Pack in use");
+					else
+					{
+						ImGui::PushID(pack.get());
+						if (ImGui::Button("Use pack"))
+						{
+							packList->SwitchPack(packIdx);
+							LoadResourcePack(pack, !config->render.GetUseColorsFromImage());
+						}
+						ImGui::PopID();
+					}
+					ImGui::EndDisabled();
+
+					ImGui::EndGroup();
+					if (packIdx != packs.size() - 1)
+						ImGui::Separator();
+
+					packIdx++;
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
+	}
+	AbstractMIDIRenderer::RenderSettings();
+}
+
+void MIDIRenderer::ResetSettings()
+{
+	MIDIPlayerConfig* config = app->GetConfig();
+	config->render.SetBarColor(0.5f, 0.f, 0.f);
+	SetBarColor(0.5f, 0.f, 0.f);
+	config->render.SetBackground(0.f, 0.f, 0.f);
+	SetBackgroundColor(0.f, 0.f, 0.f);
+}
+
+void MIDIRenderer::CalcKeyPosAndWidth()
+{
+	MIDIPlayerConfig* config = app->GetConfig();
+	int keyFirst = config->render.GetKeyFirst();
+	int keyLast = config->render.GetKeyLast();
+
+	float rawPos[MIDI_KEYS];
+	float rawWidth[MIDI_KEYS];
+	float pos = 0.0f;
+	for (int i = 0; i < MIDI_KEYS; i++)
+	{
+		rawPos[i] = pos;
+		pos += keyPosDiff[i % 12];
+	}
+	int lastIdxWhiteUnit = -1;
+	for (int j = 0; j < MIDI_KEYS; j++)
+	{
+		if (KEY_IS_BLACK(j))
+		{
+			rawWidth[j] = 75.0f / 115.0f; // black key width relative to a white key step
+		}
+		else
+		{
+			if (lastIdxWhiteUnit != -1)
+				rawWidth[lastIdxWhiteUnit] = rawPos[j] - rawPos[lastIdxWhiteUnit];
+			lastIdxWhiteUnit = j;
+		}
+	}
+	if (lastIdxWhiteUnit != -1)
+		rawWidth[lastIdxWhiteUnit] = 1.0f;
+
+	float spanUnits = (rawPos[keyLast] + rawWidth[keyLast]) - rawPos[keyFirst];
+	if (spanUnits < 0.001f)
+		spanUnits = 0.001f;
+
+	float noteWidth = (float)width / spanUnits; // pixels per white-key unit
+	float noteWidthBlack = noteWidth * (75.0f / 115.0f);
+
+	float keyboardHeightScale = noteWidth / (float)textureKeyWhite->width;
+	keyboardHeightBlack = (textureKeyBlack->height * keyboardHeightScale) / (float)height;
+	keyboardHeightWhite = (textureKeyWhite->height * keyboardHeightScale) / (float)height;
+	keyboardHeight = std::max(keyboardHeightBlack, keyboardHeightWhite) + 1.0f / float(height);
+
+	float firstKeyPos = rawPos[keyFirst] * noteWidth;
+	for (int i = 0; i < MIDI_KEYS; i++)
+		keyPos[i] = (rawPos[i] * noteWidth - firstKeyPos) / (float)width;
+
+	int lastIdxWhite = -1;
+	for (int j = 0; j < MIDI_KEYS; j++)
+	{
+		if (KEY_IS_BLACK(j))
+			keyWidth[j] = noteWidthBlack / (float)width;
+		else
+		{
+			if (lastIdxWhite != -1)
+				keyWidth[lastIdxWhite] = keyPos[j] - keyPos[lastIdxWhite];
+			lastIdxWhite = j;
+		}
+	}
+
+	keyWidth[keyLast] = 1.0f - keyPos[keyLast];
+
+	float widthScale = (float)(width) / 1280.0f;
+	float unscaledWhiteKeyGap = pack->GetKeyboardInfo()->whiteKeyGap;
+	if (unscaledWhiteKeyGap > 0.0f)
+		whiteKeyGap = (float)std::max(1, (int)std::floor(unscaledWhiteKeyGap * widthScale));
+	else
+		whiteKeyGap = 0.0f;
+
+	float unscaledNoteBorderWidth = pack->GetNoteInfo()->borderWidth;
+	if (unscaledNoteBorderWidth > 0.0f)
+		noteBorderWidth = (float)std::max(1, (int)std::floor(unscaledNoteBorderWidth * widthScale)) / (float)height;
+	else
+		noteBorderWidth = 0.0f;
+
+	keyboardDirty = true;
+}
+
+void MIDIRenderer::UpdateKeyboardInstance()
+{
+	if (!keyboardIBO)
+	{
+		std::cout << "Instance buffer doesn't exist yet" << std::endl;
+		return;
+	}
+
+	if (!keyboardDirty) return;
+
+	// for (int i = 0; i < 128; i++)
+	int i = 0;
+	for (uint8_t id : kbIDs)
+	{
+		float left = keyPos[id];
+		float right = keyPos[id] + keyWidth[id];
+		keyboardData[i].left = left;
+		keyboardData[i].right = right;
+		keyboardData[i].meta = keyMetas[id].GetMeta();
+		i++;
+	}
+
+	{
+		keyboardProgram->SetFloat("kbWhiteHeight", keyboardHeightWhite);
+		keyboardProgram->SetFloat("kbBlackHeight", keyboardHeightBlack);
+		keyboardProgram->SetFloat("kbHeight", keyboardHeight - 1.0f / (float)height);
+		keyboardProgram->SetFloat("whiteKeyBorderPixelWidth", whiteKeyGap);
+		keyboardProgram->SetFloat("borderPercentageNorm", (float)pack->GetKeyboardInfo()->whiteKeyBorderPixels / (float)textureKeyWhite->width);
+	}
+
+	keyboardIBO->Bind();
+	glBufferSubData(GL_ARRAY_BUFFER,
+		0,
+		keyboardData.size() * sizeof(RenderKeyboardKey),
+		keyboardData.data());
+
+	keyboardBackground->SetTransform({ { 0.0, 0.0, 0.0 }, { 1.0f, keyboardHeight } });
+	keyboardDirty = false;
+}
+
+void MIDIRenderer::OnResize(int width, int height)
+{
+	this->width = width;
+	this->height = height;
+	AbstractMIDIRenderer::OnResize(width, height);
+	if (!initialized) return;
+	CalcKeyPosAndWidth();
+}
+
+void MIDIRenderer::RenderKeyboard()
+{
+	keyboardBackground->Draw();
+
+	{
+		ShaderBind kbBind(*keyboardProgram);
+
+		TextureBind kbWhiteBind(*textureKeyWhite, 0);
+		TextureBind kbBlackBind(*textureKeyBlack, 1);
+		TextureBind kbWhitePressedBind(*textureKeyWhitePressed, 2);
+		TextureBind kbBlackPressedBind(*textureKeyBlackPressed, 3);
+		TextureBind kbWhiteMaskBind(*textureKeyWhiteMask, 4);
+		TextureBind kbBlackMaskBind(*textureKeyBlackMask, 5);
+		TextureBind kbWhiteMaskPressedBind(*textureKeyWhiteMaskPressed, 6);
+		TextureBind kbBlackMaskPressedBind(*textureKeyBlackMaskPressed, 7);
+
+		VertexArrayBind kbVAOBind(*keyboardVAO);
+		BufferBind kbIBOBind(*keyboardIBO);
+		BufferBind kbVBOBind(*keyboardVBO);
+		BufferBind kbEBOBind(*keyboardEBO);
+
+		UpdateKeyboardInstance();
+
+		glDrawElementsInstanced(
+			GL_TRIANGLES,
+			6,
+			GL_UNSIGNED_INT,
+			nullptr,
+			MIDI_KEYS
+		);
+
+		// after drawing reset keyboard state
+		for (KeyboardMeta& kbMeta : keyMetas)
+		{
+			if (kbMeta.pressed)
+			{
+				kbMeta.MarkPressed(false);
+				keyboardDirty = true;
+			}
+		}
+	}
+}
+
+void MIDIRenderer::RenderNotes()
+{
+	if (!seq) return;
+	std::vector<NoteSequence>& notes = seq->mergedNotes;
+	if (notes.empty()) return;
+	auto* renderView = app->GetRenderView();
+	if (!renderView) return;
+
+	size_t notesToRender = 0;
+	double playbackSeconds = app->GetTimer()->Elapsed();
+
+	TempoMap* tempoMap = seq->GetTempoMap();
+	long time = tempoMap->SecsToTicksFromMap(seq->resolution, playbackSeconds);
+	double bpm = tempoMap->GetBPMAtTick(time);
+	noteCounterInfo->tick.value = time >= 0 ? time : 0;
+	noteCounterInfo->timeSeconds.value = playbackSeconds;
+	noteCounterInfo->bpm.value = bpm;
+
+	ShaderBind shaderBind(*notesProgram);
+
+	TextureBind noteTextureBind(*textureNote, 0);
+	TextureBind noteBlackTextureBind(*textureNoteBlack, 1);
+	TextureBind noteEdgeTextureBind(*textureNoteEdge, 2);
+
+	VertexArrayBind notesVAOBind(*notesVAO);
+	BufferBind notesIBOBind(*notesIBO);
+	BufferBind notesVBOBind(*notesVBO);
+	BufferBind notesEBOBind(*notesEBO);
+
+	notesProgram->SetFloat("kbHeight", keyboardHeight - 1.0f / (float)height);
+	notesProgram->SetFloat("noteBorderWidth", noteBorderWidth);
+
+	size_t noteID = 0;
+	size_t notesPassed = 0;
+	size_t polyphony = 0;
+	size_t batchCount = 0;
+
+	const double accTime = isTimeBased ? playbackSeconds : time;
+	const double viewRegion = isTimeBased ? (double)renderView->viewTicks / 1000 : (double)renderView->viewTicks;
+	const double invViewRegion = 1.0 / viewRegion;
+	const double invTimeMultiplier = 1.0 / (double)TIME_BASED_MULTIPLIER;
+
+	double targetTick = accTime; if (isTimeBased) targetTick *= TIME_BASED_MULTIPLIER;
+
+	for (uint8_t id : kbIDs)
+	{
+		uint16_t lastTrack = 0;
+		uint8_t lastChannel = 0;
+		uint32_t lastTick = 0;
+		uint32_t lastGate = 0;
+		uint32_t lastNote = 0;
+
+		const NoteSequence& notesNote = notes[id];
+		const std::vector<NoteBlock>& blocks = seq->noteBlocks[id];
+		if (blocks.empty()) continue;
+
+#pragma region Note block culling
+
+		size_t& blockIndex = startBlockIDs[id];
+		size_t noteBegin = blockIndex * NOTE_BLOCK_SIZE;
+
+		if (lastTime < time)
+		{
+			while (blockIndex < blocks.size() && blocks[blockIndex].maxBound <= targetTick)
+			{
+				++blockIndex;
+			}
+		}
+		else if (lastTime > time)
+		{
+			while (blockIndex > 0 && blocks[blockIndex - 1].maxBound > targetTick)
+			{
+				--blockIndex;
+			}
+		}
+		
+		noteBegin = std::min(notesNote.Size(), blockIndex * NOTE_BLOCK_SIZE);
+		notesPassed += noteBegin;
+
+#pragma endregion
+
+		// actually render each note
+		bool isBlack = blackArr[id];
+		size_t numNotes = notesNote.Size();
+
+		size_t i = noteBegin;
+
+		while (i < numNotes)
+		{
+			const size_t blockIndex = i / NOTE_BLOCK_SIZE;
+			const size_t blockEnd = std::min(numNotes, (blockIndex + 1) * NOTE_BLOCK_SIZE);
+
+			const NoteBlock& currBlock = blocks[blockIndex];
+			double blockMin = currBlock.minBound;
+			double blockMax = currBlock.maxBound;
+
+			if (isTimeBased)
+			{
+				blockMin *= invTimeMultiplier;
+				blockMax *= invTimeMultiplier;
+			}
+
+			if (blockMax <= accTime)
+			{
+				notesPassed += blockEnd - i;
+				i = blockEnd;
+				continue;
+			}
+
+			if (blockMin > accTime + viewRegion) break;
+
+			bool beyondView = false;
+
+			for (; i < blockEnd; ++i)
+			{
+				uint32_t nTick = notesNote.tick[i];
+				uint32_t nGate = notesNote.gate[i];
+				uint8_t nNote = notesNote.GetKey(i);
+				uint16_t nTrack = notesNote.GetTrack(i);
+				uint8_t nChannel = notesNote.GetChannel(i);
+
+				double noteStart = (double)nTick;
+				double noteEnd = (double)(nTick + nGate);
+
+				if (isTimeBased)
+				{
+					noteStart *= invTimeMultiplier;
+					noteEnd *= invTimeMultiplier;
+				}
+
+				if (noteStart > accTime + viewRegion)
+				{
+					beyondView = true;
+					break;
+				}
+
+				if (noteEnd <= accTime)
+				{
+					notesPassed++;
+					continue;
+				}
+				if (noteStart <= accTime)
+				{
+					keyMetas[nNote].MarkPressed(true);
+					keyMetas[nNote].color = colors.GetColor(nTrack, nChannel);
+					keyboardDirty = true;
+					notesPassed++;
+					polyphony++;
+				}
+
+				// skip rendering this note if it's basically the same one lol
+				if (lastNote &&
+					nTick == lastTick &&
+					nNote == lastNote &&
+					nChannel == lastChannel &&
+					nTrack == lastTrack &&
+					nGate == lastGate)
+				{
+					continue;
+				}
+
+				lastTick = nTick;
+				lastNote = nNote;
+				lastChannel = nChannel;
+				lastTrack = nTrack;
+				lastGate = nGate;
+
+				renderNotes[noteID++] = RenderNote(
+					keyPos[id],
+					keyPos[id] + keyWidth[id],
+					(float)((noteStart - accTime) * invViewRegion),
+					(float)((noteEnd - accTime) * invViewRegion),
+					colors.GetColor(nTrack, nChannel) | (isBlack << 24)
+				);
+
+				if (noteID >= NOTE_BUFFER_SIZE)
+				{
+					UploadNoteBuffer(NOTE_BUFFER_SIZE);
+					batchCount++;
+					if (batchCount >= NOTES_MAX_BATCHES)
+					{
+						glFlush();
+						batchCount = 0;
+					}
+					noteID = 0;
+				}
+				notesToRender++;
+			}
+
+			if (beyondView) break;
+		}
+	}
+
+	if (noteID != 0)
+	{
+		UploadNoteBuffer(noteID);
+		batchCount++;
+	}
+
+	noteCounterInfo->notesPassed.value = static_cast<uint64_t>(notesPassed);
+	noteCounterInfo->polyphony.value = static_cast<uint64_t>(polyphony);
+
+	if (!noteCounterInfo->npsHistory.empty() && playbackSeconds < noteCounterInfo->npsHistory.back().timeSeconds)
+	{
+		noteCounterInfo->npsHistory.clear();
+	}
+
+	noteCounterInfo->npsHistory.push_back({ playbackSeconds, static_cast<uint64_t>(notesPassed) });
+	while (!noteCounterInfo->npsHistory.empty() &&
+		(playbackSeconds - noteCounterInfo->npsHistory.front().timeSeconds) > 1.0)
+	{
+		noteCounterInfo->npsHistory.pop_front();
+	}
+
+	if (!noteCounterInfo->npsHistory.empty())
+	{
+		uint64_t notesOneSecondAgo = noteCounterInfo->npsHistory.front().totalNotes;
+		uint64_t currentNotes = static_cast<uint64_t>(notesPassed);
+
+		if (currentNotes >= notesOneSecondAgo)
+		{
+			noteCounterInfo->notesPerSecond.value = currentNotes - notesOneSecondAgo;
+		}
+		else
+		{
+			noteCounterInfo->notesPerSecond.value = 0;
+		}
+	}
+	else
+	{
+		noteCounterInfo->notesPerSecond.value = 0;
+	}
+
+	lastTime = time;
+}
+
+void MIDIRenderer::UploadNoteBuffer(size_t count)
+{
+	if (!notesIBO) return;
+
+	notesIBO->Bind();
+
+	GLbitfield mapFlags = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT;
+	void* ptr = glMapBufferRange(GL_ARRAY_BUFFER, 0, count * sizeof(RenderNote), mapFlags);
+	if (ptr)
+	{
+		memcpy(ptr, renderNotes.data(), count * sizeof(RenderNote));
+		glUnmapBuffer(GL_ARRAY_BUFFER);
+	}
+
+	glDrawElementsInstanced(
+		GL_TRIANGLES,
+		6,
+		GL_UNSIGNED_INT,
+		nullptr,
+		count
+	);
+}
+
+YAML::Node MIDIRenderer::GetSettings()
+{
+	// TODO: Migrate version 1 config to new modular config
+	return YAML::Node();
+}
+
+void MIDIRenderer::LoadSettings(const YAML::Node& node)
+{
+	// TODO: Migrate version 1 config to new modular config
+}

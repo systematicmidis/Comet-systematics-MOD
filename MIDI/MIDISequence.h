@@ -1,0 +1,104 @@
+#pragma once
+
+#include <array>
+#include <vector>
+#include "MIDITrack.h"
+#include "Events/TempoEvent.h"
+#include "Events/NoteEvent.h"
+#include "Events/TimeSignatureEvent.h"
+#include <fstream>
+#include <memory>
+#include "MIDIDefs.h"
+#define NOTE_BLOCK_SIZE 1024
+
+class TempoMap;
+
+class MIDISequence
+{
+public:
+	const char* name;
+	uint16_t resolution;
+	uint16_t trackCount;
+	std::vector<MIDITrack> tracks{};
+	// Name of each note track (0-based, matching NOTE_TRACK_BIT_IDX in the packed note data).
+	// Empty when the file didn't name the track.
+	std::vector<std::string> noteTrackNames{};
+	std::vector<TempoEvent> tempos{};
+	std::vector<TimeSignatureEvent> timeSignatures{};
+	std::vector<NoteSequence> mergedNotes{};
+	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlocks{};
+	std::vector<MIDIMessageEvent> mergedEvents{};
+	std::shared_ptr<TempoMap> tempoMap = nullptr;
+	size_t noteTrackCount;
+	long long notes = 0;
+	long length = 0;
+	uint32_t longestNoteLength = 0;
+	bool timeBased = false;
+
+	MIDISequence() : MIDISequence("Unnamed") {}
+	MIDISequence(const char* name)
+		: name(name), tracks({}), tempos({}), timeSignatures({}) {}
+	~MIDISequence()
+	{
+		tracks.clear();
+		tempos.clear();
+		mergedNotes.clear();
+		timeSignatures.clear();
+		if (tempoMap) tempoMap.reset();
+	}
+
+	TempoMap* GetTempoMap()
+	{
+		return tempoMap.get();
+	}
+	
+	long GetNotes()
+	{
+		return this->notes;
+	}
+	long GetLength()
+	{
+		return this->length;
+	}
+
+	void SetLength(long length)
+	{
+		this->length = length;
+	}
+
+	double CalcLengthMilliseconds();
+
+	static void Read(std::ifstream* is, size_t size, uint8_t* buf)
+	{
+		is->read(reinterpret_cast<char*>(buf), size);
+	}
+	static long ReadVariableLengthValue(std::ifstream* is)
+	{
+		uint8_t b;
+		long value = 0L;
+		do
+		{
+			is->read(reinterpret_cast<char*>(&b), 1);
+			value = (value << 7L) | (b & 0x7F);
+		} while ((b & 0x80) != 0);
+		return value;
+	}
+	static uint32_t ToInt(uint8_t* bytes)
+	{
+		uint32_t res = 0;
+		for (int i = 0; i < 4; i++)
+		{
+			res = (res << 8) | static_cast<uint32_t>(bytes[i]);
+		}
+		return res;
+	}
+	static uint64_t ToLong(uint8_t* bytes)
+	{
+		uint64_t res = 0;
+		for (int i = 0; i < 8; i++)
+		{
+			res = (res << 8) | static_cast<uint64_t>(bytes[i]);
+		}
+		return res;
+	}
+};

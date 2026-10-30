@@ -1,0 +1,64 @@
+#pragma once
+
+#include <functional>
+#include <vector>
+#include <string>
+
+class Progress
+{
+public:
+	Progress(const char* name) : name(name)
+	{
+		bars = { };
+	}
+
+	std::string& GetName()
+	{
+		return name;
+	}
+
+	int GetBarCount()
+	{
+		return bars.size();
+	}
+
+	std::function<double()> GetBar(int index)
+	{
+		return bars[index];
+	}
+
+	virtual void Stop() { hasStopped = true; }
+
+	std::atomic<bool> hasStopped = false;
+protected:
+	void SetName(const char* name)
+	{
+		this->name = name;
+	}
+
+	void AddBar(std::function<double()> bar)
+	{
+		bars.push_back(bar);
+	}
+
+	bool RemoveBar(std::function<double()> bar)
+	{
+		for (int i = 0; i < bars.size(); i++)
+		{
+			if (bars[i].target_type() == bar.target_type())
+			{
+				bars.erase(bars.begin() + i);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void ClearBars()
+	{
+		bars.clear();
+	}
+private:
+	std::string name;
+	std::vector<std::function<double()>> bars;
+};

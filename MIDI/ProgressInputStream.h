@@ -1,0 +1,57 @@
+#pragma once
+
+#include <stdexcept>
+#include "../IO/InputStream.h"
+#include <filesystem>
+
+class ProgressInputStream : public InputStream
+{
+public:
+	ProgressInputStream(const std::string file);
+	ProgressInputStream(const std::filesystem::path& path);
+	ProgressInputStream(InputStream in);
+	ProgressInputStream(InputStream in, size_t size);
+	~ProgressInputStream()
+	{
+		Close();
+	}
+
+	void Read(uint8_t* dst, size_t size) override;
+	void Seek(size_t offset, int whence) override;
+	void Close() override
+	{
+		InputStream::Close();
+		opened = false;
+	}
+
+	size_t GetPosition() override
+	{
+		return read;
+	}
+
+	size_t GetSize()
+	{
+		return size;
+	}
+
+	double GetProgress()
+	{
+		return (double)read / (double)size;
+	}
+
+	bool DidReadAfterEos()
+	{
+		return eos;
+	}
+protected:
+	bool opened = false;
+	bool eos = false;
+	size_t read = 0;
+	size_t size = 0;
+private:
+	void ThrowEos()
+	{
+		eos = true;
+		throw std::runtime_error("End of Stream");
+	}
+};
