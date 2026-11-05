@@ -29,6 +29,7 @@
 #include "ColorPalette/ColorPaletteList.h"
 #include "MIDI/MIDILoader.h"
 #include "MIDI/MultithreadedMIDILoader.h"
+#include "IO/ArchiveLoader.h"
 #include "MIDI/CJCMCGChart.h"
 #include "../MIDI/Timer/MIDITimer.h"
 #include "App/UI/NavigationBar.h"
@@ -174,8 +175,13 @@ bool MIDIApp::IsGLReady() const
 
 std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
 {
+	// Archives are always parsed by the multi-threaded loader: extraction already puts the MIDI in
+	// memory, and it is the path that parses mapped/decompressed bytes without copying them again.
+	const std::filesystem::path filePath(reinterpret_cast<const char8_t*>(path));
+	const bool archive = ArchiveLoader::IsArchive(filePath);
+
 	std::shared_ptr<AbstractMIDILoader> loader;
-	if (config.midi.multithreadedLoading)
+	if (archive || config.midi.multithreadedLoading)
 		loader = std::make_shared<MultithreadedMIDILoader>(path);
 	else
 		loader = std::make_shared<MIDILoader>(path);
@@ -356,12 +362,17 @@ void MIDIApp::SetRenderer()
 
 	// ensure the colors are properly loaded if using images for colors
 	auto* colorList = GetColorList();
+	ColorAsset& colorAsset = this->renderer->GetColorAsset();
 	if (config.render.GetUseColorsFromImage())
 	{
 		colorList->SetPalette(config.render.paletteID);
 		auto& palette = colorList->GetCurrentPalette();
-		this->renderer->GetColorAsset().LoadColors(palette.palette, config.render.loopColors);
+		colorAsset.LoadColors(palette.palette, config.render.loopColors);
 	}
+
+	// shuffle colors!
+	if (config.render.shuffleColors) colorAsset.ShuffleColors(config.render.shuffleSeed);
+	else colorAsset.RestoreColors();
 }
 
 template void MIDIApp::SetRenderer<MIDIRendererPFA>();
@@ -633,12 +644,14 @@ void MIDIApp::UpdateNoteCounterInfo()
 	}
 }
 
-void MIDIApp::RegisterKeyPress(ImGuiKey key, bool ctrl, bool shift, bool alt)
+void MIDIApp::RegisterInput(InputState& inputState)
 {
-	MIDIPlayerConfig* config = GetConfig();
-
-	switch (key)
+	if (inputState.keyDown)
 	{
+		MIDIPlayerConfig* config = GetConfig();
+
+		switch (inputState.key)
+		{
 		case ImGuiKey_Space:
 		{
 			if (IsRendering()) return;
@@ -697,13 +710,16 @@ void MIDIApp::RegisterKeyPress(ImGuiKey key, bool ctrl, bool shift, bool alt)
 		}
 		case ImGuiKey_Enter:
 		{
-			if (!alt) return;
+			if (!inputState.alt) return;
 			mainWindow->ToggleFullscreen();
 			break;
 		}
-	default:
-		break;
+		default:
+			break;
+		}
 	}
+	
+	GetRenderer()->OnInput(inputState);
 }
 
 void MIDIApp::OnResize(int width, int height)

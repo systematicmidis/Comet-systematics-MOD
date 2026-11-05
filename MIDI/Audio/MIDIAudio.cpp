@@ -1,7 +1,13 @@
 #include "MIDIAudio.h"
 #include "AudioThread.h"
+
+#define MAESTRO_INCLUDE
+#include "MaestroEngine.h"
+
 #include "PrerenderEngine/PrerenderedEngine.h"
+#ifdef _WIN32
 #include "PrerenderEngine/BASSMIDI.h"
+#endif
 #include <iostream>
 
 MIDIAudio::MIDIAudio()
@@ -9,6 +15,7 @@ MIDIAudio::MIDIAudio()
 	midiOut = std::make_shared<MIDIOut>();
 	audioEngines[AUDIO_ENGINE_INDEX(Realtime)] = std::make_unique<AudioThread>(midiOut);
 	audioEngines[AUDIO_ENGINE_INDEX(Prerendered)] = std::make_unique<PrerenderedEngine>();
+	audioEngines[AUDIO_ENGINE_INDEX(Maestro)] = std::make_unique<MaestroEngine>();
 }
 
 void MIDIAudio::SwitchEngine(AudioEngineType engine)

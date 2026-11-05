@@ -116,7 +116,7 @@ struct MIDIPlayerConfig
 
 	struct ConfigMIDI
 	{
-		bool multithreadedLoading = false;
+		bool multithreadedLoading = true;
 		bool timeBasedLoading = false;
 		bool loadNotesOnly = false;
 		bool usePlayThread = true;
@@ -306,6 +306,8 @@ struct MIDIPlayerConfig
 		bool showCounter = true;
 		bool showStats = true;
 		bool loopColors = true;
+		bool shuffleColors = false;
+		int shuffleSeed = 0;
 		int paletteID = 0;
 	private:
 		int width = 1280;

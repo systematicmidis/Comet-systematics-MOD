@@ -4,8 +4,11 @@
 
 #ifdef _WIN32
 
-MIDIOut::MIDIOut()
+void MIDIOut::Initialize()
 {
+	if (attempted) return;
+	attempted = true;
+
 	std::cout << "Loading MIDI out" << std::endl;
 
 	omni = LoadLibraryA("OmniMIDI.dll");
@@ -20,11 +23,11 @@ MIDIOut::MIDIOut()
 		return;
 	}
 
-	Init = (KDMAPI_Init)GetProcAddress(omni, "InitializeKDMAPIStream");
+	InitStream = (KDMAPI_Init)GetProcAddress(omni, "InitializeKDMAPIStream");
 	Send = (KDMAPI_Send)GetProcAddress(omni, "SendDirectData");
 	End = (KDMAPI_Terminate)GetProcAddress(omni, "TerminateKDMAPIStream");
 
-	if (!Init || !Send || !End)
+	if (!InitStream || !Send || !End)
 	{
 		Utils::Dialogs::ShowDialog(
 			"KDMAPI warning",
@@ -34,22 +37,34 @@ MIDIOut::MIDIOut()
 
 		FreeLibrary(omni);
 		omni = nullptr;
-		Init = nullptr;
+		InitStream = nullptr;
 		Send = nullptr;
 		End = nullptr;
 		return;
 	}
 
-	if (Init) Init();
+	InitStream();
 	initialized = true;
 }
 
 MIDIOut::~MIDIOut()
 {
+	Shutdown();
+}
+
+void MIDIOut::Shutdown()
+{
 	if (initialized && End)
 		End();
 
 	if (omni) FreeLibrary(omni);
+
+	omni = nullptr;
+	InitStream = nullptr;
+	Send = nullptr;
+	End = nullptr;
+	initialized = false;
+	attempted = false;
 }
 
 void MIDIOut::SendEvent(uint32_t msg)
@@ -91,8 +106,11 @@ static void* LoadOmniMIDI()
 	return handle;
 }
 
-MIDIOut::MIDIOut()
+void MIDIOut::Initialize()
 {
+	if (attempted) return;
+	attempted = true;
+
 	std::cout << "Loading MIDI out" << std::endl;
 	handle = LoadOmniMIDI();
 	if (!handle)
@@ -120,10 +138,20 @@ MIDIOut::MIDIOut()
 
 MIDIOut::~MIDIOut()
 {
+	Shutdown();
+}
+
+void MIDIOut::Shutdown()
+{
 	if (terminateStream)
 		terminateStream();
 	if (handle)
 		dlclose(handle);
+
+	handle = nullptr;
+	sendDirectData = nullptr;
+	terminateStream = nullptr;
+	attempted = false;
 }
 
 void MIDIOut::SendEvent(uint32_t msg)

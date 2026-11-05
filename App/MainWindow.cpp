@@ -105,8 +105,9 @@ void MainWindow::InitializeDialogs()
 void MainWindow::OpenMIDIDialog()
 {
 	std::string outPath;
-	// The CJCMCG chart is handled by the Settings MIDI tab; here only real MIDI files are picked.
-	Utils::ChooseFile(outPath, "mid");
+	// The CJCMCG chart is handled by the Settings MIDI tab. Archives and compressed MIDIs are
+	// accepted too; the loader picks the MIDI inside them.
+	Utils::ChooseFile(outPath, "mid;midi;7z;xz;lzma;zip;gz;bz2;bzip2;zst;zstd;lz4;rar;tar;tgz;tbz2;txz");
 	if (outPath.empty()) return;
 	this->midiApp->LoadMIDI(outPath.c_str());
 	this->dialogManager.GetDialog<LoadingDialog>()->Open();
@@ -164,7 +165,7 @@ bool MainWindow::InitializeGLFW()
 		return false;
 	}
 
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
@@ -259,7 +260,7 @@ void MainWindow::Run()
 		if (!midiApp->IsRendering())
 		{
 			ImGui::NewFrame();
-			DetectKeyPress();
+			DetectInput();
 
 			midiApp->RunFrame();
 			RenderUI();
@@ -331,7 +332,7 @@ bool MainWindow::CanShowNavigationBar()
 	return false;
 }
 
-void MainWindow::DetectKeyPress()
+void MainWindow::DetectInput()
 {
 	// ignore key presses if any dialog is opened
 	if (dialogManager.IsAnyDialogOpened()) return;
@@ -339,14 +340,33 @@ void MainWindow::DetectKeyPress()
 	ImGuiIO& io = ImGui::GetIO();
 	for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++)
 	{
-		if (!ImGui::IsKeyPressed((ImGuiKey)key)) continue;
+		const ImGuiKey pressedKey = static_cast<ImGuiKey>(key);
+		InputState input;
+		input.key = pressedKey;
+		input.ctrl = io.KeyCtrl;
+		input.shift = io.KeyShift;
+		input.alt = io.KeyAlt;
 
-		bool ctrl = io.KeyCtrl;
-		bool shift = io.KeyShift;
-		bool alt = io.KeyAlt;
+		input.keyDown = ImGui::IsKeyPressed(pressedKey);
+		input.keyHold = ImGui::IsKeyDown(pressedKey);
+		input.keyUp = ImGui::IsKeyReleased(pressedKey);
 
-		ImGuiKey pressedKey = (ImGuiKey)key;
-		midiApp->RegisterKeyPress(pressedKey, ctrl, shift, alt);
+		if (input.keyDown || input.keyHold || input.keyUp)
+			midiApp->RegisterInput(input);
+	}
+
+	// Mouse buttons
+	for (int button = 0; button < ImGuiMouseButton_COUNT; ++button)
+	{
+		InputState input;
+		input.mouseButton = button;
+
+		input.mouseDown = ImGui::IsMouseClicked(button);
+		input.mouseHold = ImGui::IsMouseDown(button);
+		input.mouseUp = ImGui::IsMouseReleased(button);
+
+		if (input.mouseDown || input.mouseHold || input.mouseUp)
+			midiApp->RegisterInput(input);
 	}
 }
 

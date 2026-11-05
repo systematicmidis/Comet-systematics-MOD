@@ -1,4 +1,6 @@
-﻿cmake_minimum_required(VERSION 3.8)
+﻿cmake_minimum_required(VERSION 3.16)
+
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 # CMake 4 removed compatibility with projects that declare cmake_minimum_required(VERSION < 3.5),
 # and several vendored dependencies (glad, glfw, ...) still declare 3.0. Setting the accepted
@@ -12,7 +14,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
+    # Upstream needs CMake 3.16, which enables CMP0091: dependencies that default
+    # CMAKE_MSVC_RUNTIME_LIBRARY (yaml-cpp, curl) would otherwise build with the static CRT and
+    # then fail to link against Comet's /MD(d) objects. Pin the dynamic CRT for everything.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    # glfw owns its own switch: off (the default) means static CRT for glfw3.lib.
+    set(USE_MSVC_RUNTIME_LIBRARY_DLL ON CACHE BOOL "" FORCE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP2")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Zi")
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
 endif()
 
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
@@ -21,7 +32,11 @@ set(FETCHCONTENT_QUIET OFF)
 
 set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
 set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
-set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+if(WIN32)
+    set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+else()
+    set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+endif()
 
 include(FetchContent)
 
@@ -126,6 +141,145 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(json)
 
+# --- Archives and compressed files -------------------------------------------
+# libarchive reads 7z, xz, zip, gz, bz2, zst, lz4, rar and tar. Each codec is built from source here
+# too, so nothing has to be installed on the machine for a MIDI inside a .7z or .xz to load.
+set(_prev_archive_shared ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG v1.3.1
+    GIT_SHALLOW TRUE
+)
+set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zlib)
+
+FetchContent_Declare(
+    xz
+    GIT_REPOSITORY https://github.com/tukaani-project/xz.git
+    GIT_TAG v5.6.3
+    GIT_SHALLOW TRUE
+)
+set(XZ_TOOL_XZ OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_SCRIPTS OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_SYMLINKS OFF CACHE BOOL "" FORCE)
+set(XZ_NLS OFF CACHE BOOL "" FORCE)
+set(XZ_DOC OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(xz)
+
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.6
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zstd)
+
+FetchContent_Declare(
+    lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG v1.10.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+)
+set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(lz4)
+
+FetchContent_Declare(
+    bzip2
+    URL https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+    URL_HASH SHA256=ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269
+)
+FetchContent_MakeAvailable(bzip2)
+add_library(comet_bzip2 STATIC
+    ${bzip2_SOURCE_DIR}/blocksort.c
+    ${bzip2_SOURCE_DIR}/huffman.c
+    ${bzip2_SOURCE_DIR}/crctable.c
+    ${bzip2_SOURCE_DIR}/randtable.c
+    ${bzip2_SOURCE_DIR}/compress.c
+    ${bzip2_SOURCE_DIR}/decompress.c
+    ${bzip2_SOURCE_DIR}/bzlib.c
+)
+target_include_directories(comet_bzip2 PUBLIC ${bzip2_SOURCE_DIR})
+
+# libarchive probes for its codecs with try_compile(), which cannot link imported target names, so
+# its detection is switched off and the codecs are wired in directly afterwards instead.
+set(ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
+set(ENABLE_BZip2 OFF CACHE BOOL "" FORCE)
+set(ENABLE_LZMA OFF CACHE BOOL "" FORCE)
+set(ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+set(ENABLE_LZ4 OFF CACHE BOOL "" FORCE)
+set(ENABLE_LZO OFF CACHE BOOL "" FORCE)
+set(ENABLE_LIBB2 OFF CACHE BOOL "" FORCE)
+set(ENABLE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(ENABLE_MBEDTLS OFF CACHE BOOL "" FORCE)
+set(ENABLE_NETTLE OFF CACHE BOOL "" FORCE)
+set(ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
+set(ENABLE_EXPAT OFF CACHE BOOL "" FORCE)
+set(ENABLE_ICONV OFF CACHE BOOL "" FORCE)
+set(ENABLE_ACL OFF CACHE BOOL "" FORCE)
+set(ENABLE_XATTR OFF CACHE BOOL "" FORCE)
+set(ENABLE_TAR OFF CACHE BOOL "" FORCE)
+set(ENABLE_CPIO OFF CACHE BOOL "" FORCE)
+set(ENABLE_CAT OFF CACHE BOOL "" FORCE)
+set(ENABLE_UNZIP OFF CACHE BOOL "" FORCE)
+set(ENABLE_TEST OFF CACHE BOOL "" FORCE)
+set(ENABLE_WERROR OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    libarchive
+    GIT_REPOSITORY https://github.com/libarchive/libarchive.git
+    GIT_TAG v3.7.7
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(libarchive)
+
+target_include_directories(archive_static PRIVATE
+    ${zlib_SOURCE_DIR}
+    ${zlib_BINARY_DIR}
+    ${bzip2_SOURCE_DIR}
+    ${xz_SOURCE_DIR}/src/liblzma/api
+    ${zstd_SOURCE_DIR}/lib
+    ${lz4_SOURCE_DIR}/lib
+)
+target_compile_definitions(archive_static PRIVATE
+    HAVE_LIBZ=1
+    HAVE_ZLIB_H=1
+    HAVE_LIBBZ2=1
+    HAVE_BZLIB_H=1
+    HAVE_LIBLZMA=1
+    HAVE_LZMA_H=1
+    HAVE_LIBZSTD=1
+    HAVE_ZSTD_H=1
+    HAVE_LIBLZ4=1
+    HAVE_LZ4_H=1
+    HAVE_LZ4HC_H=1
+    LZMA_API_STATIC
+    # MSVC provides these as intrinsics; libarchive's configure check misses them there, and its
+    # fallback definitions then collide with the CRT (C2169).
+    HAVE_WCSCPY=1
+    HAVE_WCSLEN=1
+    HAVE_WCSCMP=1
+)
+# The codec libraries are linked into Comet instead of archive_static: adding link libraries to a
+# target from another directory needs CMP0079, and the final link resolves them just the same.
+
+set(BUILD_SHARED_LIBS ${_prev_archive_shared} CACHE BOOL "" FORCE)
+
 file(GLOB IMGUI_SRC
     ${imgui_SOURCE_DIR}/*.cpp
 )
@@ -186,7 +340,8 @@ add_executable(Comet
     stb_image_write.cpp
     tiny_obj_loader.h
     ColorPalette/ColorPaletteList.h
- "MIDI/Diagnosis/DiagnosisField.cpp" "Utils.cpp" "MIDI/Diagnosis/Diagnoses.h" "MIDI/Diagnosis/Diagnoses.cpp" "App/Diagnosis/DiagnosisPanel.h" "App/Diagnosis/DiagnosisPanel.cpp" "App/Diagnosis/DiagnosisFieldView.h" "App/Diagnosis/DiagnosisFieldView.cpp"  "IntervalThread.h" "IntervalThread.cpp" "MIDI/AbstractMIDILoader.h" "MIDI/MIDISequence.h" "MIDI/Events/MIDIMessageEvent.h" "MIDI/Events/TrackEvent.h" "MIDI/Events/TempoEvent.h" "MIDI/Events/NoteEvent.h" "MIDI/MIDISequence.cpp" "MIDI/Diagnosis/BlackMIDIDiagnosis.h" "MIDI/Diagnosis/BlackMIDIDiagnosis.cpp" "MIDI/Diagnosis/DiagnosisMessage.h" "MIDI/Diagnosis/DiagnosisException.h" "IO/BufferedByteReader.h" "IO/BufferedByteReader.cpp" "IO/InputStream.h" "IO/InputStream.cpp" "ResourcePack/ResourcePack.h" "Render/RenderUtils.h" "ResourcePack/ResourcePackInfo.h" "ResourcePack/SignatureState.h" "ResourcePack/ResourcePack.cpp" "ResourcePack/FolderResourcePack.h" "ResourcePack/FolderResourcePack.cpp" "Config/ConfigSection.h" "Config/ConfigSection.cpp" "ResourcePack/ResourcePackVerifier.h" "ResourcePack/DefaultResourcePack.h" "ResourcePack/DefaultResourcePack.cpp" "Config/MIDIPlayerConfig.h" "Render/ColorAsset.h" "Render/GPUImage.h" "Render/GPUImage.cpp" "Render/ColorAsset.cpp" "Render/MIDIRenderer.h" "Render/MIDIRenderer.cpp" "Render/RenderEngine/Shaders.h" "Render/RenderEngine/Shaders.cpp" "Render/RenderEngine/Buffers.h" "Render/RenderEngine/Buffers.cpp" "Render/Renderer/QuadDrawer.h" "Render/Renderer/PrimitiveDrawer.h" "Render/Renderer/PrimitiveDrawer.cpp" "MIDI/MIDILoader.h" "MIDI/MIDILoader.cpp" "MIDI/CJCMCGChart.h" "MIDI/CJCMCGChart.cpp" "App/Dialog/LoadingDialog.h" "App/Dialog/LoadingDialog.cpp" "MIDI/Sequence/SequenceFuncs.h" "MIDI/Sequence/SequenceFuncs.cpp" "Render/RenderView.h" "MIDI/MIDIDefs.h" "MIDI/Timer/MIDITimer.h" "MIDI/Timer/MIDITimer.cpp" "MIDI/TempoMap.h" "MIDI/TempoMap.cpp" "App/UI/NavigationBar.h" "App/UI/NavigationBar.cpp" "Render/NoteCounter/NoteCounterInfo.h" "Render/NoteCounter/NoteCounterRenderer.h" "Render/NoteCounter/NoteCounterStyles.h" "Render/NoteCounter/NoteMultiplier.h" "Render/NoteCounter/NoteCounterRenderer.cpp" "Render/Renderer/PrimitiveShaders.h" "Render/BlurredQuadRenderer.h" "App/Dialog/RenderVideoDialog.h" "App/Dialog/RenderVideoDialog.cpp" "App/VideoRender/RenderSettings.h" "FFmpeg/FFmpegPipe.h" "Render/NoteCounter/NoteCounterInfo.cpp" "App/Dialog/SettingsDialog.h" "App/Dialog/SettingsDialog.cpp" "ResourcePack/ZipResourcePack.h" "ResourcePack/ZipResourcePack.cpp" "ResourcePack/ResourcePackList.h" "ResourcePack/ResourcePackList.cpp" "FFmpeg/FFmpegGPU.h" "FFmpeg/FFmpegGPU.cpp" "FFmpeg/FFmpegCommandBuilder.h" "FFmpeg/FFmpegCommandBuilder.cpp" "App/Fonts.h" "App/Fonts.cpp" "ColorPalette/ColorPaletteList.cpp" "MIDI/Audio/MIDIOut.h" "MIDI/Audio/MIDIOut.cpp" "MIDI/Audio/AudioThread.h" "MIDI/Audio/AudioThread.cpp" "Config/MIDIPlayerConfig.cpp" "MIDI/MultithreadedMIDILoader.h" "MIDI/MultithreadedMIDILoader.cpp" "Render/MIDIRendererEnhanced.h" "Render/MIDIRendererEnhanced.cpp" "Render/Renderer/AbstractMIDIRenderer.cpp" "Render/RenderEngine/OBJMesh.h" "Render/RenderEngine/OBJMesh.cpp" "App/Models.h" "App/Models.cpp" "App/UI/Themes/Themes.h" "App/UI/Themes/Themes.cpp"  "Render/MIDIRendererMIDITrail.h" "Render/MIDIRendererMIDITrail.cpp" "MIDI/Events/TimeSignatureEvent.h" "Render/MIDIRendererChannels.h" "Render/MIDIRendererChannels.cpp" "Render/MIDIRendererPFA.h" "Render/MIDIRendererPFA.cpp" "Render/MIDIRendererVelocities.h" "Render/MIDIRendererVelocities.cpp" "Render/MIDIRendererEnhancedShaders.h" "MIDI/Audio/MIDIAudio.h" "MIDI/Audio/MIDIAudio.cpp" "MIDI/Audio/PrerenderEngine/BASSMIDI.h" "MIDI/Audio/PrerenderEngine/BASSMIDI.cpp" "MIDI/Audio/PrerenderEngine/PrerenderedEngine.h" "MIDI/Audio/PrerenderEngine/PrerenderedEngine.cpp" "App/FontList.h" "App/FontList.cpp" "App/Dialog/DialogMacros.h" "Concurrency/ThreadPool.h" "Concurrency/ThreadPool.cpp" "Render/MIDIRendererSynthesia.h" "Render/MIDIRendererSynthesia.cpp" "Render/RenderEngine/TextureArray.h" "Render/RenderEngine/TextureArray.cpp" "Render/Renderer/NoteCuller.h" "Render/Renderer/NoteCuller.cpp" "RLEvec.h" "Render/MIDIRendererCounter.cpp" "Render/NoteCounter/AbstractOverlayRenderer.h" "Render/NoteCounter/AbstractOverlayRenderer.cpp" "Render/NoteCounter/StatsOverlayRenderer.h" "Render/NoteCounter/StatsOverlayRenderer.cpp" "Render/NoteCounter/GraphOverlayRenderer.h" "Render/NoteCounter/GraphOverlayRenderer.cpp" "Render/NoteCounter/CounterChartScan.h" "App/UI/Widgets/TimeRange.h" "App/UI/Widgets/TimeRange.cpp" "App/UI/Widgets/ThinSlider.h" "App/UI/Widgets/ThinSlider.cpp" "UpdateChecker.h" "UpdateChecker.cpp" "App/Dialog/MessageDialog.h" "App/Dialog/MessageDialog.cpp" "App/Dialog/UpdateDialog.h" "App/Dialog/UpdateDialog.cpp" "Telemetry/CometLog.h" "Telemetry/CometLog.cpp" "Telemetry/CrashReporter.h" "Telemetry/CrashReporter.cpp")
+    MIDI/Audio/MaestroEngine.cpp
+    "MIDI/Diagnosis/DiagnosisField.cpp" "Utils.cpp" "MIDI/Diagnosis/Diagnoses.h" "MIDI/Diagnosis/Diagnoses.cpp" "App/Diagnosis/DiagnosisPanel.h" "App/Diagnosis/DiagnosisPanel.cpp" "App/Diagnosis/DiagnosisFieldView.h" "App/Diagnosis/DiagnosisFieldView.cpp" "IntervalThread.h" "IntervalThread.cpp" "MIDI/AbstractMIDILoader.h" "MIDI/MIDISequence.h" "MIDI/Events/MIDIMessageEvent.h" "MIDI/Events/TrackEvent.h" "MIDI/Events/TempoEvent.h" "MIDI/Events/NoteEvent.h" "MIDI/MIDISequence.cpp" "MIDI/Diagnosis/BlackMIDIDiagnosis.h" "MIDI/Diagnosis/BlackMIDIDiagnosis.cpp" "MIDI/Diagnosis/DiagnosisMessage.h" "MIDI/Diagnosis/DiagnosisException.h" "IO/BufferedByteReader.h" "IO/BufferedByteReader.cpp" "IO/InputStream.h" "IO/InputStream.cpp" "ResourcePack/ResourcePack.h" "Render/RenderUtils.h" "ResourcePack/ResourcePackInfo.h" "ResourcePack/SignatureState.h" "ResourcePack/ResourcePack.cpp" "ResourcePack/FolderResourcePack.h" "ResourcePack/FolderResourcePack.cpp" "Config/ConfigSection.h" "Config/ConfigSection.cpp" "ResourcePack/ResourcePackVerifier.h" "ResourcePack/DefaultResourcePack.h" "ResourcePack/DefaultResourcePack.cpp" "Config/MIDIPlayerConfig.h" "Render/ColorAsset.h" "Render/GPUImage.h" "Render/GPUImage.cpp" "Render/ColorAsset.cpp" "Render/MIDIRenderer.h" "Render/MIDIRenderer.cpp" "Render/RenderEngine/Shaders.h" "Render/RenderEngine/Shaders.cpp" "Render/RenderEngine/Buffers.h" "Render/RenderEngine/Buffers.cpp" "Render/Renderer/QuadDrawer.h" "Render/Renderer/PrimitiveDrawer.h" "Render/Renderer/PrimitiveDrawer.cpp" "MIDI/MIDILoader.h" "MIDI/MIDILoader.cpp" "App/Dialog/LoadingDialog.h" "App/Dialog/LoadingDialog.cpp" "MIDI/Sequence/SequenceFuncs.h" "MIDI/Sequence/SequenceFuncs.cpp" "Render/RenderView.h" "MIDI/MIDIDefs.h" "MIDI/Timer/MIDITimer.h" "MIDI/Timer/MIDITimer.cpp" "MIDI/TempoMap.h" "MIDI/TempoMap.cpp" "App/UI/NavigationBar.h" "App/UI/NavigationBar.cpp" "Render/NoteCounter/NoteCounterInfo.h" "Render/NoteCounter/NoteCounterRenderer.h" "Render/NoteCounter/NoteCounterStyles.h" "Render/NoteCounter/NoteCounterRenderer.cpp" "Render/Renderer/PrimitiveShaders.h" "Render/BlurredQuadRenderer.h" "App/Dialog/RenderVideoDialog.h" "App/Dialog/RenderVideoDialog.cpp" "App/VideoRender/RenderSettings.h" "FFmpeg/FFmpegPipe.h" "Render/NoteCounter/NoteCounterInfo.cpp" "App/Dialog/SettingsDialog.h" "App/Dialog/SettingsDialog.cpp" "ResourcePack/ZipResourcePack.h" "ResourcePack/ZipResourcePack.cpp" "ResourcePack/ResourcePackList.h" "ResourcePack/ResourcePackList.cpp" "FFmpeg/FFmpegGPU.h" "FFmpeg/FFmpegGPU.cpp" "FFmpeg/FFmpegCommandBuilder.h" "FFmpeg/FFmpegCommandBuilder.cpp" "App/Fonts.h" "App/Fonts.cpp" "ColorPalette/ColorPaletteList.cpp" "MIDI/Audio/MIDIOut.h" "MIDI/Audio/MIDIOut.cpp" "MIDI/Audio/AudioThread.h" "MIDI/Audio/AudioThread.cpp" "Config/MIDIPlayerConfig.cpp" "MIDI/MultithreadedMIDILoader.h" "MIDI/MultithreadedMIDILoader.cpp" "Render/MIDIRendererEnhanced.h" "Render/MIDIRendererEnhanced.cpp" "Render/Renderer/AbstractMIDIRenderer.cpp" "Render/RenderEngine/OBJMesh.h" "Render/RenderEngine/OBJMesh.cpp" "App/Models.h" "App/Models.cpp" "App/UI/Themes/Themes.h" "App/UI/Themes/Themes.cpp" "Render/MIDIRendererMIDITrail.h" "Render/MIDIRendererMIDITrail.cpp" "MIDI/Events/TimeSignatureEvent.h" "Render/MIDIRendererChannels.h" "Render/MIDIRendererChannels.cpp" "Render/MIDIRendererPFA.h" "Render/MIDIRendererPFA.cpp" "Render/MIDIRendererVelocities.h" "Render/MIDIRendererVelocities.cpp" "Render/MIDIRendererEnhancedShaders.h" "MIDI/Audio/MIDIAudio.h" "MIDI/Audio/MIDIAudio.cpp" "MIDI/Audio/PrerenderEngine/BASSMIDI.h" "MIDI/Audio/PrerenderEngine/BASSMIDI.cpp" "MIDI/Audio/PrerenderEngine/PrerenderedEngine.h" "MIDI/Audio/PrerenderEngine/PrerenderedEngine.cpp" "App/FontList.h" "App/FontList.cpp" "App/Dialog/DialogMacros.h" "Concurrency/ThreadPool.h" "Concurrency/ThreadPool.cpp" "Render/MIDIRendererSynthesia.h" "Render/MIDIRendererSynthesia.cpp" "Render/RenderEngine/TextureArray.h" "Render/RenderEngine/TextureArray.cpp" "Render/Renderer/NoteCuller.h" "Render/Renderer/NoteCuller.cpp" "RLEvec.h" "Render/MIDIRendererCounter.cpp" "Render/NoteCounter/AbstractOverlayRenderer.h" "Render/NoteCounter/AbstractOverlayRenderer.cpp" "Render/NoteCounter/StatsOverlayRenderer.h" "Render/NoteCounter/StatsOverlayRenderer.cpp" "App/UI/Widgets/TimeRange.h" "App/UI/Widgets/TimeRange.cpp" "App/UI/Widgets/ThinSlider.h" "App/UI/Widgets/ThinSlider.cpp" "UpdateChecker.h" "UpdateChecker.cpp" "App/Dialog/MessageDialog.h" "App/Dialog/MessageDialog.cpp" "MIDI/CJCMCGChart.h" "MIDI/CJCMCGChart.cpp" "Render/NoteCounter/NoteMultiplier.h" "Render/NoteCounter/GraphOverlayRenderer.h" "Render/NoteCounter/GraphOverlayRenderer.cpp" "Render/NoteCounter/CounterChartScan.h" "App/Dialog/UpdateDialog.h" "App/Dialog/UpdateDialog.cpp" "Telemetry/CometLog.h" "Telemetry/CometLog.cpp" "Telemetry/CrashReporter.h" "Telemetry/CrashReporter.cpp")
 
 target_precompile_headers(Comet PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/pch.h"
@@ -206,6 +361,17 @@ set_source_files_properties(
     ${imgui_knobs_SOURCE_DIR}/imgui-knobs.cpp
 )
 
+target_sources(Comet PRIVATE
+    IO/MappedFile.h
+    IO/MappedFile.cpp
+    IO/ArchiveLoader.h
+    IO/ArchiveLoader.cpp
+)
+
+# libarchive's headers import their functions as DLL symbols unless this is set for a static build.
+target_compile_definitions(Comet PRIVATE LIBARCHIVE_STATIC)
+target_include_directories(Comet PRIVATE ${libarchive_SOURCE_DIR}/libarchive)
+
   target_include_directories(Comet PRIVATE
     ${imgui_knobs_SOURCE_DIR}
  )
@@ -223,6 +389,12 @@ target_link_libraries(Comet PRIVATE
     rtmidi
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    archive_static
+    zlibstatic
+    comet_bzip2
+    liblzma
+    libzstd_static
+    lz4_static
 )
 
 if(WIN32)

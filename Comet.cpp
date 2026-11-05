@@ -5,6 +5,8 @@
 #include <cstring>
 #include <string>
 #include <curl/curl.h>
+#include <filesystem>
+#include "Utils.h"
 
 #ifndef COMET_BUILD_CONFIG
 #define COMET_BUILD_CONFIG "unknown"
@@ -28,6 +30,16 @@ int main(int argc, char** argv)
 {
 	// Capture Comet's own console output from the very start so a crash report carries context.
 	CometLog::Install();
+
+	// find where Comet is and set the current dir to that so it can find the assets even if
+	// it was launched from somewhere else
+	std::filesystem::path exeDir = Utils::GetExecutableDirectory();
+	if (!exeDir.empty())
+	{
+		std::error_code ec;
+		std::filesystem::current_path(exeDir, ec);
+		if (ec) std::cerr << "Failed to set working directory: " << ec.message() << std::endl;
+	}
 
 	// After a crash Comet relaunches itself with this flag to upload the queued report. That
 	// helper must not open a window, load a config or install crash handlers of its own.

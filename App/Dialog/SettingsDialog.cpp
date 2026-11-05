@@ -82,42 +82,92 @@ namespace
 	const ImVec4 WARNING_COLOR(1.0f, 0.45f, 0.35f, 1.0f);
 }
 
+namespace
+{
+	template <typename Enum, typename DrawContentFn>
+	void DrawSubTabs(const char* id, const char* heading,
+		Enum& selected, float sidebarWidth,
+		std::initializer_list<std::pair<const char*, Enum>> tabs,
+		DrawContentFn&& drawContent)
+	{
+		ImGui::PushID(id);
+
+		// Left sidebar
+		ImGui::BeginChild("Sidebar", ImVec2(sidebarWidth, 0.0f),
+			ImGuiChildFlags_Borders);
+
+		{
+			const ImVec4 headingColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+
+			ImGui::TextColored(
+				ImVec4(headingColor.x, headingColor.y, headingColor.z, 0.5f), "%s", heading);
+
+			ImGui::Spacing();
+
+			for (const auto& [label, value] : tabs)
+			{
+				if (ImGui::Selectable(label, selected == value)) selected = value;
+			}
+		}
+		ImGui::EndChild();
+
+		ImGui::SameLine();
+
+		// Right content panel
+		ImGui::BeginChild("Content", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+		{
+			drawContent();
+		}
+		ImGui::EndChild();
+
+		ImGui::PopID();
+	}
+}
+
 void SettingsDialog::DrawContent()
 {
-	if (ImGui::BeginTabBar("MainTabs"))
+	const float footerHeight =
+		ImGui::GetFrameHeightWithSpacing() + 2.0f * ImGui::GetStyle().ItemSpacing.y;
+
+	if (ImGui::BeginChild("SettingsBody", ImVec2(0.0, -footerHeight), ImGuiChildFlags_None))
 	{
-		if (ImGui::BeginTabItem("App"))
+		if (ImGui::BeginTabBar("MainTabs"))
 		{
-			DrawAppTab();
+			if (ImGui::BeginTabItem("App"))
+			{
+				DrawAppTab();
 
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("Visual"))
-		{
-			DrawVisualTab();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Visual"))
+			{
+				DrawVisualTab();
 
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("Audio"))
-		{
-			DrawAudioTab();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Audio"))
+			{
+				DrawAudioTab();
 
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("MIDI"))
-		{
-			DrawMIDITab();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("MIDI"))
+			{
+				DrawMIDITab();
 
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("Multiplier"))
-		{
-			DrawMultiplierTab();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Multiplier"))
+			{
+				DrawMultiplierTab();
 
-			ImGui::EndTabItem();
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
 		}
-		ImGui::EndTabBar();
 	}
+
+	ImGui::EndChild();
 	ImGui::Separator();
 	if (ImGui::Button("Apply & Close"))
 	{
@@ -133,11 +183,27 @@ void SettingsDialog::DrawAppTab()
 	auto config = app->GetConfig();
 	ThemesList* themesList = app->GetThemeList();
 
-	if (ImGui::BeginChild("##scrollArea", ImVec2(0, 400), true, ImGuiWindowFlags_HorizontalScrollbar))
+	enum AppSubTab
 	{
-		if (ImGui::BeginTabBar("AppTabs"))
-		{
-			if (ImGui::BeginTabItem("General"))
+		General,
+		Theme,
+		Navigation,
+		CrashReports
+	};
+
+	static AppSubTab appSubTab = General;
+
+	DrawSubTabs("AppSettings", "APP SETTINGS",
+		appSubTab, 200.0f, {
+			{ "General", General },
+			{ "Theme", Theme },
+			{ "Navigation", Navigation },
+			{ "Crash Reports", CrashReports }
+		},
+		[&] {
+			switch (appSubTab)
+			{
+			case General:
 			{
 				SECTION_HEADER("Rendering");
 
@@ -145,14 +211,14 @@ void SettingsDialog::DrawAppTab()
 				{
 					SETUP_SECTION;
 					SECTION_ENTRY(SECTION_LABEL("VSync"),
-					{
-						bool vsync = config->render.GetVSync();
-						if (ImGui::Checkbox("##vsync", &vsync))
 						{
-							config->render.SetVSync(vsync);
-							glfwSwapInterval(vsync);
-						}
-					});
+							bool vsync = config->render.GetVSync();
+							if (ImGui::Checkbox("##vsync", &vsync))
+							{
+								config->render.SetVSync(vsync);
+								glfwSwapInterval(vsync);
+							}
+						});
 
 					SECTION_ENTRY({ SECTION_LABEL("FPS Limit"); ImGui::SetItemTooltip("When set to 0 then the FPS will be uncapped"); },
 						{
@@ -162,23 +228,23 @@ void SettingsDialog::DrawAppTab()
 								config->render.SetFPSLimit(fpsLimit);
 							}
 						});
-					END_SECTION;
+						END_SECTION;
 				}
 
-				ImGui::EndTabItem();
+				break;
 			}
-			if (ImGui::BeginTabItem("Theme"))
+			case Theme:
 			{
 				size_t themeIdx = 0;
+
 				if (ImGui::Button("Reload theme list"))
-				{
 					themesList->ReloadThemesList();
-				}
+
 				ImGui::SameLine();
+
 				if (ImGui::Button("Open themes folder"))
-				{
 					themesList->OpenThemeListFolder();
-				}
+
 				ImGui::Separator();
 
 				for (const auto& theme : themesList->GetThemesList())
@@ -247,14 +313,15 @@ void SettingsDialog::DrawAppTab()
 					ImGui::PopID();
 					themeIdx++;
 				}
-				ImGui::EndTabItem();
+
+				break;
 			}
-			if (ImGui::BeginTabItem("Navigation"))
+			case Navigation:
 			{
 				BEGIN_SECTION("##navi")
 				{
 					SETUP_SECTION;
-					
+
 					SECTION_ENTRY(
 						TABLE_LABEL_TOOLTIP(
 							"Always hide navigation bar",
@@ -288,17 +355,16 @@ void SettingsDialog::DrawAppTab()
 					END_SECTION;
 				}
 
-				ImGui::EndTabItem();
+				break;
 			}
-			if (ImGui::BeginTabItem("Crash Reports"))
+			case CrashReports:
 			{
 				DrawCrashReportsTab();
-				ImGui::EndTabItem();
+
+				break;
 			}
-			ImGui::EndTabBar();
-		}
-	}
-	ImGui::EndChild();
+			}
+		});
 }
 
 void SettingsDialog::ApplyCrashConfiguration(bool saveNow)
@@ -447,11 +513,25 @@ void SettingsDialog::DrawVisualTab()
 	ImGui::Text("These settings will also apply when rendering videos!");
 	ImGui::Separator();
 
-	if (ImGui::BeginChild("##scrollArea", ImVec2(0, 400), true, ImGuiWindowFlags_HorizontalScrollbar))
+	enum VisualSubTab
 	{
-		if (ImGui::BeginTabBar("VisualTabs"))
-		{
-			if (ImGui::BeginTabItem("Renderer"))
+		Renderer,
+		NoteColors,
+		CounterAndStats
+	};
+
+	static VisualSubTab visualSubTab = Renderer;
+
+	DrawSubTabs("VisualSettings", "VISUAL SETTINGS",
+		visualSubTab, 160.0f, {
+			{ "Renderer", Renderer },
+			{ "Note Colors", NoteColors },
+			{ "Counter & Stats", CounterAndStats }
+		},
+		[&] {
+			switch (visualSubTab)
+			{
+			case Renderer:
 			{
 				MIDIPlayerConfig* config = app->GetConfig();
 				RendererType currRenderer = config->render.GetCurrentRenderer();
@@ -476,7 +556,7 @@ void SettingsDialog::DrawVisualTab()
 							std::string currentRenderer = ToString(currRenderer);
 							if (ImGui::BeginCombo("##rendererCombo", currentRenderer.c_str()))
 							{
-								
+
 								RENDERER_COMBO_ENTRY(RendererType::PFA, MIDIRendererPFA);
 								RENDERER_COMBO_ENTRY(RendererType::Synthesia, MIDIRendererSynthesia);
 								RENDERER_COMBO_ENTRY(RendererType::Textured, MIDIRenderer);
@@ -491,11 +571,10 @@ void SettingsDialog::DrawVisualTab()
 						}
 					);
 
-					#undef RENDERER_COMBO_ENTRY
+#undef RENDERER_COMBO_ENTRY
 
 					END_SECTION;
 				}
-
 
 				ImGui::Spacing();
 
@@ -504,9 +583,9 @@ void SettingsDialog::DrawVisualTab()
 					app->GetRenderer()->RenderSettings();
 				}
 
-				ImGui::EndTabItem();
+				break;
 			}
-			if (ImGui::BeginTabItem("Note Colors"))
+			case NoteColors:
 			{
 				ColorPaletteList* colorList = app->GetColorList();
 				auto* config = app->GetConfig();
@@ -528,12 +607,12 @@ void SettingsDialog::DrawVisualTab()
 								setColorsFromPack = true;
 							}
 
-							if (ImGui::RadioButton("Color list", config->render.GetUseColorsFromImage()))
-							{
-								config->render.SetUseColorsFromImage(true);
-								setColorsFromList = true;
-							}
-						);
+						if (ImGui::RadioButton("Color list", config->render.GetUseColorsFromImage()))
+						{
+							config->render.SetUseColorsFromImage(true);
+							setColorsFromList = true;
+						}
+							);
 
 						if (setColorsFromList)
 						{
@@ -583,7 +662,7 @@ void SettingsDialog::DrawVisualTab()
 
 					ImGui::BeginChild("PaletteScroll", ImVec2(0, 260), true, ImGuiWindowFlags_HorizontalScrollbar);
 					ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 8));
-					
+
 					for (size_t i = 0; i < palettes.size(); ++i)
 					{
 						const auto& palette = palettes[i];
@@ -658,16 +737,41 @@ void SettingsDialog::DrawVisualTab()
 								ColorAsset& colorAsset = app->GetRenderer()->GetColorAsset();
 								colorAsset.LoadColors(currPalette.palette, config->render.loopColors);
 							}
-						);
+								);
+
+						SECTION_ENTRY(
+							SECTION_LABEL("Shuffle colors"),
+							if (ImGui::Checkbox("##shuffleColors", &config->render.shuffleColors))
+							{
+								ColorAsset& colorAsset = app->GetRenderer()->GetColorAsset();
+								if (config->render.shuffleColors)
+									colorAsset.ShuffleColors((uint32_t)config->render.shuffleSeed);
+								else
+									colorAsset.RestoreColors();
+							}
+								);
+
+						if (config->render.shuffleColors)
+						{
+							SECTION_ENTRY(
+								SECTION_LABEL("Seed"),
+								if (ImGui::InputInt("##shuffleSeed", &config->render.shuffleSeed))
+								{
+									if (config->render.shuffleSeed < 0) config->render.shuffleSeed = 0;
+									ColorAsset& colorAsset = app->GetRenderer()->GetColorAsset();
+									if (config->render.shuffleColors) colorAsset.ShuffleColors((uint32_t)config->render.shuffleSeed);
+								}
+									);
+						}
 
 						END_SECTION;
 					}
 					ImGui::EndDisabled();
 				}
 
-				ImGui::EndTabItem();
+				break;
 			}
-			if (ImGui::BeginTabItem("Note Counter / Stats"))
+			case CounterAndStats:
 			{
 				MIDIPlayerConfig* config = app->GetConfig();
 				NoteCounterInfo* counter = app->GetNoteCounterInfo();
@@ -1010,13 +1114,10 @@ void SettingsDialog::DrawVisualTab()
 					END_SECTION;
 				}
 
-				ImGui::EndTabItem();
+				break;
 			}
-		}
-		ImGui::EndTabBar();
-	}
-
-	ImGui::EndChild();
+			}
+		});
 }
 
 void SettingsDialog::DrawAudioTab()
@@ -1031,7 +1132,7 @@ void SettingsDialog::DrawAudioTab()
 		SECTION_ENTRY(
 			SECTION_LABEL("Audio engine"),
 			{
-				AudioEngineList & engineList = midiAudio->GetEngineList();
+				AudioEngineList& engineList = midiAudio->GetEngineList();
 				size_t engineIndex = 0;
 				for (auto& engine : engineList)
 				{

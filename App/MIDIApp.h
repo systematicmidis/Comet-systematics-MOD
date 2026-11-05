@@ -38,6 +38,8 @@ class MIDISequence;
 // pulling in the rest of imgui.h.
 enum ImGuiKey : int;
 
+struct InputState;
+
 class MIDIApp
 {
 public:
@@ -59,7 +61,7 @@ public:
 	void UnloadMIDI();
 	void UpdatePendingSequence();
 	void RenderMIDIVideo(const RenderSettings& renderSettings);
-	void RegisterKeyPress(ImGuiKey key, bool ctrl, bool shift, bool alt);
+	void RegisterInput(InputState& inputState);
 
 	// Pushes everything a crash report should know about the current session (crash-report
 	// settings, a snapshot of the config, loaded MIDI details) into the crash reporter. Call it

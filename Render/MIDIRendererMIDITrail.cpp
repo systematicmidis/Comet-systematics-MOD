@@ -1,5 +1,6 @@
 #include "MIDIRendererMIDITrail.h"
 #include "App/MIDIApp.h"
+#include "App/MainWindow.h"
 #include "MIDI/TempoMap.h"
 #include "Utils.h"
 #include <algorithm>
@@ -586,54 +587,55 @@ void MIDIRendererMIDITrail::Initialize()
 			1, 0, blackKeyEnd
 		};
 
+		// changed so coloring looks better...
 		std::array<float, 32> colors = {
 			// front
+			0.9f,
 			0.95f,
-			1.00f,
-			1.00f,
 			0.95f,
+			0.9f,
 
 			// top (bright front -> much darker rear)
 			1.00f,
-			0.42f,
-			0.42f,
+			0.94f,
+			0.94f,
 			1.00f,
 
 			// left
-			0.88f,
-			1.00f,
-			0.35f,
-			0.18f,
+			0.8f,
+			0.8f,
+			0.9f,
+			0.8f,
 
 			// right
-			0.88f,
-			1.00f,
-			0.35f,
-			0.18f,
+			0.8f,
+			0.8f,	
+			0.9f,
+			0.8f,
 
 			// back
-			0.12f,
-			0.12f,
-			0.12f,
-			0.12f,
+			0.9f,
+			0.9f,
+			0.9f,
+			0.9f,
 
 			// left2
-			0.40f,
-			0.80f,
-			0.15f,
-			0.06f,
+			0.8f,
+			0.8f,
+			0.8f,
+			0.8f,
 
 			// right2
-			0.40f,
-			0.80f,
-			0.15f,
-			0.06f,
+			0.8f,
+			0.8f,
+			0.8f,
+			0.8f,
 
 			// front2
-			0.95f,
-			1.00f,
-			1.00f,
-			0.95f,
+			0.9f,
+			1.0f,
+			1.0f,
+			0.9f,
 		};
 
 		blackKeyColVBO = std::make_unique<Buffer>(GL_ARRAY_BUFFER);
@@ -871,6 +873,66 @@ void MIDIRendererMIDITrail::LoadSequence(std::shared_ptr<MIDISequence> sequence)
 		id = 0;
 }
 
+// highly requested, but here you lads go!
+void MIDIRendererMIDITrail::OnInput(InputState& input)
+{
+	double mouseX = ImGui::GetMousePos().x;
+	double mouseY = ImGui::GetMousePos().y;
+
+	if (input.mouseButton == ImGuiMouseButton_Right)
+	{
+		if (input.mouseDown)
+		{
+			isRotatingCamera = true;
+			lastMouseX = mouseX;
+			lastMouseY = mouseY;
+		}
+		else if (input.mouseUp)
+		{
+			isRotatingCamera = false;
+		}
+	}
+
+	if (isRotatingCamera && input.mouseHold)
+	{
+		double deltaX = mouseX - lastMouseX;
+		double deltaY = mouseY - lastMouseY;
+
+		lastMouseX = mouseX;
+		lastMouseY = mouseY;
+
+		// adjust pitch (X rotation) and yaw (Y rotation)
+		settings.cameraRotation.y += static_cast<float>(deltaX) * mouseSensitivity; // yaw
+		settings.cameraRotation.x += static_cast<float>(deltaY) * mouseSensitivity; // pitch
+		settings.cameraRotation.x = std::clamp(settings.cameraRotation.x, -89.0f, 89.0f);
+	}
+	
+	if (isRotatingCamera && input.keyHold)
+	{
+		// calculate forward and right vectors from current rotation
+		float yawRad = glm::radians(settings.cameraRotation.y);
+		float pitchRad = glm::radians(settings.cameraRotation.x);
+
+		glm::vec3 front;
+		front.x = -cos(pitchRad) * sin(yawRad);
+		front.y = sin(pitchRad);
+		front.z = cos(pitchRad) * cos(yawRad);
+		front = glm::normalize(front);
+
+		glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0.0f, 1.0f, 0.0f)));
+		glm::vec3 up = glm::normalize(glm::cross(right, front));
+
+		float velocity = moveSpeed * static_cast<float>(lastDelta);
+
+		if (input.key == ImGuiKey_W) settings.cameraPos -= front * velocity;
+		if (input.key == ImGuiKey_S) settings.cameraPos += front * velocity;
+		if (input.key == ImGuiKey_A) settings.cameraPos += right * velocity;
+		if (input.key == ImGuiKey_D) settings.cameraPos -= right * velocity;
+		if (input.key == ImGuiKey_E) settings.cameraPos += up * velocity;
+		if (input.key == ImGuiKey_Q) settings.cameraPos -= up * velocity;
+	}
+}
+
 void MIDIRendererMIDITrail::Render(double deltaTime)
 {
 	MIDIPlayerConfig* config = app->GetConfig();
@@ -926,6 +988,8 @@ void MIDIRendererMIDITrail::Render(double deltaTime)
 	glDepthFunc(GL_LESS);
 	glDisable(GL_DEPTH_TEST);
 	sceneFramebuffer->Unbind();
+
+	lastDelta = deltaTime;
 }
 
 void MIDIRendererMIDITrail::RenderSettings()
@@ -1019,7 +1083,7 @@ void MIDIRendererMIDITrail::RenderSettings()
 				SECTION_ENTRY(SECTION_LABEL("Front render cutoff"),
 					{
 						float frontRenderCutuff = settings.frontRenderCutoff;
-						if (ImGui::SliderFloat("##frontRenderCutoff", &settings.frontRenderCutoff, 1.0f, 40.0f))
+						if (ImGui::SliderFloat("##frontRenderCutoff", &frontRenderCutuff, 1.0f, 40.0f))
 						{
 							settings.frontRenderCutoff = std::clamp(frontRenderCutuff, 1.0f, 40.0f);
 							updateSeparatorLines = true;
@@ -1425,7 +1489,7 @@ void MIDIRendererMIDITrail::RenderNotes()
 					? (double)(notesNote.tick[prev] + notesNote.gate[prev]) * invTimeMultiplier
 					: (double)(notesNote.tick[prev] + notesNote.gate[prev]);
 
-				if (noteEnd <= accTime) break;
+				if (noteEnd <= backCutoffTime) break;
 				--noteBegin;
 			}
 		}
