@@ -187,6 +187,7 @@ std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
 		loader = std::make_shared<MIDILoader>(path);
 
 	loader->SetLoadOnlyNotes(config.midi.loadNotesOnly);
+	loader->SetLayeredDedupe(config.layeredDedupe.deduplicateRepeatedTracks, config.layeredDedupe.assumeLayerRepeats);
 	return loader;
 }
 
@@ -197,6 +198,12 @@ void MIDIApp::LoadMIDI(const char* path)
 	if (loading) return;
 	UnloadMIDI();
 	loading.store(true);
+
+	{
+		std::lock_guard<std::mutex> errorLock(loadErrorMutex);
+		hasLoadError = false;
+		loadError.clear();
+	}
 	std::shared_ptr<AbstractMIDILoader> loader = CreateLoader(path);
 	prog = loader;
 
@@ -211,9 +218,18 @@ void MIDIApp::LoadMIDI(const char* path)
 
 			std::cout << "Loaded in " << (endMs - startMs) << "ms" << std::endl;
 		}
+		catch (const std::bad_alloc&)
+		{
+			std::cout << "Ran out of memory while loading the MIDI." << std::endl;
+			this->SetLoadError("Comet ran out of memory while loading this MIDI. It needs more memory than "
+				"this machine has free.");
+			this->loading.store(false);
+			return;
+		}
 		catch (const std::runtime_error& e)
 		{
 			std::cout << "An error occured while loading the MIDI.\n" << e.what() << std::endl;
+			this->SetLoadError(e.what());
 			this->loading.store(false);
 			return;
 		}
@@ -271,6 +287,24 @@ void MIDIApp::ClearCounterSource()
 	counterScan = CounterChartScan{};
 	config.midi.cjcmcgPath.clear();
 	SaveSettings();
+}
+
+void MIDIApp::SetLoadError(const std::string& message)
+{
+	std::lock_guard<std::mutex> lock(loadErrorMutex);
+	loadError = message;
+	hasLoadError = true;
+}
+
+bool MIDIApp::ConsumeLoadError(std::string& message)
+{
+	std::lock_guard<std::mutex> lock(loadErrorMutex);
+	if (!hasLoadError) return false;
+
+	message = loadError;
+	hasLoadError = false;
+	loadError.clear();
+	return true;
 }
 
 void MIDIApp::UnloadMIDI()

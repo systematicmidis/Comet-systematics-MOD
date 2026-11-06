@@ -141,6 +141,15 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			this->multiplier = multiplier;
 		}
 
+		std::optional<ConfigSection> dedupeSec = config->GetSection("layeredDeDupe");
+		if (dedupeSec)
+		{
+			ConfigLayeredDeDupe layeredDedupe;
+			layeredDedupe.deduplicateRepeatedTracks = dedupeSec->GetBoolean("deduplicateRepeatedTracks", true);
+			layeredDedupe.assumeLayerRepeats = dedupeSec->GetBoolean("assumeLayerRepeats", true);
+			this->layeredDedupe = layeredDedupe;
+		}
+
 		std::optional<ConfigSection> crashSec = config->GetSection("crashReports");
 		if (crashSec)
 		{
@@ -249,6 +258,9 @@ void MIDIPlayerConfig::SaveConfig()
 	config["multiplier"]["unmultipliedTracks"] = YAML::Node(YAML::NodeType::Sequence);
 	for (uint16_t track : multiplier.unmultipliedTracks)
 		config["multiplier"]["unmultipliedTracks"].push_back((int)track);
+
+	config["layeredDeDupe"]["deduplicateRepeatedTracks"] = layeredDedupe.deduplicateRepeatedTracks;
+	config["layeredDeDupe"]["assumeLayerRepeats"] = layeredDedupe.assumeLayerRepeats;
 
 	config["crashReports"]["enabled"] = crashReports.enabled;
 

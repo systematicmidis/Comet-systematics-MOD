@@ -57,6 +57,17 @@ public:
 		std::string detail;
 	};
 
+	// The exact source tree of the branch as it is right now, for building an update locally.
+	struct SourcePackage
+	{
+		bool ok = false;
+		std::string sha;
+		std::string zipUrl; // codeload archive of that commit
+		std::string error;
+	};
+
+	static SourcePackage ResolvePackage(Source source);
+
 	static constexpr int SOURCE_COUNT = 2;
 	static const SourceInfo& GetSourceInfo(Source source);
 

@@ -188,6 +188,18 @@ struct MIDIPlayerConfig
 		}
 	};
 
+	// Layered DeDupe: files that store the same layer/track data more than once. Neither option
+	// changes what the song contains - a repeated track is still fully loaded - it only avoids
+	// decoding the same bytes a second time.
+	struct ConfigLayeredDeDupe
+	{
+		// Parse a repeated track chunk once and copy the parsed result for its repeats.
+		bool deduplicateRepeatedTracks = true;
+		// Skip the byte-for-byte comparison: a chunk whose size matches an earlier one is taken as a
+		// repeat of it. Fast, and exact unless two different tracks happen to be the same size.
+		bool assumeLayerRepeats = true;
+	};
+
 	// Crash reporting. The destination is compiled into the app (CrashReporter::DISCORD_WEBHOOK_URL),
 	// so there is no URL here for a user or a config file to change; only the on/off switch lives in
 	// config. Nothing is captured or sent until the user opts in.
@@ -341,6 +353,7 @@ struct MIDIPlayerConfig
 	ConfigOverlayInfo overlayInfo{};
 	ConfigGraph graph{};
 	ConfigMultiplier multiplier{};
+	ConfigLayeredDeDupe layeredDedupe{};
 	ConfigCrashReports crashReports{};
 
 	YAML::Node audioSettings;

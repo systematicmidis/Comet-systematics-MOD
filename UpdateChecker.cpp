@@ -142,6 +142,47 @@ const UpdateChecker::SourceInfo& UpdateChecker::GetSourceInfo(Source source)
 	return SOURCES[index];
 }
 
+UpdateChecker::SourcePackage UpdateChecker::ResolvePackage(Source source)
+{
+	const SourceInfo& info = GetSourceInfo(source);
+	SourcePackage package;
+
+	const HttpResponse response = HttpGet("https://api.github.com/repos/" + std::string(info.repo) +
+		"/commits/" + info.branch);
+
+	if (response.code != CURLE_OK)
+	{
+		package.error = "Could not reach GitHub.";
+		return package;
+	}
+
+	if (response.status != 200)
+	{
+		package.error = "GitHub returned HTTP " + std::to_string(response.status) + " for the " +
+			std::string(info.branch) + " branch.";
+		return package;
+	}
+
+	auto json = nlohmann::json::parse(response.body, nullptr, false);
+	if (json.is_discarded())
+	{
+		package.error = "GitHub sent back something that isn't valid JSON.";
+		return package;
+	}
+
+	package.sha = json.value("sha", "");
+	if (package.sha.empty())
+	{
+		package.error = "GitHub did not return a commit for the " + std::string(info.branch) + " branch.";
+		return package;
+	}
+
+	// Building the exact commit that was reported keeps a moving branch from changing mid-download.
+	package.zipUrl = "https://codeload.github.com/" + std::string(info.repo) + "/zip/" + package.sha;
+	package.ok = true;
+	return package;
+}
+
 UpdateChecker::UpdateCheckResult UpdateChecker::CheckForUpdate(Source source)
 {
 	const SourceInfo& info = GetSourceInfo(source);

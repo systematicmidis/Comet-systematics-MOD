@@ -263,6 +263,19 @@ void MainWindow::Run()
 			DetectInput();
 
 			midiApp->RunFrame();
+
+			// A load that failed has a reason to show; without this the loading dialog just vanished
+			// and the only trace was a line in the console.
+			{
+				std::string loadError;
+				if (midiApp->ConsumeLoadError(loadError))
+				{
+					auto* messageDialog = dialogManager.GetDialog<MessageDialog>();
+					if (messageDialog)
+						messageDialog->Open("Could not load MIDI", loadError);
+				}
+			}
+
 			RenderUI();
 			dialogManager.DrawDialogs();
 

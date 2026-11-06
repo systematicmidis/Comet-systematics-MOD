@@ -218,16 +218,53 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	const size_t trackCount = rawChunks.size();
 	std::vector<ParsedTrack> parsedTrackResults(trackCount);
 
+	// Layered DeDupe. Files that repeat a layer store the same track chunk twice; decoding it again
+	// is pure waste. Each distinct chunk is parsed once and copied for its repeats, so the repeats
+	// are still loaded as notes (the song is unchanged) but never decoded twice.
+	std::vector<size_t> parsedOrigin(trackCount);
+	for (size_t i = 0; i < trackCount; i++)
+		parsedOrigin[i] = i;
+
+	size_t uniqueTrackCount = trackCount;
+
+	if (deduplicateRepeatedTracks && trackCount > 1)
+	{
+		for (size_t i = 0; i < trackCount; i++)
+		{
+			const RawTrackChunk& chunk = rawChunks[i];
+
+			for (size_t prev = 0; prev < i; prev++)
+			{
+				const RawTrackChunk& earlier = rawChunks[parsedOrigin[prev]];
+				if (earlier.length != chunk.length) continue;
+
+				// With the size assumption on, a matching length counts as a repeat: comparing two
+				// multi-megabyte chunks byte for byte would cost as much as parsing them.
+				if (assumeLayerRepeats || chunk.length == 0
+					|| std::memcmp(earlier.data, chunk.data, chunk.length) == 0)
+				{
+					parsedOrigin[i] = parsedOrigin[prev];
+					uniqueTrackCount--;
+					break;
+				}
+			}
+		}
+
+		if (uniqueTrackCount < trackCount)
+			std::cout << "  Layered DeDupe: " << (trackCount - uniqueTrackCount)
+				<< " repeated track(s) will not be decoded again" << std::endl;
+	}
+
 	if (trackCount > 0)
 	{
 		unsigned int hardwareThreads = std::thread::hardware_concurrency();
 		if (hardwareThreads == 0) hardwareThreads = 16;
 		const size_t numThreads = std::min<size_t>(trackCount, hardwareThreads);
 
-		AddBar([this, trackCount]()
+		AddBar([this, uniqueTrackCount]()
 			{
-				return trackCount == 0 ? 1.0
-					: (double)tracksProcessed.load(std::memory_order_relaxed) / (double)trackCount;
+				return uniqueTrackCount == 0 ? 1.0
+					: (double)tracksProcessed.load(std::memory_order_relaxed) / (double)uniqueTrackCount;
 			});
 
 		std::atomic<size_t> nextTrack{ 0 };
@@ -236,12 +273,14 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		for (size_t workerIdx = 0; workerIdx < numThreads; workerIdx++)
 		{
-			workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, trackCount]()
+			workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, &parsedOrigin, trackCount]()
 				{
 					size_t idx;
 					while ((idx = nextTrack.fetch_add(1, std::memory_order_relaxed)) < trackCount)
 					{
 						if (!running) break;
+						// A repeat is filled in from its origin once every original has been parsed.
+						if (parsedOrigin[idx] != idx) continue;
 						parsedTrackResults[idx] = ParseTrackData(rawChunks[idx]);
 						tracksProcessed.fetch_add(1, std::memory_order_relaxed);
 					}
@@ -251,6 +290,13 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		for (auto& worker : workers)
 		{
 			if (worker.joinable()) worker.join();
+		}
+
+		// Origins always sit before their repeats, so one ascending pass fills every copy.
+		for (size_t i = 0; i < trackCount; i++)
+		{
+			if (parsedOrigin[i] != i)
+				parsedTrackResults[i] = parsedTrackResults[parsedOrigin[i]];
 		}
 
 		ClearBars();

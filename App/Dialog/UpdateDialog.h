@@ -2,12 +2,19 @@
 
 #include "App/UI/Dialog.h"
 #include "UpdateChecker.h"
+#include "UpdateBuilder.h"
 
-// Help > Check for Updates: pick which branch to check, then show what came back.
+#include <memory>
+
+// Help > Check for Updates: pick which branch to check, then either open it on GitHub or build it
+// here and install the result.
 class UpdateDialog : public Dialog
 {
 public:
-	explicit UpdateDialog(UpdateChecker* checker) : Dialog("updateDialog"), checker(checker) {}
+	explicit UpdateDialog(UpdateChecker* checker) : Dialog("updateDialog"), checker(checker)
+	{
+		builder = UpdateBuilder::Create();
+	}
 
 	const char* GetTitle() override { return "Check for Updates"; }
 	void DrawContent() override;
@@ -15,9 +22,11 @@ public:
 
 private:
 	void Check();
+	void DrawBuildSection();
 
 	UpdateChecker* checker = nullptr;
 	UpdateChecker::Source selectedSource = UpdateChecker::Source::Official;
 	UpdateChecker::UpdateCheckResult result{};
 	bool hasResult = false;
+	std::shared_ptr<UpdateBuilder> builder;
 };

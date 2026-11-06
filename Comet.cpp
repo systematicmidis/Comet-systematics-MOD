@@ -2,6 +2,7 @@
 #include "App/MainWindow.h"
 #include "Telemetry/CometLog.h"
 #include "Telemetry/CrashReporter.h"
+#include "UpdateBuilder.h"
 #include <cstring>
 #include <string>
 #include <curl/curl.h>
@@ -47,6 +48,10 @@ int main(int argc, char** argv)
 
 	if (!senderMode)
 	{
+		// An update installed earlier left the previous exe behind; this is the first moment it is
+		// no longer running.
+		UpdateBuilder::RemoveStaleInstall();
+
 		CrashReporter::Install();
 
 #ifdef _DEBUG

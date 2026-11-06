@@ -157,9 +157,9 @@ void SettingsDialog::DrawContent()
 
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Multiplier"))
+			if (ImGui::BeginTabItem("Mod"))
 			{
-				DrawMultiplierTab();
+				DrawModTab();
 
 				ImGui::EndTabItem();
 			}
@@ -1002,7 +1002,7 @@ void SettingsDialog::DrawVisualTab()
 						TABLE_LABEL_TOOLTIP(
 							"Show graph",
 							"Draw the NPS/polyphony graph overlay. It follows the note counter's values, so the "
-							"multiplier affects it too unless you turn that off in the Multiplier tab."
+							"multiplier affects it too unless you turn that off in the Mod tab."
 						),
 						ImGui::Checkbox("##showGraph", &config->graph.enabled);
 					);
@@ -1242,7 +1242,7 @@ void SettingsDialog::DrawMIDITab()
 	}
 }
 
-void SettingsDialog::DrawMultiplierTab()
+void SettingsDialog::DrawModTab()
 {
 	MIDIPlayerConfig* config = app->GetConfig();
 
@@ -1266,7 +1266,7 @@ void SettingsDialog::DrawMultiplierTab()
 	const uint64_t appliedNotes = totalNotes > excludedNotes ? totalNotes - excludedNotes : 0;
 	const uint64_t farmingNotes = appliedNotes > melody ? appliedNotes - melody : 0;
 
-	if (ImGui::BeginChild("##multiplierScroll", ImVec2(0, 400), true, ImGuiWindowFlags_HorizontalScrollbar))
+	if (ImGui::BeginChild("##modScroll", ImVec2(0, 400), true, ImGuiWindowFlags_HorizontalScrollbar))
 	{
 		if (ImGui::IsWindowAppearing())
 		{
@@ -1280,6 +1280,36 @@ void SettingsDialog::DrawMultiplierTab()
 		);
 		ImGui::Spacing();
 		ImGui::TextDisabled("displayed = (notes - melody) x multiplier + melody");
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		SECTION_HEADER("Layered DeDupe");
+		ImGui::TextWrapped(
+			"Files that store the same layer or track more than once - repeated layers, or a layer "
+			"copied verbatim into the file - are read once. Every note is still loaded; only the "
+			"repeated decoding is skipped, so the song itself is unchanged."
+		);
+		ImGui::Spacing();
+
+		ImGui::Checkbox(
+			"Deduplicate repeated tracks (also in layered compressed files: repeats read once)",
+			&config->layeredDedupe.deduplicateRepeatedTracks
+		);
+
+		ImGui::Indent(24.0f);
+		ImGui::BeginDisabled(!config->layeredDedupe.deduplicateRepeatedTracks);
+		ImGui::Checkbox(
+			"Assume the rest of a layer repeats when its size fits (fast; exact unless sizes collide)",
+			&config->layeredDedupe.assumeLayerRepeats
+		);
+		ImGui::EndDisabled();
+		ImGui::Unindent(24.0f);
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
 		ImGui::Spacing();
 
 		BEGIN_SECTION("##multiplierSettings")

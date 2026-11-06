@@ -8,10 +8,43 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include <cstdio>
+
 namespace
 {
+	// Nested archives are decompressed layer by layer in memory, so the ceiling is whatever this
+	// machine can actually hold. A fixed limit either refuses files that would have fit or invites an
+	// out-of-memory kill; the headroom keeps the app and the finished MIDI alive too.
+	uint64_t MemoryBudget()
+	{
+#ifdef _WIN32
+		MEMORYSTATUSEX status{};
+		status.dwLength = sizeof(status);
+		if (GlobalMemoryStatusEx(&status))
+		{
+			const uint64_t usable = (uint64_t)status.ullAvailPhys / 4ull * 3ull;
+			return std::clamp<uint64_t>(usable, 1ull << 30, 32ull << 30);
+		}
+#endif
+		return 8ull * 1024ull * 1024ull * 1024ull;
+	}
+
+	std::string HumanBytes(uint64_t bytes)
+	{
+		char buffer[64];
+		const double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
+		if (gb >= 1.0)
+			std::snprintf(buffer, sizeof(buffer), "%.1f GB", gb);
+		else
+			std::snprintf(buffer, sizeof(buffer), "%.0f MB", (double)bytes / (1024.0 * 1024.0));
+		return buffer;
+	}
+
 	// A decompression bomb should fail loudly instead of taking the machine down with it.
-	constexpr uint64_t MAX_EXTRACTED_BYTES = 8ull * 1024ull * 1024ull * 1024ull;
 	constexpr int MAX_NESTING = 8;
 
 	const uint8_t SIG_ZIP[] = { 'P', 'K', 0x03, 0x04 };
@@ -99,10 +132,11 @@ namespace
 	};
 
 	bool ReadEntryData(archive* a, const uint8_t* prefix, size_t prefixSize, int64_t declaredSize,
-		const std::atomic<bool>* cancel, std::vector<uint8_t>& out)
+		const std::atomic<bool>* cancel, std::vector<uint8_t>& out, std::string& error)
 	{
+		const uint64_t budget = MemoryBudget();
 		out.clear();
-		if (declaredSize > 0 && (uint64_t)declaredSize <= MAX_EXTRACTED_BYTES)
+		if (declaredSize > 0 && (uint64_t)declaredSize <= budget)
 		{
 			out.reserve((size_t)declaredSize);
 		}
@@ -117,7 +151,14 @@ namespace
 			if (got == 0) break;
 			if (got < 0) return false;
 
-			if (out.size() + (size_t)got > MAX_EXTRACTED_BYTES) return false;
+			if (out.size() + (size_t)got > budget)
+			{
+				// Say why, with numbers: this is the wall a very large nested file hits.
+				error = "This file expands past " + HumanBytes(budget) + ", more than Comet can hold in "
+					"memory on this machine (the archive is unpacked in memory layer by layer).";
+				return false;
+			}
+
 			out.insert(out.end(), buffer, buffer + got);
 		}
 
@@ -159,6 +200,16 @@ namespace
 			const bool sizeKnown = archive_entry_size_is_set(entry) != 0;
 			const int64_t declaredSize = sizeKnown ? archive_entry_size(entry) : -1;
 
+			// Refuse a layer that cannot fit before decompressing a single byte of it: a nested file
+			// that big would take minutes to produce the same refusal.
+			if (declaredSize > 0 && (uint64_t)declaredSize > MemoryBudget())
+			{
+				error = "This file expands to " + HumanBytes((uint64_t)declaredSize) + ", more than Comet "
+					"can hold in memory on this machine (" + HumanBytes(MemoryBudget()) + " available; "
+					"archives are unpacked in memory, layer by layer).";
+				return false;
+			}
+
 			// Peek at the first bytes: the entry may be a MIDI with no useful name, or a wrapper
 			// around another compressed layer.
 			uint8_t header[16] = {};
@@ -193,13 +244,22 @@ namespace
 			candidate.declaredSize = declaredSize;
 			candidate.nested = nested;
 
-			if (!ReadEntryData(a, header, headerSize, declaredSize, cancel, candidate.data))
+			std::string readError;
+			if (!ReadEntryData(a, header, headerSize, declaredSize, cancel, candidate.data, readError))
 			{
 				if (cancel != nullptr && cancel->load(std::memory_order_relaxed))
 				{
 					error = "Loading canceled.";
 					return false;
 				}
+
+				// A size refusal is final; only a damaged entry is worth skipping past.
+				if (!readError.empty())
+				{
+					error = readError;
+					return false;
+				}
+
 				continue;
 			}
 

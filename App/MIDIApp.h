@@ -116,6 +116,11 @@ public:
 	}
 
 	bool IsLoading() const { return loading.load(); }
+
+	// A load that failed leaves its reason here so the window can show it once, instead of the
+	// reason only reaching the console and the loading dialog simply vanishing.
+	bool ConsumeLoadError(std::string& message);
+	void SetLoadError(const std::string& message);
 	bool IsRendering() const { return rendering.load(); }
 
 	void BuildFontAtlas();
@@ -165,6 +170,10 @@ private:
 	std::shared_ptr<MIDITimer> timer;
 	std::unique_ptr<MIDIAudio> midiAudio;
 	std::atomic_bool loading = false;
+
+	std::mutex loadErrorMutex;
+	std::string loadError = "";
+	bool hasLoadError = false;
 	
 #pragma region Stats
 	double fps = 0.0;

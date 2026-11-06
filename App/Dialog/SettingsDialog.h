@@ -18,7 +18,7 @@ private:
 	void DrawVisualTab();
 	void DrawAudioTab();
 	void DrawMIDITab();
-	void DrawMultiplierTab();
+	void DrawModTab();
 	void DrawCrashReportsTab();
 
 	// Pushes the crash-report settings into the reporter (and optionally straight to disk, since a
