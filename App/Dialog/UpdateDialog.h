@@ -29,4 +29,8 @@ private:
 	UpdateChecker::UpdateCheckResult result{};
 	bool hasResult = false;
 	std::shared_ptr<UpdateBuilder> builder;
+
+	// Which build to install and how to get it; both are chosen in the dialog.
+	bool debugBuild = false;
+	bool downloadExe = false;
 };

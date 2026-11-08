@@ -68,6 +68,20 @@ public:
 
 	static SourcePackage ResolvePackage(Source source);
 
+	// The prebuilt exe attached to the newest release, for when a build is not wanted. The file name
+	// is the build type: Comet-Release.exe is a normal release, Comet-Debug.exe a debug build.
+	struct ReleaseExe
+	{
+		bool ok = false;
+		std::string tag;
+		std::string assetName;
+		std::string downloadUrl;
+		std::string pageUrl;
+		std::string error;
+	};
+
+	static ReleaseExe ResolveReleaseExe(Source source, bool debug);
+
 	static constexpr int SOURCE_COUNT = 2;
 	static const SourceInfo& GetSourceInfo(Source source);
 

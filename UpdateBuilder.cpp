@@ -198,7 +198,7 @@ const char* UpdateBuilder::StageName(Stage stage)
 	{
 	case Stage::Idle: return "Idle";
 	case Stage::Resolving: return "Looking up the newest commit";
-	case Stage::Downloading: return "Downloading the source";
+	case Stage::Downloading: return "Downloading";
 	case Stage::Extracting: return "Unpacking the source";
 	case Stage::Configuring: return "Configuring the build";
 	case Stage::Building: return "Compiling Comet";
@@ -265,10 +265,17 @@ void UpdateBuilder::RemoveStaleInstall()
 	std::filesystem::remove(std::filesystem::path(exe.wstring() + L".new"), ec);
 }
 
-void UpdateBuilder::Start(UpdateChecker::Source source)
+void UpdateBuilder::Start(const Options& options)
 {
 	if (running.exchange(true))
 		return;
+
+	source = options.source;
+	configuration = options.configuration;
+	downloadExe = options.downloadExe;
+	installedName = ExeNameFor(configuration);
+	installedInPlace = false;
+	downloadedExe.clear();
 
 	cancelRequested = false;
 	exeReady = false;
@@ -282,7 +289,24 @@ void UpdateBuilder::Start(UpdateChecker::Source source)
 
 	// The worker owns a reference, so the build keeps going even if the dialog is closed.
 	std::shared_ptr<UpdateBuilder> self = shared_from_this();
-	std::thread([self, source]() { self->Run(source); }).detach();
+	std::thread([self, options]() { self->Run(options); }).detach();
+}
+
+std::string UpdateBuilder::ExeNameFor(Configuration configuration)
+{
+	return configuration == Configuration::Debug ? "Comet-Debug.exe" : "Comet-Release.exe";
+}
+
+bool UpdateBuilder::IsDebugBuild(const std::filesystem::path& exe)
+{
+	const std::string name = exe.filename().string();
+	std::string lower;
+	lower.reserve(name.size());
+
+	for (char c : name)
+		lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+
+	return lower.find("debug") != std::string::npos;
 }
 
 void UpdateBuilder::Cancel()
@@ -314,7 +338,7 @@ void UpdateBuilder::Fail(const std::string& text)
 	message = "The build did not finish.";
 }
 
-void UpdateBuilder::Run(UpdateChecker::Source source)
+void UpdateBuilder::Run(const Options&)
 {
 	workRoot = GetWorkRoot();
 	sourceDir = workRoot / "src";
@@ -343,6 +367,35 @@ void UpdateBuilder::Run(UpdateChecker::Source source)
 	{
 		Fail(package.error);
 		stopFailed();
+		return;
+	}
+
+	// Taking the release's exe skips every compile step: the file is fetched and put in place.
+	if (downloadExe)
+	{
+		if (!DownloadReleaseExe())
+		{
+			if (cancelRequested)
+				stopCancelled();
+			else
+				stopFailed();
+			return;
+		}
+
+		SetStage(Stage::Installing, "Installing " + installedName + "...", 0.0f);
+		if (!InstallExe(downloadedExe))
+		{
+			stopFailed();
+			return;
+		}
+
+		CleanWorkFiles();
+
+		exeReady = installedInPlace;
+		SetStage(Stage::Done, installedInPlace
+			? "Installed " + installedName + ". Restart Comet to use it."
+			: "Saved " + installedName + " next to Comet. Start that file to use this build.");
+		running = false;
 		return;
 	}
 
@@ -389,8 +442,8 @@ void UpdateBuilder::Run(UpdateChecker::Source source)
 		return;
 	}
 
-	SetStage(Stage::Installing, "Installing the new Comet.exe...", 0.0f);
-	if (!Install())
+	SetStage(Stage::Installing, "Installing " + ExeNameFor(configuration) + "...", 0.0f);
+	if (!InstallExe(builtExe))
 	{
 		stopFailed();
 		return;
@@ -398,8 +451,10 @@ void UpdateBuilder::Run(UpdateChecker::Source source)
 
 	CleanWorkFiles();
 
-	exeReady = true;
-	SetStage(Stage::Done, "Installed " + shortSha + ". Restart Comet to use it.");
+	exeReady = installedInPlace;
+	SetStage(Stage::Done, installedInPlace
+		? "Installed " + shortSha + " as " + installedName + ". Restart Comet to use it."
+		: "Saved " + shortSha + " as " + installedName + " next to Comet. Start that file to use it.");
 	running = false;
 }
 
@@ -698,7 +753,8 @@ bool UpdateBuilder::Configure()
 		<< buildDir.string() << "\" -G \"" << generator << "\"";
 	if (!useNinja)
 		text << " -A x64";
-	text << " -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5\r\n";
+	text << " -DCMAKE_BUILD_TYPE=" << (configuration == Configuration::Debug ? "Debug" : "Release")
+		<< " -DCMAKE_POLICY_VERSION_MINIMUM=3.5\r\n";
 	text << "exit /b %ERRORLEVEL%\r\n";
 
 	{
@@ -740,7 +796,8 @@ bool UpdateBuilder::Compile()
 	text << "set \"PATH=" << gitPath.parent_path().string() << ";" << ninjaPath.parent_path().string()
 		<< ";%PATH%\"\r\n";
 	text << "\"" << cmakePath.string() << "\" --build \"" << buildDir.string()
-		<< "\" --target Comet --config Release --parallel\r\n";
+		<< "\" --target Comet --config "
+		<< (configuration == Configuration::Debug ? "Debug" : "Release") << " --parallel\r\n";
 	text << "exit /b %ERRORLEVEL%\r\n";
 
 	{
@@ -812,46 +869,117 @@ bool UpdateBuilder::Compile()
 	return true;
 }
 
-bool UpdateBuilder::Install()
+// Fetches the prebuilt exe the newest release carries instead of compiling anything.
+bool UpdateBuilder::DownloadReleaseExe()
 {
-	const std::filesystem::path exe = GetRunningExePath();
-	if (exe.empty())
+	SetStage(Stage::Downloading, "Looking for the prebuilt exe...", 0.0f);
+
+	const UpdateChecker::ReleaseExe release =
+		UpdateChecker::ResolveReleaseExe(source, configuration == Configuration::Debug);
+
+	if (!release.ok)
+	{
+		Fail(release.error);
+		return false;
+	}
+
+	if (cancelRequested)
+		return false;
+
+	installedName = release.assetName;
+
+	const std::filesystem::path dest = workRoot / "download" / release.assetName;
+	std::error_code ec;
+	std::filesystem::create_directories(dest.parent_path(), ec);
+
+	SetStage(Stage::Downloading, "Downloading " + release.assetName + " from " +
+		(release.tag.empty() ? std::string("the newest release") : release.tag) + "...", 0.0f);
+
+	if (!Download(release.downloadUrl, dest))
+		return false;
+
+	if (cancelRequested)
+		return false;
+
+	// An HTML error page saved as an exe is far too small to be Comet, so it is refused rather
+	// than installed.
+	const std::uintmax_t size = std::filesystem::file_size(dest, ec);
+	if (ec || size < 64 * 1024)
+	{
+		Fail("The download is not a Comet exe (" + std::to_string((long long)(ec ? 0 : size)) +
+			" bytes). The release may not carry the real file yet; build the source instead.");
+		return false;
+	}
+
+	downloadedExe = dest;
+	return true;
+}
+
+// Puts the new exe in place under the name that says which build it is. When Comet is already
+// running from that file the usual rename dance swaps it out; otherwise it is written beside the
+// running exe and takes over when that file is started.
+bool UpdateBuilder::InstallExe(const std::filesystem::path& newExe)
+{
+	const std::filesystem::path running = GetRunningExePath();
+	if (running.empty())
 	{
 		Fail("Could not locate the running Comet.exe.");
 		return false;
 	}
 
-	const std::filesystem::path staged(exe.wstring() + L".new");
-	const std::filesystem::path backup(exe.wstring() + L".old");
-
 	std::error_code ec;
+	if (!std::filesystem::exists(newExe, ec))
+	{
+		Fail("The new exe is missing from " + newExe.string() + ".");
+		return false;
+	}
+
+	const std::filesystem::path target = running.parent_path() / installedName;
+	installedInPlace = _wcsicmp(target.wstring().c_str(), running.wstring().c_str()) == 0;
+
+	if (!installedInPlace)
+	{
+		std::filesystem::copy_file(newExe, target, std::filesystem::copy_options::overwrite_existing, ec);
+		if (ec)
+		{
+			Fail("Could not write " + installedName + " next to Comet (" + ec.message() +
+				"). Is the folder writable?");
+			return false;
+		}
+
+		return true;
+	}
+
+	const std::filesystem::path staged(target.wstring() + L".new");
+	const std::filesystem::path backup(target.wstring() + L".old");
+
 	std::filesystem::remove(staged, ec);
 	std::filesystem::remove(backup, ec);
 
-	std::filesystem::copy_file(builtExe, staged, std::filesystem::copy_options::overwrite_existing, ec);
+	std::filesystem::copy_file(newExe, staged, std::filesystem::copy_options::overwrite_existing, ec);
 	if (ec)
 	{
-		Fail("Could not copy the new build next to Comet.exe (" + ec.message() + "). Is the folder "
-			"writable?");
+		Fail("Could not copy the new build next to " + installedName + " (" + ec.message() +
+			"). Is the folder writable?");
 		return false;
 	}
 
 	// Windows allows renaming a running image, which is what makes an in-place update possible.
-	std::filesystem::rename(exe, backup, ec);
+	std::filesystem::rename(target, backup, ec);
 	if (ec)
 	{
 		std::filesystem::remove(staged, ec);
-		Fail("Could not move the current Comet.exe aside (" + ec.message() + ").");
+		Fail("Could not move the current " + installedName + " aside (" + ec.message() + ").");
 		return false;
 	}
 
-	std::filesystem::rename(staged, exe, ec);
+	std::filesystem::rename(staged, target, ec);
 	if (ec)
 	{
 		std::error_code restore;
-		std::filesystem::rename(backup, exe, restore);
+		std::filesystem::rename(backup, target, restore);
 		std::filesystem::remove(staged, restore);
-		Fail("Could not put the new Comet.exe in place (" + ec.message() + ").");
+		Fail("Could not put the new " + installedName + " in place (" + ec.message() + ").");
 		return false;
 	}
 

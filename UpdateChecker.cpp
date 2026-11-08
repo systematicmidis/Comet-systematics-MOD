@@ -183,6 +183,76 @@ UpdateChecker::SourcePackage UpdateChecker::ResolvePackage(Source source)
 	return package;
 }
 
+UpdateChecker::ReleaseExe UpdateChecker::ResolveReleaseExe(Source source, bool debug)
+{
+	const SourceInfo& info = GetSourceInfo(source);
+
+	ReleaseExe result;
+	result.assetName = debug ? "Comet-Debug.exe" : "Comet-Release.exe";
+
+	const HttpResponse response = HttpGet("https://api.github.com/repos/" + std::string(info.repo) +
+		"/releases/latest");
+
+	if (response.code != CURLE_OK)
+	{
+		result.error = "Could not reach GitHub (" + std::string(curl_easy_strerror(response.code)) + ").";
+		return result;
+	}
+
+	if (response.status == 404)
+	{
+		result.error = std::string(info.repo) + " has no releases yet, so there is no prebuilt exe to "
+			"download. Choose \"Build the source\" instead.";
+		return result;
+	}
+
+	if (response.status != 200)
+	{
+		result.error = "GitHub returned HTTP " + std::to_string(response.status) +
+			" when asked for the newest release.";
+		return result;
+	}
+
+	auto json = nlohmann::json::parse(response.body, nullptr, false);
+	if (json.is_discarded())
+	{
+		result.error = "GitHub sent back something that isn't valid JSON.";
+		return result;
+	}
+
+	result.tag = json.value("tag_name", "");
+	result.pageUrl = json.value("html_url", std::string(info.repoUrl));
+
+	for (const auto& asset : json.value("assets", nlohmann::json::array()))
+	{
+		if (!asset.is_object())
+			continue;
+
+		const std::string name = asset.value("name", "");
+		const std::string url = asset.value("browser_download_url", "");
+		if (name.empty() || url.empty())
+			continue;
+
+		// The file name is the build type. A tag or version in front of it is fine as long as the
+		// name ends with the one that was asked for.
+		const bool matches = name == result.assetName ||
+			(name.size() > result.assetName.size() &&
+				name.compare(name.size() - result.assetName.size(), result.assetName.size(), result.assetName) == 0);
+
+		if (!matches)
+			continue;
+
+		result.assetName = name;
+		result.downloadUrl = url;
+		result.ok = true;
+		return result;
+	}
+
+	result.error = "The newest release (" + (result.tag.empty() ? std::string("untagged") : result.tag) +
+		") does not carry " + result.assetName + ". Attach it to the release, or choose \"Build the source\".";
+	return result;
+}
+
 UpdateChecker::UpdateCheckResult UpdateChecker::CheckForUpdate(Source source)
 {
 	const SourceInfo& info = GetSourceInfo(source);

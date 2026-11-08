@@ -3,7 +3,7 @@
 #include "MIDIAudio.h"
 
 #include <atomic>
-#include <fstream>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -104,17 +104,21 @@ private:
 
 	// Rendered ahead state: kestrel writes "<name>.partial.wav" while it renders and reports
 	// "audio_secs" on stdout, so playback follows the bytes that exist.
-	std::string partialPath;
+	std::string previewPath;
 	std::atomic<double> renderedAudioSeconds{ 0.0 };
+	std::atomic_bool previewFinished{ false };
 	std::atomic_bool renderFinished{ false };
 
+	// The file being played is read through a handle opened for delete sharing, so kestrel can
+	// still finish or replace it while the audio is streaming.
 	std::mutex pcmMutex;
-	std::ifstream pcmFile;
+	HANDLE pcmHandle = INVALID_HANDLE_VALUE;
 	bool pcmReady = false;
 	RenderAhead::WavInfo pcmInfo;
 	uint64_t pcmBytesPerFrame = 1;
 	uint64_t pcmCursorFrames = 0;
 	std::atomic<uint64_t> pcmFramesAvailable{ 0 };
+	std::string streamPath;
 
 	void SetStatus(const std::string& text);
 	std::string GetStatus() const;
@@ -129,8 +133,11 @@ private:
 
 	// --- rendered ahead: play the audio kestrel has already written -------------------------
 	bool Streaming() const { return mode == Mode::RenderedAhead; }
+	bool RenderTo(const std::string& outputPath, int secondsLimit);
 	void RenderLoopStreaming();
 	bool OpenGrowingWav();
+	bool OpenStream(const std::string& path, double startSeconds, bool requireAudio);
+	bool SwitchStream(const std::string& path, double startSeconds);
 	void RefreshAvailableFrames();
 	bool CreatePushStream();
 	static DWORD CALLBACK PcmProc(HSTREAM handle, void* buffer, DWORD lengthBytes, void* user);

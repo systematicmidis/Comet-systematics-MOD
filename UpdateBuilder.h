@@ -43,10 +43,24 @@ public:
 		bool exeReady = false;  // the new exe is in place and takes effect on the next start
 	};
 
+	// Release is the normal build; Debug keeps assertions and symbols. Whichever is produced is
+	// installed under the name that says which it is, so Comet-Debug.exe is always a debug build.
+	enum class Configuration { Release, Debug };
+
+	struct Options
+	{
+		UpdateChecker::Source source = UpdateChecker::Source::Official;
+		Configuration configuration = Configuration::Release;
+		bool downloadExe = false; // take the release's prebuilt exe instead of compiling
+	};
+
 	static std::shared_ptr<UpdateBuilder> Create();
 
 	// Starts the pipeline on a worker thread. Does nothing while a build is already running.
-	void Start(UpdateChecker::Source source);
+	void Start(const Options& options);
+
+	static std::string ExeNameFor(Configuration configuration);
+	static bool IsDebugBuild(const std::filesystem::path& exe);
 	void Cancel();
 	bool IsRunning() const { return running; }
 	Status GetStatus() const;
@@ -65,14 +79,16 @@ public:
 private:
 	UpdateBuilder() = default;
 
-	void Run(UpdateChecker::Source source);
+	void Run(const Options& options);
+
+	bool DownloadReleaseExe();
 
 	bool PrepareToolchain();
 	bool Configure();
 	bool Compile();
 	bool Download(const std::string& url, const std::filesystem::path& dest);
 	bool Extract(const std::filesystem::path& zip, const std::filesystem::path& dest);
-	bool Install();
+	bool InstallExe(const std::filesystem::path& newExe);
 	void CleanWorkFiles();
 
 	void SetStage(Stage newStage, const std::string& text, float progress = -1.0f);
@@ -95,6 +111,13 @@ private:
 	std::filesystem::path sourceDir;
 	std::filesystem::path buildDir;
 	std::filesystem::path builtExe;
+	std::filesystem::path downloadedExe;
+	std::string installedName;
+	bool installedInPlace = false;
+
+	UpdateChecker::Source source = UpdateChecker::Source::Official;
+	Configuration configuration = Configuration::Release;
+	bool downloadExe = false;
 
 	// Resolved once by PrepareToolchain so Configure and Compile agree on them.
 	std::filesystem::path cmakePath;

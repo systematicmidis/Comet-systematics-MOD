@@ -1139,37 +1139,39 @@ void SettingsDialog::DrawAudioTab()
 				AudioEngineList& engineList = midiAudio->GetEngineList();
 				const AudioEngineType current = midiAudio->GetCurrentEngineType();
 
-				std::string currentName = "None";
-				if (AudioEngine* engine = engineList[(size_t)current].get())
-					currentName = engine->GetName();
+				// A plain ImGui::Combo rather than a hand-written popup: the engines are swapped once
+				// the combo has closed, so nothing here can end the popup's window mid-frame.
+				std::vector<std::string> labels;
+				std::vector<AudioEngineType> engineTypes;
+				int selected = 0;
 
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::BeginCombo("##midiOut", currentName.c_str()))
+				for (size_t i = 0; i < engineList.size(); i++)
 				{
-					size_t engineIndex = 0;
-					for (auto& engine : engineList)
+					AudioEngine* engine = engineList[i].get();
+					if (engine == nullptr)
+						continue;
+
+					if ((AudioEngineType)i == current)
+						selected = (int)labels.size();
+
+					labels.push_back(engine->GetName());
+					engineTypes.push_back((AudioEngineType)i);
+				}
+
+				std::vector<const char*> items;
+				items.reserve(labels.size());
+				for (const std::string& label : labels)
+					items.push_back(label.c_str());
+
+				if (!items.empty())
+				{
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::Combo("##midiOut", &selected, items.data(), (int)items.size()))
 					{
-						if (engine == nullptr)
-						{
-							engineIndex++;
-							continue;
-						}
-
-						const AudioEngineType type = (AudioEngineType)engineIndex;
-						const bool isSupported = engine->IsSupported();
-
-						ImGui::BeginDisabled(!isSupported);
-						if (ImGui::Selectable(engine->GetName().c_str(), type == current))
+						const AudioEngineType type = engineTypes[(size_t)selected];
+						if (type != current)
 							midiAudio->SwitchEngine(type);
-						ImGui::EndDisabled();
-
-						if (!isSupported && ImGui::IsItemHovered())
-							ImGui::SetTooltip("This engine is not supported on your platform.");
-
-						engineIndex++;
 					}
-
-					ImGui::EndCombo();
 				}
 			}
 		);

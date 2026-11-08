@@ -60,6 +60,22 @@ namespace
 
 	// kestrel.exe is looked for beside the app first, so a copy dropped into the install folder is
 	// simply there; PATH is the fallback for a normal kestrel installation.
+	std::string PartialOf(const std::string& wavPath)
+	{
+		if (wavPath.empty()) return std::string();
+
+		const std::filesystem::path path(wavPath);
+		return (path.parent_path() / (path.stem().string() + ".partial" + path.extension().string())).string();
+	}
+
+	// Delete sharing lets kestrel rename or replace the file while the audio is being read.
+	HANDLE OpenSharedRead(const std::string& path)
+	{
+		return CreateFileW(Widen(path).c_str(), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+	}
+
 	std::string FindKestrelBinary()
 	{
 		const char* const candidates[] = { "./kestrel/kestrel.exe", "./kestrel.exe", "kestrel.exe" };
@@ -215,7 +231,12 @@ void KestrelEngine::Destroy()
 
 	{
 		std::lock_guard<std::mutex> lock(pcmMutex);
-		pcmFile.close();
+		if (pcmHandle != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(pcmHandle);
+			pcmHandle = INVALID_HANDLE_VALUE;
+		}
+
 		pcmReady = false;
 	}
 
@@ -233,13 +254,20 @@ void KestrelEngine::SetSourcePath(const std::string& path)
 	// A different song means a different render; whatever was playing belongs to the old one.
 	CloseChannel();
 	cachedWavPath.clear();
-	partialPath.clear();
+	previewPath.clear();
+	streamPath.clear();
 	renderedAudioSeconds.store(0.0);
+	previewFinished.store(false);
 	renderFinished.store(false);
 
 	{
 		std::lock_guard<std::mutex> lock(pcmMutex);
-		pcmFile.close();
+		if (pcmHandle != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(pcmHandle);
+			pcmHandle = INVALID_HANDLE_VALUE;
+		}
+
 		pcmReady = false;
 		pcmFramesAvailable.store(0);
 	}
@@ -381,9 +409,13 @@ bool KestrelEngine::EnsureRendered(std::string& wavPath, std::string& error)
 	if (Streaming())
 	{
 		const std::filesystem::path out(cachedWavPath);
-		partialPath = (out.parent_path() / (out.stem().string() + ".partial" + out.extension().string())).string();
+		previewPath = (out.parent_path() / (out.stem().string() + ".preview" + out.extension().string())).string();
+
+		std::error_code errorCode;
+		std::filesystem::remove(previewPath, errorCode);
 
 		renderedAudioSeconds.store(0.0);
+		previewFinished.store(false);
 		renderFinished.store(false);
 
 		renderThread = std::thread(&KestrelEngine::RenderLoopStreaming, this);
@@ -490,9 +522,12 @@ void KestrelEngine::RenderLoop()
 	renderActive = false;
 }
 
-// Renders with kestrel's JSON progress on stdout, so the engine knows how much audio exists
-// before the file is whole. kestrel writes "<name>.partial.wav" beside the output meanwhile.
-void KestrelEngine::RenderLoopStreaming()
+// One kestrel run, with its JSON progress on stdout so the engine knows how much audio exists
+// before the file is whole. `secondsLimit` 0 renders the whole song; a positive value stops after
+// that many seconds of audio. --no-resume writes the audio straight into the output file instead
+// of a ".partial" renamed at the end, so the file being played never moves and no large checkpoint
+// is left beside it.
+bool KestrelEngine::RenderTo(const std::string& outputPath, int secondsLimit)
 {
 	std::error_code errorCode;
 	std::filesystem::create_directories("./kestrel_cache", errorCode);
@@ -506,7 +541,10 @@ void KestrelEngine::RenderLoopStreaming()
 		: settings.soundfonts.size();
 
 	std::wstring commandLine = L"\"" + Widen(kestrelPath) + L"\" --force-cli render \"" +
-		Widen(sourcePath) + L"\" -o \"" + Widen(cachedWavPath) + L"\" --progress json";
+		Widen(sourcePath) + L"\" -o \"" + Widen(outputPath) + L"\" --progress json --no-resume";
+
+	if (secondsLimit > 0)
+		commandLine += L" --seconds " + std::to_wstring(secondsLimit);
 
 	for (size_t i = 0; i < usedFonts; i++)
 		commandLine += L" -s \"" + Widen(settings.soundfonts[i]) + L"\"";
@@ -541,9 +579,7 @@ void KestrelEngine::RenderLoopStreaming()
 	if (!CreatePipe(&readEnd, &writeEnd, &attributes, 0))
 	{
 		SetStatus("Could not create the pipe kestrel's progress needs.");
-		renderActive = false;
-		renderFinished.store(true);
-		return;
+		return false;
 	}
 
 	SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
@@ -574,9 +610,7 @@ void KestrelEngine::RenderLoopStreaming()
 		if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
 
 		SetStatus("kestrel.exe could not be started (Windows error " + std::to_string(lastError) + ").");
-		renderActive = false;
-		renderFinished.store(true);
-		return;
+		return false;
 	}
 
 	SetStatus(UsesMerlin()
@@ -630,49 +664,167 @@ void KestrelEngine::RenderLoopStreaming()
 	CloseHandle(readEnd);
 	if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
 
+	if (exitCode != 0)
+		SetStatus("The render stopped with exit code " + std::to_string(exitCode) + "; see " + renderLogPath + ".");
+
+	return exitCode == 0;
+}
+
+// Rendered ahead renders two files: a short first chunk, so playback can start after a few
+// seconds instead of after the whole song, and then the whole song behind the playback.
+void KestrelEngine::RenderLoopStreaming()
+{
+	renderedAudioSeconds.store(0.0);
+	SetStatus("Rendering the first " + std::to_string(settings.renderAheadSeconds) + " seconds...");
+
+	const bool previewRendered = RenderTo(previewPath, settings.renderAheadSeconds);
+	previewFinished.store(true);
+
+	if (renderCancel.load())
+	{
+		std::error_code errorCode;
+		std::filesystem::remove(previewPath, errorCode);
+		std::filesystem::remove(cachedWavPath, errorCode);
+
+		renderActive = false;
+		renderFinished.store(true);
+		SetStatus("The render was cancelled.");
+		return;
+	}
+
+	// A song that ended inside the chunk is complete already, so the second render is skipped.
+	if (previewRendered && renderedAudioSeconds.load() + 0.5 < (double)settings.renderAheadSeconds)
+	{
+		std::error_code errorCode;
+		std::filesystem::copy_file(previewPath, cachedWavPath,
+			std::filesystem::copy_options::overwrite_existing, errorCode);
+		std::filesystem::remove(previewPath, errorCode);
+
+		renderActive = false;
+		renderFinished.store(true);
+		SetStatus("The whole song is rendered and cached for the next play.");
+		return;
+	}
+
+	SetStatus("Playing the first chunk; the rest of the song renders behind it...");
+
+	// The rest of the song, into the file playback takes over from when the chunk runs out.
+	renderedAudioSeconds.store(0.0);
+	const bool fullRendered = RenderTo(cachedWavPath, 0);
+
 	renderActive = false;
 	renderFinished.store(true);
 
-	if (exitCode == 0)
-		SetStatus("The render is complete; the audio stays beside it for the next play.");
+	if (fullRendered)
+	{
+		SetStatus("The whole song is rendered and cached for the next play.");
+	}
+	else if (renderCancel.load())
+	{
+		std::error_code errorCode;
+		std::filesystem::remove(cachedWavPath, errorCode);
+		SetStatus("The rest of the render was cancelled; the first chunk still plays.");
+	}
 	else
-		SetStatus("The render stopped with exit code " + std::to_string(exitCode) + "; see " + renderLogPath + ".");
+	{
+		std::error_code errorCode;
+		std::filesystem::remove(cachedWavPath, errorCode);
+		SetStatus("The rest of the render failed; see " + renderLogPath + ".");
+	}
 }
 
-// Opens whatever kestrel has written so far: the .partial file while it renders, the final file
-// once it is renamed, whichever exists and holds a header that can be read.
+// A finished render is best, then the file the full render is writing, then the first chunk.
 bool KestrelEngine::OpenGrowingWav()
 {
-	std::lock_guard<std::mutex> lock(pcmMutex);
+	if (previewPath.empty() && cachedWavPath.empty()) return false;
 
-	const std::string candidates[] = { partialPath, cachedWavPath };
+	const std::string candidates[] = { cachedWavPath, PartialOf(cachedWavPath), previewPath,
+		PartialOf(previewPath) };
 
 	for (const std::string& path : candidates)
 	{
-		if (path.empty()) continue;
+		if (OpenStream(path, 0.0, false)) return true;
+	}
 
-		std::error_code errorCode;
-		const uint64_t size = std::filesystem::file_size(path, errorCode);
-		if (errorCode || size < 64) continue;
+	return false;
+}
 
-		std::ifstream file(path, std::ios::binary);
-		if (!file.is_open()) continue;
+bool KestrelEngine::OpenStream(const std::string& path, double startSeconds, bool requireAudio)
+{
+	if (path.empty()) return false;
 
-		std::vector<uint8_t> head((size_t)std::min<uint64_t>(size, 8192));
-		file.read((char*)head.data(), (std::streamsize)head.size());
-		head.resize((size_t)file.gcount());
+	HANDLE handle = OpenSharedRead(path);
+	if (handle == INVALID_HANDLE_VALUE) return false;
 
-		RenderAhead::WavInfo info;
-		if (!RenderAhead::ParseWavHeader(head.data(), head.size(), info)) continue;
+	LARGE_INTEGER sizeValue{};
+	if (!GetFileSizeEx(handle, &sizeValue) || sizeValue.QuadPart < 64)
+	{
+		CloseHandle(handle);
+		return false;
+	}
 
-		// The playback callback feeds BASS 32-bit float frames, which is kestrel's WAV default.
-		if (info.bits != 32 || info.channels == 0 || info.rate == 0) continue;
+	std::vector<uint8_t> head((size_t)std::min<LONGLONG>(sizeValue.QuadPart, 8192));
 
-		pcmFile = std::move(file);
-		pcmInfo = info;
-		pcmBytesPerFrame = RenderAhead::BytesPerFrame(info);
-		pcmCursorFrames = 0;
-		pcmReady = true;
+	LARGE_INTEGER beginning{};
+	SetFilePointerEx(handle, beginning, nullptr, FILE_BEGIN);
+
+	DWORD read = 0;
+	if (!ReadFile(handle, head.data(), (DWORD)head.size(), &read, nullptr))
+	{
+		CloseHandle(handle);
+		return false;
+	}
+	head.resize(read);
+
+	RenderAhead::WavInfo info;
+	if (!RenderAhead::ParseWavHeader(head.data(), head.size(), info))
+	{
+		CloseHandle(handle);
+		return false;
+	}
+
+	// The playback callback feeds BASS 32-bit float frames, which is kestrel's WAV default.
+	if (info.bits != 32 || info.channels == 0 || info.rate == 0)
+	{
+		CloseHandle(handle);
+		return false;
+	}
+
+	const uint64_t frames = RenderAhead::AvailableFrames((uint64_t)sizeValue.QuadPart, info);
+	const uint64_t startFrame = (uint64_t)(std::max(0.0, startSeconds) * (double)info.rate);
+
+	if (requireAudio && frames <= startFrame)
+	{
+		CloseHandle(handle);
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(pcmMutex);
+
+	if (pcmHandle != INVALID_HANDLE_VALUE)
+		CloseHandle(pcmHandle);
+
+	pcmHandle = handle;
+	pcmInfo = info;
+	pcmBytesPerFrame = RenderAhead::BytesPerFrame(info);
+	pcmCursorFrames = startFrame;
+	pcmFramesAvailable.store(frames);
+	streamPath = path;
+	pcmReady = true;
+	return true;
+}
+
+bool KestrelEngine::SwitchStream(const std::string& path, double startSeconds)
+{
+	const std::string candidates[] = { path, PartialOf(path) };
+
+	for (const std::string& candidate : candidates)
+	{
+		if (!OpenStream(candidate, startSeconds, true)) continue;
+
+		// BASS still has audio queued from the chunk; rebuilding the stream makes the switch
+		// happen at the playhead instead of once that queue has drained.
+		CreatePushStream();
 		return true;
 	}
 
@@ -682,20 +834,16 @@ bool KestrelEngine::OpenGrowingWav()
 void KestrelEngine::RefreshAvailableFrames()
 {
 	std::lock_guard<std::mutex> lock(pcmMutex);
-	if (!pcmReady) return;
+	if (!pcmReady || pcmHandle == INVALID_HANDLE_VALUE) return;
 
-	std::error_code errorCode;
-	uint64_t size = 0;
-
-	for (const std::string& path : { partialPath, cachedWavPath })
+	LARGE_INTEGER size{};
+	if (!GetFileSizeEx(pcmHandle, &size))
 	{
-		if (path.empty()) continue;
-
-		const uint64_t candidate = std::filesystem::file_size(path, errorCode);
-		if (!errorCode) size = std::max(size, candidate);
+		pcmFramesAvailable.store(0);
+		return;
 	}
 
-	pcmFramesAvailable.store(RenderAhead::AvailableFrames(size, pcmInfo));
+	pcmFramesAvailable.store(RenderAhead::AvailableFrames((uint64_t)size.QuadPart, pcmInfo));
 }
 
 DWORD CALLBACK KestrelEngine::PcmProc(HSTREAM, void* buffer, DWORD lengthBytes, void* user)
@@ -703,26 +851,28 @@ DWORD CALLBACK KestrelEngine::PcmProc(HSTREAM, void* buffer, DWORD lengthBytes, 
 	auto* self = static_cast<KestrelEngine*>(user);
 
 	std::memset(buffer, 0, lengthBytes);
-	if (!self->pcmReady || self->pcmBytesPerFrame == 0) return lengthBytes;
+	if (self->pcmBytesPerFrame == 0) return lengthBytes;
 
 	const uint64_t wantedFrames = lengthBytes / self->pcmBytesPerFrame;
-	if (wantedFrames == 0) return lengthBytes;
 
 	std::lock_guard<std::mutex> lock(self->pcmMutex);
+	if (self->pcmHandle == INVALID_HANDLE_VALUE) return lengthBytes;
 
 	const uint64_t available = self->pcmFramesAvailable.load(std::memory_order_relaxed);
 	const uint64_t start = self->pcmCursorFrames;
 
 	// Only frames that really exist are read. A gap is silence rather than a repeat, and the sync
 	// loop pulls the playhead back once the render has written past it.
-	if (self->pcmFile.is_open() && start < available)
+	if (start < available)
 	{
 		const uint64_t frames = std::min(wantedFrames, available - start);
 
-		self->pcmFile.clear();
-		self->pcmFile.seekg((std::streamoff)(self->pcmInfo.dataOffset + start * self->pcmBytesPerFrame),
-			std::ios::beg);
-		self->pcmFile.read((char*)buffer, (std::streamsize)(frames * self->pcmBytesPerFrame));
+		LARGE_INTEGER offset{};
+		offset.QuadPart = (LONGLONG)(self->pcmInfo.dataOffset + start * self->pcmBytesPerFrame);
+
+		DWORD read = 0;
+		if (SetFilePointerEx(self->pcmHandle, offset, nullptr, FILE_BEGIN))
+			ReadFile(self->pcmHandle, buffer, (DWORD)(frames * self->pcmBytesPerFrame), &read, nullptr);
 	}
 
 	self->pcmCursorFrames = start + wantedFrames;
@@ -760,13 +910,36 @@ void KestrelEngine::SyncLoop(std::shared_ptr<MIDITimer> timer)
 
 			RefreshAvailableFrames();
 
-			const double available = (double)pcmFramesAvailable.load() / (double)pcmInfo.rate;
 			const double wanted = timer ? std::max(0.0, timer->Elapsed()) : 0.0;
 			const double ahead = (double)settings.renderAheadSeconds;
+			const double available = (double)pcmFramesAvailable.load() / (double)pcmInfo.rate;
+
+			// The first chunk only covers the start of the song. Once the playhead reaches its end,
+			// the full render - which has been running behind the playback - becomes the source.
+			if (streamPath == previewPath && wanted >= available - 0.02)
+			{
+				if (SwitchStream(cachedWavPath, wanted))
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(4));
+					continue;
+				}
+
+				if (previewFinished.load() && renderFinished.load())
+				{
+					// Nothing more is coming, so stop here instead of playing silence.
+					if (channel != 0) BASS_ChannelPause(channel);
+
+					SetStatus("The rendered audio ends at " + std::to_string((int)available) +
+						" s; the rest of the song could not be rendered.");
+
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+					continue;
+				}
+			}
 
 			// The point of the engine: do not start (or keep playing) without enough audio in front
 			// of the playhead, but do not wait for the whole song either.
-			const bool enoughAudio = renderFinished.load() || wanted + ahead <= available;
+			const bool enoughAudio = renderFinished.load() || wanted + ahead <= available + 0.02;
 
 			if (!enoughAudio)
 			{
@@ -1054,34 +1227,27 @@ namespace
 
 	void DrawGpuBackendCombo(int& value)
 	{
+		value = std::clamp(value, 0, 4);
+
 		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::BeginCombo("##gpuBackend", GPU_BACKENDS[std::clamp(value, 0, 4)]))
-		{
-			for (int i = 0; i < 5; i++)
-			{
-				if (ImGui::Selectable(GPU_BACKENDS[i], value == i)) value = i;
-			}
-			ImGui::EndCombo();
-		}
+		ImGui::Combo("##gpuBackend", &value, GPU_BACKENDS, 5);
 	}
 
 	void DrawBlockSizeCombo(int& value)
 	{
-		char label[32];
-		std::snprintf(label, sizeof(label), "%d (%d ms)", value, (value * 1000) / 48000);
+		// The labels are fixed, so the list is built once instead of per frame.
+		static const char* const labels[] = { "512 (11 ms)", "1024 (21 ms)", "2048 (42 ms)",
+			"4096 (85 ms)", "8192 (170 ms)" };
+
+		int index = 3;
+		for (int i = 0; i < 5; i++)
+		{
+			if (BLOCK_SIZES[i] == value) index = i;
+		}
 
 		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::BeginCombo("##blockSize", label))
-		{
-			for (int size : BLOCK_SIZES)
-			{
-				char entry[32];
-				std::snprintf(entry, sizeof(entry), "%d (%d ms)", size, (size * 1000) / 48000);
-
-				if (ImGui::Selectable(entry, value == size)) value = size;
-			}
-			ImGui::EndCombo();
-		}
+		if (ImGui::Combo("##blockSize", &index, labels, 5))
+			value = BLOCK_SIZES[index];
 	}
 }
 
@@ -1121,8 +1287,8 @@ void KestrelEngine::DrawKestrelPanel()
 	ImGui::SameLine(150.0f);
 	ImGui::BeginDisabled(true);
 	ImGui::SetNextItemWidth(-1.0f);
-	ImGui::BeginCombo("##limiter", LIMITERS[std::clamp(settings.limiter, 0, 2)]);
-	ImGui::EndCombo();
+	int limiter = std::clamp(settings.limiter, 0, 2);
+	ImGui::Combo("##limiter", &limiter, LIMITERS, 3);
 	ImGui::EndDisabled();
 	ImGui::SetItemTooltip("Kestrel applies its own limiter under the same name; it has no flag to change it.");
 
@@ -1147,14 +1313,8 @@ void KestrelEngine::DrawKestrelPanel()
 	ImGui::Text("Interpolation:");
 	ImGui::SameLine(150.0f);
 	ImGui::SetNextItemWidth(-1.0f);
-	if (ImGui::BeginCombo("##interp", INTERPOLATIONS[std::clamp(settings.interpolation, 0, 2)]))
-	{
-		for (int i = 0; i < 3; i++)
-		{
-			if (ImGui::Selectable(INTERPOLATIONS[i], settings.interpolation == i)) settings.interpolation = i;
-		}
-		ImGui::EndCombo();
-	}
+	settings.interpolation = std::clamp(settings.interpolation, 0, 2);
+	ImGui::Combo("##interp", &settings.interpolation, INTERPOLATIONS, 3);
 
 	ImGui::Text("Velocity threshold:");
 	ImGui::SameLine(150.0f);
@@ -1179,20 +1339,14 @@ void KestrelEngine::DrawRenderedAheadPanel()
 	ImGui::SetNextItemWidth(-1.0f);
 
 	const char* const engines[] = { "Merlin (graphics card)", "Kestrel (graphics card)" };
-	if (ImGui::BeginCombo("##aheadEngine", engines[std::clamp(settings.engineForAhead, 0, 1)]))
-	{
-		for (int i = 0; i < 2; i++)
-		{
-			if (ImGui::Selectable(engines[i], settings.engineForAhead == i)) settings.engineForAhead = i;
-		}
+	settings.engineForAhead = std::clamp(settings.engineForAhead, 0, 1);
+	ImGui::Combo("##aheadEngine", &settings.engineForAhead, engines, 2);
 
-		ImGui::BeginDisabled(true);
-		ImGui::Selectable("BASSMIDI (processor)", false);
-		ImGui::EndDisabled();
-		ImGui::SetItemTooltip("BASSMIDI plays in Comet through the Prerendered Audio engine; pick that one "
-			"for realtime playback without a render.");
-		ImGui::EndCombo();
-	}
+	ImGui::BeginDisabled(true);
+	ImGui::Selectable("BASSMIDI (processor)", false);
+	ImGui::EndDisabled();
+	ImGui::SetItemTooltip("BASSMIDI plays in Comet through the Prerendered Audio engine; pick that one "
+		"for realtime playback without a render.");
 
 	ImGui::BeginDisabled(true);
 	ImGui::Checkbox("Use Kestrel where Merlin isn't exact", &settings.useKestrelWhereMerlinInexact);
@@ -1230,8 +1384,8 @@ void KestrelEngine::DrawRenderedAheadPanel()
 	ImGui::SameLine(150.0f);
 	ImGui::BeginDisabled(true);
 	ImGui::SetNextItemWidth(-1.0f);
-	ImGui::BeginCombo("##aheadLimiter", LIMITERS[std::clamp(settings.limiter, 0, 2)]);
-	ImGui::EndCombo();
+	int aheadLimiter = std::clamp(settings.limiter, 0, 2);
+	ImGui::Combo("##aheadLimiter", &aheadLimiter, LIMITERS, 3);
 	ImGui::EndDisabled();
 
 	ImGui::Text("Ceiling:");
@@ -1249,9 +1403,10 @@ void KestrelEngine::DrawRenderedAheadPanel()
 
 	ImGui::Spacing();
 	ImGui::TextDisabled(
-		"Playback starts once %d seconds of audio exist past the playhead, and follows the render as "
-		"it grows: kestrel writes a .partial.wav while it works, so the song plays as it is made. "
-		"Merlin can only mix at the end, so it stays silent until then.",
+		"The first %d seconds are rendered on their own, so playback starts as soon as that chunk "
+		"exists; the whole song renders behind it and takes over when the chunk runs out. kestrel "
+		"writes the audio as it goes, so nothing waits for the whole file. Merlin can only mix at the "
+		"end, so it stays silent until then.",
 		settings.renderAheadSeconds
 	);
 }

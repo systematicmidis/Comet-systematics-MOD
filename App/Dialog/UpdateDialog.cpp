@@ -8,6 +8,9 @@ void UpdateDialog::OnOpen()
 	// A result belongs to the branch that was checked, so don't show it for a fresh visit.
 	hasResult = false;
 	result = {};
+
+	// A debug build is recognisable by its file name, so the running exe decides the default.
+	debugBuild = UpdateBuilder::IsDebugBuild(UpdateBuilder::GetRunningExePath());
 }
 
 void UpdateDialog::Check()
@@ -24,8 +27,47 @@ void UpdateDialog::DrawBuildSection()
 	const UpdateBuilder::Status status = builder->GetStatus();
 
 	ImGui::Spacing();
-	ImGui::TextDisabled("Builds this branch from source with the Visual Studio C++ tools on this "
-		"PC, then replaces Comet.exe with the result. Nothing else is kept.");
+	ImGui::TextDisabled("Rewrites the Comet you are running from the chosen branch: either compiling it "
+		"here with the Visual Studio C++ tools on this PC, or taking the exe attached to the newest "
+		"release. Nothing else is kept.");
+
+	auto start = [this]()
+	{
+		UpdateBuilder::Options options;
+		options.source = selectedSource;
+		options.configuration = debugBuild ? UpdateBuilder::Configuration::Debug
+			: UpdateBuilder::Configuration::Release;
+		options.downloadExe = downloadExe;
+		builder->Start(options);
+	};
+
+	ImGui::Spacing();
+	ImGui::BeginDisabled(builder->IsRunning());
+
+	ImGui::Text("Build");
+	ImGui::SameLine(150.0f);
+	if (ImGui::RadioButton("Release##updateConfig", !debugBuild))
+		debugBuild = false;
+	ImGui::SameLine();
+	if (ImGui::RadioButton("Debug##updateConfig", debugBuild))
+		debugBuild = true;
+	ImGui::SetItemTooltip("Release is the normal build. Debug keeps Comet's assertions and symbols: "
+		"slower, but it reports problems. They are installed as Comet-Release.exe and Comet-Debug.exe, "
+		"so the file name says which one it is.");
+
+	ImGui::Text("Get it");
+	ImGui::SameLine(150.0f);
+	if (ImGui::RadioButton("By building the source##updateMethod", !downloadExe))
+		downloadExe = false;
+	ImGui::SameLine();
+	if (ImGui::RadioButton("From the release's exe##updateMethod", downloadExe))
+		downloadExe = true;
+	ImGui::SetItemTooltip("Building compiles the branch on this PC, which takes several minutes and "
+		"needs Git and the Visual Studio C++ tools. Downloading fetches the prebuilt Comet-Release.exe "
+		"or Comet-Debug.exe attached to the newest GitHub release.");
+
+	ImGui::EndDisabled();
+	ImGui::Spacing();
 
 	auto drawLogButton = [&status]()
 	{
@@ -39,10 +81,10 @@ void UpdateDialog::DrawBuildSection()
 	switch (status.stage)
 	{
 		case UpdateBuilder::Stage::Idle:
-			if (ImGui::Button("Build && Install", ImVec2(160, 0)))
-				builder->Start(selectedSource);
+			if (ImGui::Button(downloadExe ? "Download && Install" : "Build && Install", ImVec2(170, 0)))
+				start();
 			ImGui::SameLine();
-			ImGui::TextDisabled("takes several minutes");
+			ImGui::TextDisabled(downloadExe ? "a few seconds" : "takes several minutes");
 			break;
 
 		case UpdateBuilder::Stage::Done:
@@ -52,7 +94,7 @@ void UpdateDialog::DrawBuildSection()
 			break;
 
 		case UpdateBuilder::Stage::Failed:
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "The build failed.");
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "The update failed.");
 			if (!status.error.empty())
 			{
 				ImGui::Spacing();
@@ -63,13 +105,13 @@ void UpdateDialog::DrawBuildSection()
 			drawLogButton();
 			ImGui::SameLine();
 			if (ImGui::Button("Try Again", ImVec2(120, 0)))
-				builder->Start(selectedSource);
+				start();
 			break;
 
 		case UpdateBuilder::Stage::Cancelled:
 			ImGui::TextDisabled("%s", status.message.c_str());
 			if (ImGui::Button("Start Again", ImVec2(140, 0)))
-				builder->Start(selectedSource);
+				start();
 			break;
 
 		default:
@@ -139,8 +181,9 @@ void UpdateDialog::DrawContent()
 			ImGui::TextWrapped("%s", result.detail.c_str());
 		}
 
-		if (result.status == UpdateChecker::UPDATE_AVAILABLE)
-			DrawBuildSection();
+		// Shown either way: the release's prebuilt exe or a build of this branch is useful even
+		// when this copy is already the newest version.
+		DrawBuildSection();
 	}
 
 	ImGui::Spacing();
