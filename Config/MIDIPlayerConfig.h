@@ -198,6 +198,11 @@ struct MIDIPlayerConfig
 		// Skip the byte-for-byte comparison: a chunk whose size matches an earlier one is taken as a
 		// repeat of it. Fast, and exact unless two different tracks happen to be the same size.
 		bool assumeLayerRepeats = true;
+		// Fast dedup of the layers themselves: once the first tile of a layer repeats, the rest of
+		// that layer is assumed to be the same tile when its size divides exactly, so the remaining
+		// bytes are never decoded. Requires deduplicateRepeatedTracks. Never saved: it is silently
+		// wrong on a layer made of different tiles whose sizes happen to add up to a multiple.
+		bool riskyFastDedupe = false;
 	};
 
 	// Crash reporting. The destination is compiled into the app (CrashReporter::DISCORD_WEBHOOK_URL),

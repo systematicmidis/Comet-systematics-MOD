@@ -187,7 +187,13 @@ std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
 		loader = std::make_shared<MIDILoader>(path);
 
 	loader->SetLoadOnlyNotes(config.midi.loadNotesOnly);
-	loader->SetLayeredDedupe(config.layeredDedupe.deduplicateRepeatedTracks, config.layeredDedupe.assumeLayerRepeats);
+	loader->SetLayeredDedupe(config.layeredDedupe.deduplicateRepeatedTracks,
+		config.layeredDedupe.assumeLayerRepeats,
+		config.layeredDedupe.riskyFastDedupe && config.layeredDedupe.deduplicateRepeatedTracks);
+
+	// The archive reader is the only place the layers themselves can be skipped, and it is static
+	// because extraction happens before a loader exists.
+	ArchiveLoader::SetRiskyFastDedupe(config.layeredDedupe.riskyFastDedupe && config.layeredDedupe.deduplicateRepeatedTracks);
 	return loader;
 }
 
@@ -333,6 +339,7 @@ void MIDIApp::UpdatePendingSequence()
 	hasSequence = true;
 	seqLength = seq->CalcLengthMilliseconds() / 1000.0;
 
+	midiAudio->SetSourcePath(pendingPath);
 	midiAudio->Start(seq, this->timer);
 	timer->ClearFlags();
 	timer->Start(-3.0);

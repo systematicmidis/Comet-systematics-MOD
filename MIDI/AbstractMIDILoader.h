@@ -75,10 +75,11 @@ public:
 		this->loadOnlyNotes = loadOnlyNotes;
 	}
 	// Layered DeDupe options; only the multi-threaded loader acts on them.
-	void SetLayeredDedupe(bool deduplicateRepeatedTracks, bool assumeLayerRepeats)
+	void SetLayeredDedupe(bool deduplicateRepeatedTracks, bool assumeLayerRepeats, bool riskyFastDedupe = false)
 	{
 		this->deduplicateRepeatedTracks = deduplicateRepeatedTracks;
 		this->assumeLayerRepeats = assumeLayerRepeats;
+		this->riskyFastDedupe = riskyFastDedupe;
 	}
 	virtual std::shared_ptr<MIDISequence> Load(bool timeBasedLoading = false) = 0;
 	virtual void Stop() { Progress::Stop(); }
@@ -87,6 +88,7 @@ protected:
 	bool loadOnlyNotes = false;
 	bool deduplicateRepeatedTracks = true;
 	bool assumeLayerRepeats = true;
+	bool riskyFastDedupe = false;
 
 	struct MIDIStreamInfo
 	{

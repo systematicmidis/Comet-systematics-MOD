@@ -366,6 +366,8 @@ target_sources(Comet PRIVATE
     IO/MappedFile.cpp
     IO/ArchiveLoader.h
     IO/ArchiveLoader.cpp
+    MIDI/Audio/KestrelEngine.h
+    MIDI/Audio/KestrelEngine.cpp
 )
 
 # libarchive's headers import their functions as DLL symbols unless this is set for a static build.

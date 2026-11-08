@@ -1130,33 +1130,46 @@ void SettingsDialog::DrawAudioTab()
 		SETUP_SECTION;
 
 		SECTION_ENTRY(
-			SECTION_LABEL("Audio engine"),
+			TABLE_LABEL_TOOLTIP(
+				"MIDI out",
+				"Where the song is played. Realtime sends notes to OmniMIDI, Prerendered synthesises "
+				"them itself, and Kestrel, Merlin and Rendered ahead render the file on the GPU first."
+			),
 			{
 				AudioEngineList& engineList = midiAudio->GetEngineList();
-				size_t engineIndex = 0;
-				for (auto& engine : engineList)
+				const AudioEngineType current = midiAudio->GetCurrentEngineType();
+
+				std::string currentName = "None";
+				if (AudioEngine* engine = engineList[(size_t)current].get())
+					currentName = engine->GetName();
+
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::BeginCombo("##midiOut", currentName.c_str()))
 				{
-					if (engine == nullptr)
+					size_t engineIndex = 0;
+					for (auto& engine : engineList)
 					{
+						if (engine == nullptr)
+						{
+							engineIndex++;
+							continue;
+						}
+
+						const AudioEngineType type = (AudioEngineType)engineIndex;
+						const bool isSupported = engine->IsSupported();
+
+						ImGui::BeginDisabled(!isSupported);
+						if (ImGui::Selectable(engine->GetName().c_str(), type == current))
+							midiAudio->SwitchEngine(type);
+						ImGui::EndDisabled();
+
+						if (!isSupported && ImGui::IsItemHovered())
+							ImGui::SetTooltip("This engine is not supported on your platform.");
+
 						engineIndex++;
-						continue;
 					}
 
-					AudioEngineType type = (AudioEngineType)engineIndex;
-
-					bool isSupported = engine->IsSupported();
-
-					ImGui::BeginDisabled(!isSupported);
-					if (ImGui::RadioButton(engine->GetName().c_str(), midiAudio->GetCurrentEngineType() == type))
-						midiAudio->SwitchEngine(type);
-
-					if (!isSupported)
-						ImGui::SetItemTooltip("This engine is not supported on your platform.");
-					ImGui::EndDisabled();
-
-					ImGui::Spacing();
-
-					engineIndex++;
+					ImGui::EndCombo();
 				}
 			}
 		);
@@ -1303,6 +1316,17 @@ void SettingsDialog::DrawModTab()
 		ImGui::Checkbox(
 			"Assume the rest of a layer repeats when its size fits (fast; exact unless sizes collide)",
 			&config->layeredDedupe.assumeLayerRepeats
+		);
+
+		ImGui::Checkbox(
+			"Risky fast dedup: stop decoding a layer once its first tile repeats",
+			&config->layeredDedupe.riskyFastDedupe
+		);
+		ImGui::SetItemTooltip(
+			"A tile is one archive member repeated back to back, or a run of up to 64 members "
+			"repeated as a whole. When the rest of the layer is an exact multiple of the tile's "
+			"size it is assumed to be that tile, so the bytes are never decoded. Off at every start "
+			"and never saved: silently wrong on layers made of different tiles that happen to fit."
 		);
 		ImGui::EndDisabled();
 		ImGui::Unindent(24.0f);

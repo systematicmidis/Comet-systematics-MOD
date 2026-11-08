@@ -13,6 +13,7 @@
 #endif
 
 #include <cstdio>
+#include <iostream>
 
 namespace
 {
@@ -46,6 +47,27 @@ namespace
 
 	// A decompression bomb should fail loudly instead of taking the machine down with it.
 	constexpr int MAX_NESTING = 8;
+
+	// Risky fast dedup, off until the user asks for it for this session.
+	std::atomic<bool> g_riskyFastDedupe{ false };
+
+	// The smallest p such that the buffer is the same p bytes over and over, or 0 when it is not an
+	// exact repetition. This is the tile size the layer is built from.
+	size_t SmallestPeriod(const uint8_t* data, size_t size)
+	{
+		if (size < 2) return 0;
+
+		std::vector<size_t> prefix(size, 0);
+		for (size_t i = 1, k = 0; i < size; i++)
+		{
+			while (k > 0 && data[i] != data[k]) k = prefix[k - 1];
+			if (data[i] == data[k]) k++;
+			prefix[i] = k;
+		}
+
+		const size_t period = size - prefix[size - 1];
+		return (period > 0 && size % period == 0) ? period : 0;
+	}
 
 	const uint8_t SIG_ZIP[] = { 'P', 'K', 0x03, 0x04 };
 	const uint8_t SIG_7Z[] = { '7', 'z', 0xBC, 0xAF, 0x27, 0x1C };
@@ -134,7 +156,16 @@ namespace
 	bool ReadEntryData(archive* a, const uint8_t* prefix, size_t prefixSize, int64_t declaredSize,
 		const std::atomic<bool>* cancel, std::vector<uint8_t>& out, std::string& error)
 	{
+		constexpr size_t RISKY_WINDOW = 2u << 20;
+
 		const uint64_t budget = MemoryBudget();
+
+		// A MIDI entry is never a layer to skip through, and without a declared size there is no
+		// "rest of the layer" to fill.
+		const bool useRiskyDedupe = g_riskyFastDedupe.load(std::memory_order_relaxed)
+			&& declaredSize > 0 && !IsMidiHeader(prefix, prefixSize);
+		bool riskyAttempted = false;
+
 		out.clear();
 		if (declaredSize > 0 && (uint64_t)declaredSize <= budget)
 		{
@@ -160,6 +191,35 @@ namespace
 			}
 
 			out.insert(out.end(), buffer, buffer + got);
+
+			// Risky fast dedup: a layer built as "header + one tile repeated" does not need to be
+			// decoded past the second tile. Nothing is guessed unless the rest of the layer's declared
+			// size divides exactly by the tile, which is the case the option is meant for.
+			if (useRiskyDedupe && !riskyAttempted && out.size() >= RISKY_WINDOW * 3)
+			{
+				riskyAttempted = true;
+
+				const size_t tile = SmallestPeriod(out.data() + out.size() - RISKY_WINDOW, RISKY_WINDOW);
+				const uint64_t remaining = (uint64_t)declaredSize - (uint64_t)out.size();
+
+				if (tile >= 64 && remaining > 0 && remaining % tile == 0
+					&& (uint64_t)declaredSize <= budget)
+				{
+					const size_t filled = out.size();
+					const std::vector<uint8_t> pattern(out.end() - (std::ptrdiff_t)tile, out.end());
+
+					out.resize((size_t)declaredSize);
+					for (size_t at = filled; at < out.size(); at += tile)
+						std::memcpy(out.data() + at, pattern.data(), std::min(tile, out.size() - at));
+
+					std::cout << "Layered DeDupe (risky): layer of " << declaredSize << " bytes repeats a "
+						<< tile << "-byte tile, so the last " << remaining << " bytes were assumed instead of "
+						<< "decoded." << std::endl;
+
+					archive_read_data_skip(a);
+					return true;
+				}
+			}
 		}
 
 		return true;
@@ -359,6 +419,11 @@ namespace
 		result.error = "No MIDI file was found inside this archive.";
 		return result;
 	}
+}
+
+void ArchiveLoader::SetRiskyFastDedupe(bool on)
+{
+	g_riskyFastDedupe.store(on, std::memory_order_relaxed);
 }
 
 bool ArchiveLoader::IsArchive(const std::filesystem::path& path)

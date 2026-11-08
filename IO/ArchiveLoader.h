@@ -31,4 +31,9 @@ public:
 		const std::atomic<bool>* cancel,
 		std::atomic<uint64_t>* done = nullptr,
 		std::atomic<uint64_t>* total = nullptr);
+
+	// Risky fast dedup: stop decoding a layer once its first tile has repeated and the rest of the
+	// layer divides exactly by that tile's size. Wrong on a layer made of different tiles that
+	// happen to fit, which is why it is off unless the user turns it on for a session.
+	static void SetRiskyFastDedupe(bool on);
 };

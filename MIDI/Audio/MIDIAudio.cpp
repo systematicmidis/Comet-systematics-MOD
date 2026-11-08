@@ -4,6 +4,7 @@
 #define MAESTRO_INCLUDE
 #include "MaestroEngine.h"
 
+#include "KestrelEngine.h"
 #include "PrerenderEngine/PrerenderedEngine.h"
 #ifdef _WIN32
 #include "PrerenderEngine/BASSMIDI.h"
@@ -16,6 +17,9 @@ MIDIAudio::MIDIAudio()
 	audioEngines[AUDIO_ENGINE_INDEX(Realtime)] = std::make_unique<AudioThread>(midiOut);
 	audioEngines[AUDIO_ENGINE_INDEX(Prerendered)] = std::make_unique<PrerenderedEngine>();
 	audioEngines[AUDIO_ENGINE_INDEX(Maestro)] = std::make_unique<MaestroEngine>();
+	audioEngines[AUDIO_ENGINE_INDEX(Kestrel)] = std::make_unique<KestrelEngine>(KestrelEngine::Mode::Gpu);
+	audioEngines[AUDIO_ENGINE_INDEX(Merlin)] = std::make_unique<KestrelEngine>(KestrelEngine::Mode::Merlin);
+	audioEngines[AUDIO_ENGINE_INDEX(RenderedAhead)] = std::make_unique<KestrelEngine>(KestrelEngine::Mode::RenderedAhead);
 }
 
 void MIDIAudio::SwitchEngine(AudioEngineType engine)
@@ -34,6 +38,11 @@ void MIDIAudio::SwitchEngine(AudioEngineType engine)
 
 	AudioEngine* newEngine = GetCurrentEngine();
 	newEngine->Initialize();
+
+	// The song may have been loaded before this engine was chosen; Kestrel and Merlin render the
+	// file itself, so they cannot start without its path.
+	if (!lastSourcePath.empty())
+		newEngine->SetSourcePath(lastSourcePath);
 
 	if (lastPlaying)
 	{
