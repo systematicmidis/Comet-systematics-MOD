@@ -185,13 +185,11 @@ std::shared_ptr<MIDISequence> MIDILoader::Load(bool timeBasedLoading)
 	SetName("Merging events...");
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
 
-	NoteSequence mergedNotes = SequenceFuncs::FlattenSequence(std::move(notesToMerge));
-	std::vector<MIDIMessageEvent> mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
+	seq->mergedNotes = SequenceFuncs::MergeAndDistribute(std::move(notesToMerge));
+	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
 	SetName("Finalizing (1/2)...");
 	std::cout << "  Finishing up" << std::endl;
-	seq->mergedNotes = SequenceFuncs::DistributeNotes(std::move(mergedNotes));
-	seq->mergedEvents = std::move(mergedEvents);
 	// really weird way to do this but ok
 	seq->tempoMap = std::make_shared<TempoMap>();
 	seq->tempoMap->RebuildTempoMap(seq.get());

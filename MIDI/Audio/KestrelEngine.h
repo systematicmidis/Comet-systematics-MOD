@@ -132,7 +132,9 @@ private:
 	void CloseChannel();
 
 	// --- rendered ahead: play the audio kestrel has already written -------------------------
-	bool Streaming() const { return mode == Mode::RenderedAhead; }
+	// Merlin mixes every key only once the song ends, so it cannot stream. The GPU engine and
+	// rendered-ahead write the first chunk behind the playhead and play as it lands.
+	bool Streaming() const { return mode != Mode::Merlin; }
 	bool RenderTo(const std::string& outputPath, int secondsLimit);
 	void RenderLoopStreaming();
 	bool OpenGrowingWav();

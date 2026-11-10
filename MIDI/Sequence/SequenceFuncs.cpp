@@ -74,6 +74,87 @@ NoteSequence SequenceFuncs::FlattenSequence(std::vector<NoteSequence>&& tracks)
     return result;
 }
 
+std::vector<NoteSequence> SequenceFuncs::MergeAndDistribute(std::vector<NoteSequence>&& tracks)
+{
+    std::vector<NoteSequence> result(MIDI_KEYS);
+    if (tracks.empty()) return result;
+
+    // Count per key first: reserving exact sizes means no reallocation while notes are copied.
+    size_t counts[MIDI_KEYS]{};
+    for (const NoteSequence& track : tracks)
+    {
+        for (size_t i = 0; i < track.Size(); i++)
+            counts[track.GetKey(i)]++;
+    }
+
+    for (size_t key = 0; key < MIDI_KEYS; key++)
+        result[key].Reserve(counts[key]);
+
+    auto emit = [&result](const NoteSequence& src, size_t idx)
+    {
+        const uint8_t key = src.GetKey(idx);
+        result[key].Emplace(src.GetTrack(idx), src.GetChannel(idx), src.tick[idx], key,
+            src.gate[idx], src.GetVelocity(idx));
+    };
+
+    if (tracks.size() == 1)
+    {
+        // A single track is already in tick order, so it only has to be split.
+        const NoteSequence& only = tracks[0];
+        for (size_t i = 0; i < only.Size(); i++)
+            emit(only, i);
+
+        return result;
+    }
+
+    struct TrackHead
+    {
+        size_t elementIdx;
+        uint32_t trackIdx;
+        uint32_t tick;
+
+        bool operator<(const TrackHead& other) const
+        {
+            if (tick != other.tick)
+                return tick > other.tick;
+            return trackIdx > other.trackIdx;
+        }
+    };
+
+    std::vector<TrackHead> heap;
+    heap.reserve(tracks.size());
+
+    for (size_t i = 0; i < tracks.size(); i++)
+    {
+        if (!tracks[i].Empty())
+            heap.push_back({ 0, static_cast<uint32_t>(i), tracks[i].tick[0] });
+    }
+
+    std::make_heap(heap.begin(), heap.end());
+
+    while (!heap.empty())
+    {
+        std::pop_heap(heap.begin(), heap.end());
+        TrackHead& head = heap.back();
+
+        const NoteSequence& src = tracks[head.trackIdx];
+        emit(src, head.elementIdx);
+
+        head.elementIdx++;
+        if (head.elementIdx < src.Size())
+        {
+            head.tick = src.tick[head.elementIdx];
+            std::push_heap(heap.begin(), heap.end());
+        }
+        else
+        {
+            heap.pop_back();
+        }
+    }
+
+    return result;
+}
+
 std::vector<NoteSequence> SequenceFuncs::DistributeNotes(NoteSequence&& notes)
 {
     std::vector<NoteSequence> result(MIDI_KEYS);

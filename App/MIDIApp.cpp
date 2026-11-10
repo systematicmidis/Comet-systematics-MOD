@@ -175,16 +175,11 @@ bool MIDIApp::IsGLReady() const
 
 std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
 {
-	// Archives are always parsed by the multi-threaded loader: extraction already puts the MIDI in
-	// memory, and it is the path that parses mapped/decompressed bytes without copying them again.
-	const std::filesystem::path filePath(reinterpret_cast<const char8_t*>(path));
-	const bool archive = ArchiveLoader::IsArchive(filePath);
-
-	std::shared_ptr<AbstractMIDILoader> loader;
-	if (archive || config.midi.multithreadedLoading)
-		loader = std::make_shared<MultithreadedMIDILoader>(path);
-	else
-		loader = std::make_shared<MIDILoader>(path);
+	// The mapped loader is the fast one on every file - archives included, because extraction
+	// already leaves the MIDI in memory - so it is always used. The loading-thread setting then
+	// only decides whether it spreads the tracks over the machine or parses them on this thread.
+	auto loader = std::make_shared<MultithreadedMIDILoader>(path);
+	loader->SetWorkerLimit(config.midi.multithreadedLoading ? 0 : 1);
 
 	loader->SetLoadOnlyNotes(config.midi.loadNotesOnly);
 	loader->SetLayeredDedupe(config.layeredDedupe.deduplicateRepeatedTracks,

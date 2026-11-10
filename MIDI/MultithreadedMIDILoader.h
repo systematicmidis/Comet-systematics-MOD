@@ -23,6 +23,9 @@ public:
 
 	std::shared_ptr<MIDISequence> Load(bool timeBasedLoading = false) override;
 
+	// 0 leaves the worker count to the machine; 1 parses on this thread.
+	void SetWorkerLimit(size_t workers) { workerLimit = workers; }
+
 	void Stop() override
 	{
 		AbstractMIDILoader::Stop();
@@ -46,6 +49,7 @@ private:
 
 	std::atomic<bool> running{ false };
 	std::atomic<size_t> tracksProcessed{ 0 };
+	size_t workerLimit = 0;
 
 	// Progress of the decompression phase, read by the loading dialog's bar.
 	std::atomic<uint64_t> archiveDone{ 0 };

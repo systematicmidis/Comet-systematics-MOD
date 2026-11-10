@@ -130,5 +130,9 @@ public:
     // static std::vector<std::vector<NoteEvent>> DistributeNotes(std::vector<NoteEvent>&& notes);
     static NoteSequence FlattenSequence(std::vector<NoteSequence>&& tracks);
     static std::vector<NoteSequence> DistributeNotes(NoteSequence&& notes);
+
+    // Merge the tick-ordered tracks and split them per key in one pass. Doing the split during
+    // the merge saves building and then re-reading a whole-file note sequence.
+    static std::vector<NoteSequence> MergeAndDistribute(std::vector<NoteSequence>&& tracks);
     static void ApplyTempoEvents(uint16_t ppq, TempoMap* tempoMap, NoteSequence& notes);
 };

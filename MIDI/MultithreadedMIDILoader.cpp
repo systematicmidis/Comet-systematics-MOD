@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iterator>
 #include <thread>
+#include <unordered_map>
 #include "Sequence/SequenceFuncs.h"
 #include "TempoMap.h"
 #include "IO/ArchiveLoader.h"
@@ -259,7 +260,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	{
 		unsigned int hardwareThreads = std::thread::hardware_concurrency();
 		if (hardwareThreads == 0) hardwareThreads = 16;
-		const size_t numThreads = std::min<size_t>(trackCount, hardwareThreads);
+		size_t limit = hardwareThreads;
+		if (workerLimit > 0) limit = std::min(limit, workerLimit);
+		const size_t numThreads = std::min<size_t>(trackCount, limit);
 
 		AddBar([this, uniqueTrackCount]()
 			{
@@ -397,13 +400,11 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
 	SetName("Parsing finished! Merging events...");
 
-	NoteSequence mergedNotes = SequenceFuncs::FlattenSequence(std::move(notesToMerge));
-	std::vector<MIDIMessageEvent> mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
+	seq->mergedNotes = SequenceFuncs::MergeAndDistribute(std::move(notesToMerge));
+	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
 	SetName("Finalizing (1/2)...");
 	std::cout << "  Finishing up" << std::endl;
-	seq->mergedNotes = SequenceFuncs::DistributeNotes(std::move(mergedNotes));
-	seq->mergedEvents = std::move(mergedEvents);
 
 	seq->tempoMap = std::make_shared<TempoMap>();
 	seq->tempoMap->RebuildTempoMap(seq.get());
@@ -501,8 +502,11 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 {
 	ByteCursor cursor{ chunk.data, chunk.data + chunk.length };
 
-	std::array<std::vector<size_t>, MIDI_KEYS << 4> unendedNotes{};
-	size_t currNoteId = 0;
+	// Open notes are a stack per key+channel, linked through noteNext. A track used to build and
+	// destroy 2048 std::vectors, which dominated a file with thousands of short tracks.
+	std::array<uint32_t, MIDI_KEYS << 4> stackHead{};
+	stackHead.fill(UINT32_MAX);
+	std::vector<uint32_t> noteNext;
 
 	uint32_t currTick = 0;
 	uint8_t prevCommand = 0;
@@ -554,11 +558,11 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 				if (key >= MIDI_KEYS) continue;
 
-				auto& un = unendedNotes[((size_t)key << 4) | (size_t)channel];
-				if (!un.empty())
+				const uint32_t slot = ((uint32_t)key << 4) | channel;
+				const uint32_t n = stackHead[slot];
+				if (n != UINT32_MAX)
 				{
-					const size_t n = un.back();
-					un.pop_back();
+					stackHead[slot] = noteNext[n];
 					midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
 				}
 
@@ -572,18 +576,19 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 				if (key >= MIDI_KEYS) continue;
 
-				auto& un = unendedNotes[((size_t)key << 4) | (size_t)channel];
+				const uint32_t slot = ((uint32_t)key << 4) | channel;
 
 				if (vel > 0)
 				{
+					const uint32_t id = (uint32_t)midiTrack.notes.Size();
 					midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
-					un.push_back(currNoteId);
-					currNoteId++;
+					noteNext.push_back(stackHead[slot]);
+					stackHead[slot] = id;
 				}
-				else if (!un.empty())
+				else if (stackHead[slot] != UINT32_MAX)
 				{
-					const size_t n = un.back();
-					un.pop_back();
+					const uint32_t n = stackHead[slot];
+					stackHead[slot] = noteNext[n];
 					midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
 				}
 				continue;
