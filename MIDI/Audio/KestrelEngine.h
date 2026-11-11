@@ -69,6 +69,7 @@ private:
 		bool dcBlocker = true;  // ditto
 
 		int gpuBackend = 0;     // 0 automatic, 1 vulkan, 2 dx12, 3 metal, 4 gl
+		std::string gpuAdapter; // card name for --gpu-adapter; empty lets kestrel choose
 		int interpolation = 1;  // 0 nearest, 1 linear, 2 cubic
 		int velocityThreshold = 0;
 

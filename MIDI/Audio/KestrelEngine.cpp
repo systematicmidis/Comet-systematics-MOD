@@ -11,6 +11,9 @@
 #include <iostream>
 #include <sstream>
 
+#include <dxgi.h>
+#pragma comment(lib, "dxgi.lib")
+
 #include <imgui.h>
 #include "Utils.h"
 
@@ -25,7 +28,52 @@ namespace
 
 	const int BLOCK_SIZES[] = { 512, 1024, 2048, 4096, 8192 };
 	const char* const LIMITERS[] = { "Gentle", "Balanced", "Loud" };
-	const char* const GPU_BACKENDS[] = { "Automatic (the strongest)", "Vulkan", "DX12", "Metal", "GL" };
+	// One adapter on one backend, as kestrel's --gpu-adapter / --gpu-backend pair names them. The
+	// cards in the list are whatever this machine has; another PC shows its own.
+	struct GpuChoice
+	{
+		std::string name;
+		int backend; // 1 vulkan, 2 dx12
+	};
+
+	const std::vector<GpuChoice>& GpuChoices()
+	{
+		static const std::vector<GpuChoice> choices = []
+		{
+			std::vector<GpuChoice> cards;
+
+			IDXGIFactory1* factory = nullptr;
+			if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory)) || factory == nullptr)
+				return cards;
+
+			for (UINT i = 0; ; i++)
+			{
+				IDXGIAdapter1* adapter = nullptr;
+				if (factory->EnumAdapters1(i, &adapter) != S_OK || adapter == nullptr)
+					break;
+
+				DXGI_ADAPTER_DESC1 desc{};
+				if (SUCCEEDED(adapter->GetDesc1(&desc)) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0)
+				{
+					char utf8[512]{};
+					if (WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, utf8, (int)sizeof(utf8) - 1,
+						nullptr, nullptr) > 0)
+					{
+						// Each card is offered on both backends kestrel can use on Windows.
+						cards.push_back({ utf8, 1 });
+						cards.push_back({ utf8, 2 });
+					}
+				}
+
+				adapter->Release();
+			}
+
+			factory->Release();
+			return cards;
+		}();
+
+		return choices;
+	}
 	const char* const INTERPOLATIONS[] = { "Nearest", "Linear", "Cubic" };
 
 	std::wstring Widen(const std::string& text)
@@ -367,6 +415,7 @@ std::string KestrelEngine::CachedWavPath() const
 		<< "|" << settings.maxVoices
 		<< "|" << settings.blockSize
 		<< "|" << settings.gpuBackend
+		<< "|" << settings.gpuAdapter
 		<< "|" << settings.interpolation
 		<< "|" << settings.velocityThreshold;
 
@@ -468,6 +517,9 @@ void KestrelEngine::RenderLoop()
 			commandLine += std::wstring(L" --gpu-backend ") + names[settings.gpuBackend];
 		}
 
+		if (!settings.gpuAdapter.empty())
+			commandLine += L" --gpu-adapter \"" + Widen(settings.gpuAdapter) + L"\"";
+
 		if (settings.interpolation > 0 && settings.interpolation <= 2)
 		{
 			static const wchar_t* const names[] = { L"", L"linear", L"cubic" };
@@ -557,6 +609,9 @@ bool KestrelEngine::RenderTo(const std::string& outputPath, int secondsLimit)
 		static const wchar_t* const names[] = { L"", L"vulkan", L"dx12", L"metal", L"gl" };
 		commandLine += std::wstring(L" --gpu-backend ") + names[settings.gpuBackend];
 	}
+
+	if (!settings.gpuAdapter.empty())
+		commandLine += L" --gpu-adapter \"" + Widen(settings.gpuAdapter) + L"\"";
 
 	if (settings.interpolation > 0 && settings.interpolation <= 2)
 	{
@@ -1083,6 +1138,7 @@ YAML::Node KestrelEngine::GetSettings()
 	node["ceilingDb"] = settings.ceilingDb;
 	node["dcBlocker"] = settings.dcBlocker;
 	node["gpuBackend"] = settings.gpuBackend;
+	node["gpuAdapter"] = settings.gpuAdapter;
 	node["interpolation"] = settings.interpolation;
 	node["velocityThreshold"] = settings.velocityThreshold;
 	node["engine"] = settings.engineForAhead;
@@ -1122,6 +1178,7 @@ void KestrelEngine::LoadSettings(const YAML::Node& node)
 	if (node["ceilingDb"]) settings.ceilingDb = std::clamp(node["ceilingDb"].as<int>(), -30, 0);
 	if (node["dcBlocker"]) settings.dcBlocker = node["dcBlocker"].as<bool>();
 	if (node["gpuBackend"]) settings.gpuBackend = std::clamp(node["gpuBackend"].as<int>(), 0, 4);
+	if (node["gpuAdapter"]) settings.gpuAdapter = node["gpuAdapter"].as<std::string>();
 	if (node["interpolation"]) settings.interpolation = std::clamp(node["interpolation"].as<int>(), 0, 2);
 	if (node["velocityThreshold"]) settings.velocityThreshold = std::clamp(node["velocityThreshold"].as<int>(), 0, 127);
 	if (node["engine"]) settings.engineForAhead = std::clamp(node["engine"].as<int>(), 0, 2);
@@ -1225,12 +1282,47 @@ namespace
 		return changed;
 	}
 
-	void DrawGpuBackendCombo(int& value)
+	void DrawGpuBackendCombo(int& backend, std::string& adapter)
 	{
-		value = std::clamp(value, 0, 4);
+		const std::vector<GpuChoice>& cards = GpuChoices();
+
+		std::vector<std::string> labels;
+		labels.push_back("Automatic (the strongest)");
+
+		int selected = 0;
+		for (size_t i = 0; i < cards.size(); i++)
+		{
+			labels.push_back(cards[i].name + (cards[i].backend == 1 ? " (Vulkan)" : " (DirectX 12)"));
+
+			if (backend == cards[i].backend && adapter == cards[i].name)
+				selected = (int)i + 1;
+		}
+
+		std::vector<const char*> items;
+		items.reserve(labels.size());
+		for (const std::string& label : labels)
+			items.push_back(label.c_str());
 
 		ImGui::SetNextItemWidth(-1.0f);
-		ImGui::Combo("##gpuBackend", &value, GPU_BACKENDS, 5);
+		if (ImGui::Combo("##gpuBackend", &selected, items.data(), (int)items.size()))
+		{
+			if (selected <= 0)
+			{
+				backend = 0;
+				adapter.clear();
+			}
+			else
+			{
+				const GpuChoice& choice = cards[(size_t)selected - 1];
+				backend = choice.backend;
+				adapter = choice.name;
+			}
+		}
+
+		ImGui::SetItemTooltip(cards.empty()
+			? "No graphics card was found, so kestrel picks one itself."
+			: "Only the cards in this PC are listed, on each backend kestrel can use; another PC shows "
+			  "its own. Automatic lets kestrel pick the strongest.");
 	}
 
 	void DrawBlockSizeCombo(int& value)
@@ -1308,7 +1400,7 @@ void KestrelEngine::DrawKestrelPanel()
 
 	ImGui::Text("Graphics card:");
 	ImGui::SameLine(150.0f);
-	DrawGpuBackendCombo(settings.gpuBackend);
+	DrawGpuBackendCombo(settings.gpuBackend, settings.gpuAdapter);
 
 	ImGui::Text("Interpolation:");
 	ImGui::SameLine(150.0f);
@@ -1374,7 +1466,7 @@ void KestrelEngine::DrawRenderedAheadPanel()
 
 	ImGui::Text("Graphics card:");
 	ImGui::SameLine(150.0f);
-	DrawGpuBackendCombo(settings.gpuBackend);
+	DrawGpuBackendCombo(settings.gpuBackend, settings.gpuAdapter);
 
 	ImGui::Text("Block size:");
 	ImGui::SameLine(150.0f);
@@ -1403,10 +1495,9 @@ void KestrelEngine::DrawRenderedAheadPanel()
 
 	ImGui::Spacing();
 	ImGui::TextDisabled(
-		"The first %d seconds are rendered on their own, so playback starts as soon as that chunk "
-		"exists; the whole song renders behind it and takes over when the chunk runs out. kestrel "
-		"writes the audio as it goes, so nothing waits for the whole file. Merlin can only mix at the "
-		"end, so it stays silent until then.",
+		"Renders audio %d seconds ahead rather than the whole song at once: playback starts as soon "
+		"as the first chunk exists, the rest renders behind it, and the next chunk takes over when "
+		"this one runs out. Merlin can only mix at the end, so it stays silent until then.",
 		settings.renderAheadSeconds
 	);
 }
