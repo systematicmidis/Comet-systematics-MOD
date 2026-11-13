@@ -25,7 +25,7 @@ public:
 	virtual YAML::Node GetSettings() { return YAML::Node(); }
 	virtual void LoadSettings(const YAML::Node& node) {}
 
-	// Engines that render the file itself (Kestrel, Merlin) need the path the song came from.
+	// Kept for engines that render the file itself rather than its notes.
 	virtual void SetSourcePath(const std::string& path) {}
 
 	virtual void Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MIDITimer> timer) = 0;
@@ -48,9 +48,6 @@ enum class AudioEngineType
 	Realtime,
 	Prerendered,
 	Maestro,
-	Kestrel,
-	Merlin,
-	RenderedAhead,
 	Count
 };
 

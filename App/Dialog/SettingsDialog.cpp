@@ -1132,8 +1132,8 @@ void SettingsDialog::DrawAudioTab()
 		SECTION_ENTRY(
 			TABLE_LABEL_TOOLTIP(
 				"MIDI out",
-				"Where the song is played. Realtime sends notes to OmniMIDI, Prerendered synthesises "
-				"them itself, and Kestrel, Merlin and Rendered ahead render the file on the GPU first."
+				"Where the song is played. Realtime sends notes to OmniMIDI (v2 or newer), Prerendered "
+				"and Maestro synthesise them inside Comet."
 			),
 			{
 				AudioEngineList& engineList = midiAudio->GetEngineList();
