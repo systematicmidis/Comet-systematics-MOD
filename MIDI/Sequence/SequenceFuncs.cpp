@@ -5,6 +5,7 @@
 #include <thread>
 #include <array>
 #include <vector>
+#include <numeric>
 
 NoteSequence SequenceFuncs::FlattenSequence(std::vector<NoteSequence>&& tracks)
 {
@@ -83,39 +84,58 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
     std::vector<NoteSequence> result(MIDI_KEYS);
     if (tracks.empty()) return result;
 
-    struct Ref
-    {
-        uint32_t tick;
-        uint32_t track;
-        uint32_t index;
-    };
-
-    auto less = [](const Ref& a, const Ref& b)
-    {
-        if (a.tick != b.tick) return a.tick < b.tick;
-        if (a.track != b.track) return a.track < b.track;
-        return a.index < b.index;
-    };
-
     size_t totalNotes = 0;
+    for (const NoteSequence& track : tracks)
+        totalNotes += track.Size();
+
+    if (totalNotes == 0) return result;
+
+    // One track is already in tick order, so splitting it by key keeps that order. Going through
+    // the windowed merge here would allocate a full ref array for nothing; real black MIDIs are
+    // often a single huge track, which made that copy the largest allocation in the load.
+    if (tracks.size() == 1)
+    {
+        const NoteSequence& only = tracks[0];
+
+        size_t counts[MIDI_KEYS]{};
+        for (size_t i = 0; i < only.Size(); i++)
+            counts[only.GetKey(i)]++;
+
+        size_t cursor[MIDI_KEYS]{};
+        for (size_t key = 0; key < MIDI_KEYS; key++)
+        {
+            result[key].Resize(counts[key]);
+            cursor[key] = 0;
+        }
+
+        for (size_t i = 0; i < only.Size(); i++)
+        {
+            const uint8_t key = only.GetKey(i);
+            const size_t pos = cursor[key]++;
+
+            result[key].tick[pos] = only.tick[i];
+            result[key].gate[pos] = only.gate[i];
+            result[key].packed[pos] = only.packed[i];
+        }
+
+        return result;
+    }
+
     uint32_t maxTick = 0;
     for (const NoteSequence& track : tracks)
     {
-        totalNotes += track.Size();
         for (size_t i = 0; i < track.Size(); i++)
         {
             if (track.tick[i] > maxTick) maxTick = track.tick[i];
         }
     }
 
-    if (totalNotes == 0) return result;
-
     constexpr size_t WINDOWS = 64;
     const uint32_t windowTicks =
         std::max<uint32_t>(1, (maxTick + (uint32_t)WINDOWS - 1) / (uint32_t)WINDOWS);
 
-    // Exact size per (key, window), then one running offset per key: the buffers never grow and
-    // the refs below are laid out in the same order, so a bucket is a contiguous slice.
+    // Exact size per (key, window), then one running offset per key: the output buffers never
+    // grow, and notes can be written straight into their window while they are being scattered.
     std::vector<size_t> counts((size_t)MIDI_KEYS * WINDOWS, 0);
     for (const NoteSequence& track : tracks)
     {
@@ -139,83 +159,77 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
         result[key].Resize(running);
     }
 
-    // Offsets are per key, so the refs array needs a base past every earlier key's notes.
-    std::vector<size_t> refBase((size_t)MIDI_KEYS, 0);
-    size_t base = 0;
-    for (size_t key = 0; key < MIDI_KEYS; key++)
-    {
-        refBase[key] = base;
-        base += result[key].Size();
-    }
-
-    // Scatter every note straight into its window bucket. The old version walked all tracks once
-    // per window with a binary search each time, which is millions of random reads on files with
-    // thousands of tracks; this is one sequential pass over the notes.
-    std::vector<Ref> refs(totalNotes);
+    // Scatter each note into its final slot. Notes enter a bucket in (track, index) order, which
+    // is exactly the heap merge's tie-break, so a stable sort on tick alone reproduces its order.
     std::vector<size_t> cursor(offsets);
-    for (size_t key = 0; key < MIDI_KEYS; key++)
-    {
-        for (size_t w = 0; w < WINDOWS; w++)
-            cursor[key * WINDOWS + w] += refBase[key];
-    }
-
     for (uint32_t t = 0; t < (uint32_t)tracks.size(); t++)
     {
         const NoteSequence& track = tracks[t];
         for (size_t i = 0; i < track.Size(); i++)
         {
             const size_t w = std::min<size_t>(WINDOWS - 1, track.tick[i] / windowTicks);
-            const size_t pos = cursor[(size_t)track.GetKey(i) * WINDOWS + w]++;
-            refs[pos] = { track.tick[i], t, (uint32_t)i };
+            const uint8_t key = track.GetKey(i);
+            const size_t pos = cursor[(size_t)key * WINDOWS + w]++;
+
+            result[key].tick[pos] = track.tick[i];
+            result[key].gate[pos] = track.gate[i];
+            result[key].packed[pos] = track.packed[i];
         }
     }
 
-    // A bucket only has to be ordered internally; buckets are already in tick order, so the
-    // per-key output comes out sorted without ever sorting the whole file.
+    // The previous version laid out a 12-byte ref per note before it could sort. Sorting 4-byte
+    // indices over the already-scattered ticks uses a third of that, and the scratch buffers are
+    // reused, so peak memory is one full note array instead of two.
+    std::vector<uint32_t> order;
+    std::vector<uint32_t> tmpTick;
+    std::vector<uint32_t> tmpGate;
+    std::vector<uint32_t> tmpPacked;
+
     for (size_t key = 0; key < MIDI_KEYS; key++)
     {
         NoteSequence& out = result[key];
 
         for (size_t w = 0; w < WINDOWS; w++)
         {
-            const size_t start = refBase[key] + offsets[key * WINDOWS + w];
-            const size_t count = counts[key * WINDOWS + w];
-            if (count == 0) continue;
+            const size_t start = offsets[key * WINDOWS + w];
+            const size_t n = counts[key * WINDOWS + w];
+            if (n < 2) continue;
 
-            Ref* bucket = refs.data() + start;
+            order.resize(n);
+            for (size_t i = 0; i < n; i++)
+                order[i] = (uint32_t)i;
 
-            if (count > 1)
+            const uint32_t* ticks = out.tick.data() + start;
+            std::stable_sort(order.begin(), order.end(),
+                [ticks](uint32_t a, uint32_t b) { return ticks[a] < ticks[b]; });
+
+            bool sorted = true;
+            for (size_t i = 0; i < n; i++)
             {
-                if (count <= 16)
+                if (order[i] != i)
                 {
-                    for (size_t i = 1; i < count; i++)
-                    {
-                        const Ref value = bucket[i];
-                        size_t j = i;
-                        while (j > 0 && less(value, bucket[j - 1]))
-                        {
-                            bucket[j] = bucket[j - 1];
-                            j--;
-                        }
-                        bucket[j] = value;
-                    }
-                }
-                else
-                {
-                    std::sort(bucket, bucket + count, less);
+                    sorted = false;
+                    break;
                 }
             }
 
-            for (size_t i = 0; i < count; i++)
-            {
-                const Ref& ref = bucket[i];
-                const NoteSequence& src = tracks[ref.track];
-                const size_t pos = offsets[key * WINDOWS + w] + i;
+            if (sorted) continue;
 
-                out.tick[pos] = src.tick[ref.index];
-                out.gate[pos] = src.gate[ref.index];
-                out.packed[pos] = src.packed[ref.index];
+            tmpTick.resize(n);
+            tmpGate.resize(n);
+            tmpPacked.resize(n);
+
+            for (size_t i = 0; i < n; i++)
+            {
+                const size_t src = start + order[i];
+                tmpTick[i] = out.tick[src];
+                tmpGate[i] = out.gate[src];
+                tmpPacked[i] = out.packed[src];
             }
+
+            std::copy(tmpTick.begin(), tmpTick.end(), out.tick.begin() + start);
+            std::copy(tmpGate.begin(), tmpGate.end(), out.gate.begin() + start);
+            std::copy(tmpPacked.begin(), tmpPacked.end(), out.packed.begin() + start);
         }
     }
 
