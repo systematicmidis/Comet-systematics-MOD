@@ -605,7 +605,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	std::vector<ParsedTrack> parsed;
 	std::vector<uint8_t> chunk;
 
-	uint64_t trusted = 0;
+	uint64_t repeatedTracks = 0;
 
 	size_t index = 0;
 	for (; index < declaredTracks && running; index++)
@@ -636,11 +636,19 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		const size_t got = readExact(chunk.data(), chunk.size());
 		chunk.resize(got);
 
+		// Word-at-a-time FNV. Byte-at-a-time took long enough to notice on a multi-gigabyte
+		// repeated track.
 		uint64_t hash = 1469598103934665603ull ^ (uint64_t)got;
-		for (const uint8_t value : chunk)
 		{
-			hash ^= value;
-			hash *= 1099511628211ull;
+			size_t at = 0;
+			for (; at + 8 <= chunk.size(); at += 8)
+			{
+				uint64_t word = 0;
+				std::memcpy(&word, chunk.data() + at, 8);
+				hash = (hash ^ word) * 1099511628211ull;
+			}
+			for (; at < chunk.size(); at++)
+				hash = (hash ^ chunk[at]) * 1099511628211ull;
 		}
 
 		auto match = std::find_if(seen.begin(), seen.end(), [hash, got](const SeenTrack& entry)
@@ -650,18 +658,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 
 		if (match != seen.end())
 		{
+			// Every copy is read and counted. Stopping early would silently drop any track that
+			// comes after the repeats, so the whole archive is always walked to the end.
 			match->multiplicity++;
-
-			// The same track over and over is a layered file. Verifying two of them is enough
-			// once the user has allowed trusting repeats; the rest would only be more of the same.
-			// Only tracks over a gigabyte skip the rest: ordinary songs repeat small tracks in the
-			// middle and still have different music after them.
-			if (assumeLayerRepeats && match->multiplicity >= 2 && match->length > (1ull << 30))
-			{
-				trusted = match->multiplicity;
-				++index;
-				break;
-			}
+			repeatedTracks++;
 
 			chunk.clear();
 			continue;
@@ -684,10 +684,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	ClearBars();
 	if (!running) return seq;
 
-	if (trusted > 0)
+	if (repeatedTracks > 0)
 	{
-		std::cout << "  Trusted a repeated track after " << trusted
-			<< " identical copies; the rest of the archive was not decompressed." << std::endl;
+		std::cout << "  Layered DeDupe: " << repeatedTracks
+			<< " repeated track(s) counted once" << std::endl;
 	}
 
 #pragma region Sequential Assembly
