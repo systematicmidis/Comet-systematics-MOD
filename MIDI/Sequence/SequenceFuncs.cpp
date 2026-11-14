@@ -1,4 +1,8 @@
 #include "SequenceFuncs.h"
+
+#include <algorithm>
+#include <atomic>
+#include <thread>
 #include <array>
 #include <vector>
 

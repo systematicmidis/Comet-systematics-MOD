@@ -529,3 +529,17 @@ add_custom_command(
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET Comet PROPERTY CXX_STANDARD 20)
 endif()
+
+# The windowed merge replaced a heap that combined every track at once; this keeps the old one
+# honest by checking both produce the same per-key note order.
+enable_testing()
+add_executable(CometMergeEquivalence
+    Tests/SequenceMergeEquivalence.cpp
+    MIDI/Sequence/SequenceFuncs.cpp
+    MIDI/TempoMap.cpp
+    MIDI/MIDISequence.cpp
+)
+target_include_directories(CometMergeEquivalence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(CometMergeEquivalence PRIVATE yaml-cpp)
+set_property(TARGET CometMergeEquivalence PROPERTY CXX_STANDARD 20)
+add_test(NAME merge_equivalence COMMAND CometMergeEquivalence)
