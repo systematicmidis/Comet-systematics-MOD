@@ -1,5 +1,6 @@
 #include "MIDIOut.h"
 #include <iostream>
+#include <mutex>
 #include <string>
 #include "Utils.h"
 
@@ -42,6 +43,17 @@ namespace
 		{
 			return false;
 		}
+	}
+
+	std::mutex noticeMutex;
+	std::string noticeMessage;
+	bool noticePending = false;
+
+	void SetFaultNotice(const char* message)
+	{
+		std::lock_guard<std::mutex> lock(noticeMutex);
+		noticeMessage = message;
+		noticePending = true;
 	}
 
 	bool QueryVersion(int (*fn)(), int& version) noexcept
@@ -111,6 +123,9 @@ void MIDIOut::Initialize()
 		if (!QueryVersion(version, value))
 		{
 			std::cerr << "  KDMAPI driver faulted in ReturnKDMAPIVer; continuing without MIDI out." << std::endl;
+		SetFaultNotice("OmniMIDI faulted while Comet started MIDI output, so this session will have no "
+			"sound. The MIDI finished loading and Comet will keep running without MIDI out.\n\n"
+			"Reinstall OmniMIDI (v2) if you need playback through a MIDI device.");
 			FreeLibrary(omni);
 			omni = nullptr;
 			InitStream = nullptr;
@@ -125,6 +140,9 @@ void MIDIOut::Initialize()
 	if (!CallNoArgs(InitStream))
 	{
 		std::cerr << "  KDMAPI driver faulted in InitializeKDMAPIStream; continuing without MIDI out." << std::endl;
+		SetFaultNotice("OmniMIDI faulted while Comet started MIDI output, so this session will have no "
+			"sound. The MIDI finished loading and Comet will keep running without MIDI out.\n\n"
+			"Reinstall OmniMIDI (v2) if you need playback through a MIDI device.");
 		FreeLibrary(omni);
 		omni = nullptr;
 		InitStream = nullptr;
@@ -134,6 +152,16 @@ void MIDIOut::Initialize()
 	}
 
 	initialized = true;
+}
+
+bool MIDIOut::ConsumeFaultNotice(std::string& message)
+{
+	std::lock_guard<std::mutex> lock(noticeMutex);
+	if (!noticePending) return false;
+
+	message = noticeMessage;
+	noticePending = false;
+	return true;
 }
 
 MIDIOut::~MIDIOut()

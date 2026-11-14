@@ -109,8 +109,16 @@ void MainWindow::OpenMIDIDialog()
 	// accepted too; the loader picks the MIDI inside them.
 	Utils::ChooseFile(outPath, "mid;midi;7z;xz;lzma;zip;gz;bz2;bzip2;zst;zstd;lz4;rar;tar;tgz;tbz2;txz");
 	if (outPath.empty()) return;
-	this->midiApp->LoadMIDI(outPath.c_str());
-	this->dialogManager.GetDialog<LoadingDialog>()->Open();
+	LoadMIDIFile(outPath);
+}
+
+void MainWindow::LoadMIDIFile(const std::string& path)
+{
+	if (path.empty() || !midiApp) return;
+
+	this->midiApp->LoadMIDI(path.c_str());
+	if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
+		loading->Open();
 }
 
 void MainWindow::InitializeUI()
@@ -273,6 +281,14 @@ void MainWindow::Run()
 					auto* messageDialog = dialogManager.GetDialog<MessageDialog>();
 					if (messageDialog)
 						messageDialog->Open("Could not load MIDI", loadError);
+				}
+
+				std::string driverNotice;
+				if (midiApp->ConsumeNotice(driverNotice))
+				{
+					auto* messageDialog = dialogManager.GetDialog<MessageDialog>();
+					if (messageDialog)
+						messageDialog->Open("MIDI output unavailable", driverNotice);
 				}
 			}
 

@@ -120,6 +120,8 @@ public:
 	// A load that failed leaves its reason here so the window can show it once, instead of the
 	// reason only reaching the console and the loading dialog simply vanishing.
 	bool ConsumeLoadError(std::string& message);
+	// Picks up a message the MIDI driver queued (for example a faulted OmniMIDI).
+	bool ConsumeNotice(std::string& message);
 	void SetLoadError(const std::string& message);
 	bool IsRendering() const { return rendering.load(); }
 

@@ -46,6 +46,16 @@ int main(int argc, char** argv)
 	// helper must not open a window, load a config or install crash handlers of its own.
 	const bool senderMode = HasArgument(argc, argv, "--send-crash-reports");
 
+	// A path argument opens that MIDI once the window exists, which is also how the release build
+	// gets exercised without a file dialog.
+	std::string startupMIDI;
+	for (int i = 1; i < argc; ++i)
+	{
+		if (argv[i] == nullptr || argv[i][0] == '-') continue;
+		startupMIDI = argv[i];
+		break;
+	}
+
 	if (!senderMode)
 	{
 		// An update installed earlier left the previous exe behind; this is the first moment it is
@@ -101,6 +111,9 @@ int main(int argc, char** argv)
 
 	// Retry anything a previous run couldn't deliver.
 	CrashReporter::FlushPendingInBackground();
+
+	if (!startupMIDI.empty())
+		mainWindow.LoadMIDIFile(startupMIDI);
 
 	mainWindow.Run();
 

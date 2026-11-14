@@ -44,6 +44,9 @@ public:
 	void SetTitleInfo(std::string midiName = "");
 	// File > Open: pick a MIDI, start loading it and show the loading dialog.
 	void OpenMIDIDialog();
+	// Starts loading a known path and shows the loading dialog; used by File > Open and by a
+	// path passed on the command line.
+	void LoadMIDIFile(const std::string& path);
 	GLFWwindow* GetInternalWindow() { return window; }
 
 	bool IsGLReady() const

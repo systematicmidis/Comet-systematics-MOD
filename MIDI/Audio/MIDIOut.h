@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #ifdef _WIN32
 
@@ -17,6 +18,9 @@ public:
 	MIDIOut() = default;
 	~MIDIOut();
 	void Initialize();
+
+	// A driver fault is reported to the UI on the next frame; returns false when there is none.
+	static bool ConsumeFaultNotice(std::string& message);
 	void Shutdown();
 	void SendEvent(uint32_t msg);
 private:

@@ -297,6 +297,11 @@ void MIDIApp::SetLoadError(const std::string& message)
 	hasLoadError = true;
 }
 
+bool MIDIApp::ConsumeNotice(std::string& message)
+{
+	return MIDIOut::ConsumeFaultNotice(message);
+}
+
 bool MIDIApp::ConsumeLoadError(std::string& message)
 {
 	std::lock_guard<std::mutex> lock(loadErrorMutex);
