@@ -2,4 +2,4 @@
 
 #include <iostream>
 // #define COMET_DEBUG
-#define COMET_VERSION "1.11.2b"
+#define COMET_VERSION "1.11.3b"

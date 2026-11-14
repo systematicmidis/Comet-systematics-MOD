@@ -56,6 +56,20 @@ namespace
 		noticePending = true;
 	}
 
+	// Sends run per note, so this has to stay cheap; x64 SEH costs nothing until something throws.
+	bool CallSend(KDMAPI_Send fn, uint32_t msg) noexcept
+	{
+		__try
+		{
+			fn(msg);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
 	bool QueryVersion(int (*fn)(), int& version) noexcept
 	{
 		__try
@@ -174,19 +188,30 @@ void MIDIOut::Shutdown()
 	if (initialized && End)
 		CallNoArgs(End);
 
-	if (omni) FreeLibrary(omni);
-
-	omni = nullptr;
+	// Clear the entry points before unloading: a send racing this would otherwise jump into freed
+	// code, which is exactly the kind of fault the guards exist to prevent.
+	initialized = false;
 	InitStream = nullptr;
 	Send = nullptr;
 	End = nullptr;
-	initialized = false;
+
+	if (omni) FreeLibrary(omni);
+	omni = nullptr;
 	attempted = false;
 }
 
 void MIDIOut::SendEvent(uint32_t msg)
 {
-	if (initialized && Send) Send(msg);
+	if (!initialized || !Send) return;
+
+	if (!CallSend(Send, msg))
+	{
+		std::cerr << "  KDMAPI driver faulted in Send; disabling MIDI out." << std::endl;
+		Send = nullptr;
+		SetFaultNotice("OmniMIDI faulted while sending MIDI data, so notes stopped reaching the "
+			"MIDI device and playback will be silent.\n\n"
+			"Reinstall OmniMIDI (v2) if you need playback through a MIDI device.");
+	}
 }
 
 #else
