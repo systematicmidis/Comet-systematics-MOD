@@ -87,7 +87,9 @@ public:
 protected:
 	bool loadOnlyNotes = false;
 	bool deduplicateRepeatedTracks = true;
-	bool assumeLayerRepeats = true;
+	// Tracks are only treated as repeats when their bytes match: two layers of a black MIDI
+	// usually have the same length but different notes or names, and merging those loses names.
+	bool assumeLayerRepeats = false;
 	bool riskyFastDedupe = false;
 
 	struct MIDIStreamInfo

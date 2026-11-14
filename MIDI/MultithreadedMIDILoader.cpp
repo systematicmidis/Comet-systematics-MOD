@@ -212,6 +212,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		ClearBars();
 	}
 
+
 #pragma endregion
 
 #pragma region Parallel Track Parsing
@@ -230,31 +231,54 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	if (deduplicateRepeatedTracks && trackCount > 1)
 	{
+		// A hash of the chunk finds repeats in one pass. Comparing every track with every earlier
+		// one was quadratic, which a file with thousands of tracks feels; the length is folded in
+		// so only same-size chunks can collide, and the bytes are still compared before merging.
+		auto hashChunk = [](const uint8_t* data, size_t length)
+		{
+			uint64_t hash = 1469598103934665603ull ^ (uint64_t)length;
+			for (size_t i = 0; i < length; i++)
+			{
+				hash ^= data[i];
+				hash *= 1099511628211ull;
+			}
+			return hash;
+		};
+
+		std::unordered_map<uint64_t, std::vector<size_t>> byHash;
+		byHash.reserve(trackCount);
+
 		for (size_t i = 0; i < trackCount; i++)
 		{
 			const RawTrackChunk& chunk = rawChunks[i];
+			std::vector<size_t>& bucket = byHash[hashChunk(chunk.data, chunk.length)];
 
-			for (size_t prev = 0; prev < i; prev++)
+			bool duplicate = false;
+			for (size_t candidate : bucket)
 			{
-				const RawTrackChunk& earlier = rawChunks[parsedOrigin[prev]];
-				if (earlier.length != chunk.length) continue;
+				const RawTrackChunk& earlier = rawChunks[candidate];
 
-				// With the size assumption on, a matching length counts as a repeat: comparing two
+				// With the size assumption on, a matching hash counts as a repeat: comparing two
 				// multi-megabyte chunks byte for byte would cost as much as parsing them.
 				if (assumeLayerRepeats || chunk.length == 0
 					|| std::memcmp(earlier.data, chunk.data, chunk.length) == 0)
 				{
-					parsedOrigin[i] = parsedOrigin[prev];
+					parsedOrigin[i] = candidate;
 					uniqueTrackCount--;
+					duplicate = true;
 					break;
 				}
 			}
+
+			if (!duplicate)
+				bucket.push_back(i);
 		}
 
 		if (uniqueTrackCount < trackCount)
 			std::cout << "  Layered DeDupe: " << (trackCount - uniqueTrackCount)
 				<< " repeated track(s) will not be decoded again" << std::endl;
 	}
+
 
 	if (trackCount > 0)
 	{
@@ -278,14 +302,19 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		{
 			workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, &parsedOrigin, trackCount]()
 				{
-					size_t idx;
-					while ((idx = nextTrack.fetch_add(1, std::memory_order_relaxed)) < trackCount)
+					constexpr size_t BLOCK = 32;
+					size_t start;
+					while ((start = nextTrack.fetch_add(BLOCK, std::memory_order_relaxed)) < trackCount)
 					{
-						if (!running) break;
-						// A repeat is filled in from its origin once every original has been parsed.
-						if (parsedOrigin[idx] != idx) continue;
-						parsedTrackResults[idx] = ParseTrackData(rawChunks[idx]);
-						tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+						const size_t end = std::min(trackCount, start + BLOCK);
+						for (size_t idx = start; idx < end; idx++)
+						{
+							if (!running) break;
+							// A repeat is filled in from its origin once every original has been parsed.
+							if (parsedOrigin[idx] != idx) continue;
+							parsedTrackResults[idx] = ParseTrackData(rawChunks[idx]);
+							tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+						}
 					}
 				});
 		}
@@ -304,6 +333,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		ClearBars();
 	}
+
 
 #pragma endregion
 
@@ -368,6 +398,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 #pragma endregion
 
 #pragma region Post-processing & Merging
+
 	seq->noteTrackCount = noteTrackIdx;
 	std::cout << "\nLoaded all tracks, sorting tempo events." << std::endl;
 	SetName("Starting event preprocessing");
@@ -401,6 +432,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	SetName("Parsing finished! Merging events...");
 
 	seq->mergedNotes = SequenceFuncs::MergeAndDistribute(std::move(notesToMerge));
+
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
 	SetName("Finalizing (1/2)...");
