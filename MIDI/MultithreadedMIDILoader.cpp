@@ -285,6 +285,13 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		unsigned int hardwareThreads = std::thread::hardware_concurrency();
 		if (hardwareThreads == 0) hardwareThreads = 16;
 		size_t limit = hardwareThreads;
+
+		// Thousands of tiny tracks spend more time contending than parsing: one thread was twice
+		// as fast on the 8000-track file, so pick the worker count from the work per track.
+		const size_t bytesPerTrack = trackCount ? dataSize / trackCount : 0;
+		if (trackCount > 256 && bytesPerTrack < 4096)
+			limit = 1;
+
 		if (workerLimit > 0) limit = std::min(limit, workerLimit);
 		const size_t numThreads = std::min<size_t>(trackCount, limit);
 
@@ -536,9 +543,25 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 	// Open notes are a stack per key+channel, linked through noteNext. A track used to build and
 	// destroy 2048 std::vectors, which dominated a file with thousands of short tracks.
-	std::array<uint32_t, MIDI_KEYS << 4> stackHead{};
-	stackHead.fill(UINT32_MAX);
-	std::vector<uint32_t> noteNext;
+	// Kept per thread and reused: clearing 2048 slots and allocating a vector for every track
+	// dominated files with thousands of tiny tracks. A generation counter makes stale slots read
+	// as empty without clearing them.
+	thread_local std::array<uint32_t, MIDI_KEYS << 4> stackHead{};
+	thread_local std::array<uint32_t, MIDI_KEYS << 4> stackGen{};
+	thread_local std::vector<uint32_t> noteNext;
+	thread_local uint32_t stackGeneration = 0;
+
+	noteNext.clear();
+	if (++stackGeneration == 0)
+	{
+		stackGen.fill(0);
+		stackGeneration = 1;
+	}
+
+	auto headOf = [](uint32_t slot)
+	{
+		return stackGen[slot] == stackGeneration ? stackHead[slot] : UINT32_MAX;
+	};
 
 	uint32_t currTick = 0;
 	uint8_t prevCommand = 0;
@@ -591,7 +614,7 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 				if (key >= MIDI_KEYS) continue;
 
 				const uint32_t slot = ((uint32_t)key << 4) | channel;
-				const uint32_t n = stackHead[slot];
+				const uint32_t n = headOf(slot);
 				if (n != UINT32_MAX)
 				{
 					stackHead[slot] = noteNext[n];
@@ -614,12 +637,13 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 				{
 					const uint32_t id = (uint32_t)midiTrack.notes.Size();
 					midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
-					noteNext.push_back(stackHead[slot]);
+					noteNext.push_back(headOf(slot));
+					stackGen[slot] = stackGeneration;
 					stackHead[slot] = id;
 				}
-				else if (stackHead[slot] != UINT32_MAX)
+				else if (headOf(slot) != UINT32_MAX)
 				{
-					const uint32_t n = stackHead[slot];
+					const uint32_t n = headOf(slot);
 					stackHead[slot] = noteNext[n];
 					midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
 				}
