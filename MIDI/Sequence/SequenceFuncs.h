@@ -134,5 +134,9 @@ public:
     // Merge the tick-ordered tracks and split them per key in one pass. Doing the split during
     // the merge saves building and then re-reading a whole-file note sequence.
     static std::vector<NoteSequence> MergeAndDistribute(std::vector<NoteSequence>&& tracks);
+
+    // Merge the tracks inside tick windows: each window is filled on its own thread into exact
+    // per-key buffers, so no heap is shared between keys and nothing is reallocated.
+    static std::vector<NoteSequence> WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks);
     static void ApplyTempoEvents(uint16_t ppq, TempoMap* tempoMap, NoteSequence& notes);
 };
