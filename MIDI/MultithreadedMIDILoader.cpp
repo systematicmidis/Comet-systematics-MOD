@@ -438,7 +438,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
 	SetName("Parsing finished! Merging events...");
 
-	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge));
+	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge), (uint32_t)seq->length);
 
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 

@@ -79,7 +79,7 @@ NoteSequence SequenceFuncs::FlattenSequence(std::vector<NoteSequence>&& tracks)
     return result;
 }
 
-std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks)
+std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks, uint32_t maxTickHint)
 {
     std::vector<NoteSequence> result(MIDI_KEYS);
     if (tracks.empty()) return result;
@@ -121,7 +121,10 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
         return result;
     }
 
-    uint32_t maxTick = 0;
+    // The loader already knows the sequence length, which bounds every note tick, so it can skip
+    // this whole pass; standalone callers pass 0 and get the scan.
+    uint32_t maxTick = maxTickHint;
+    if (maxTick == 0)
     for (const NoteSequence& track : tracks)
     {
         for (size_t i = 0; i < track.Size(); i++)
@@ -180,7 +183,7 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
     // The previous version laid out a 12-byte ref per note before it could sort. Sorting 4-byte
     // indices over the already-scattered ticks uses a third of that, and the scratch buffers are
     // reused, so peak memory is one full note array instead of two.
-    std::vector<uint32_t> order;
+    std::vector<uint64_t> keys;
     std::vector<uint32_t> tmpTick;
     std::vector<uint32_t> tmpGate;
     std::vector<uint32_t> tmpPacked;
@@ -195,18 +198,46 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
             const size_t n = counts[key * WINDOWS + w];
             if (n < 2) continue;
 
-            order.resize(n);
-            for (size_t i = 0; i < n; i++)
-                order[i] = (uint32_t)i;
+            // Most buckets hold a handful of notes. Insertion sort moves the three arrays
+            // directly, so those buckets need neither a key array nor the permute pass below;
+            // its strict comparison keeps it stable, which is what preserves the heap tie order.
+            if (n <= 32)
+            {
+                for (size_t i = 1; i < n; i++)
+                {
+                    const uint32_t t = out.tick[start + i];
+                    const uint32_t g = out.gate[start + i];
+                    const uint32_t p = out.packed[start + i];
 
-            const uint32_t* ticks = out.tick.data() + start;
-            std::stable_sort(order.begin(), order.end(),
-                [ticks](uint32_t a, uint32_t b) { return ticks[a] < ticks[b]; });
+                    size_t j = i;
+                    while (j > 0 && out.tick[start + j - 1] > t)
+                    {
+                        out.tick[start + j] = out.tick[start + j - 1];
+                        out.gate[start + j] = out.gate[start + j - 1];
+                        out.packed[start + j] = out.packed[start + j - 1];
+                        j--;
+                    }
+
+                    out.tick[start + j] = t;
+                    out.gate[start + j] = g;
+                    out.packed[start + j] = p;
+                }
+
+                continue;
+            }
+
+            // Tick in the high half, scatter position in the low half: a plain integer sort is
+            // stable by construction and needs no comparator indirection through the tick array.
+            keys.resize(n);
+            for (size_t i = 0; i < n; i++)
+                keys[i] = ((uint64_t)out.tick[start + i] << 32) | (uint32_t)i;
+
+            std::sort(keys.begin(), keys.end());
 
             bool sorted = true;
             for (size_t i = 0; i < n; i++)
             {
-                if (order[i] != i)
+                if ((uint32_t)keys[i] != i)
                 {
                     sorted = false;
                     break;
@@ -221,7 +252,7 @@ std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<
 
             for (size_t i = 0; i < n; i++)
             {
-                const size_t src = start + order[i];
+                const size_t src = start + (uint32_t)keys[i];
                 tmpTick[i] = out.tick[src];
                 tmpGate[i] = out.gate[src];
                 tmpPacked[i] = out.packed[src];

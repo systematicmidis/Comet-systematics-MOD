@@ -137,6 +137,6 @@ public:
 
     // Merge the tracks inside tick windows: each window is filled on its own thread into exact
     // per-key buffers, so no heap is shared between keys and nothing is reallocated.
-    static std::vector<NoteSequence> WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks);
+    static std::vector<NoteSequence> WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks, uint32_t maxTickHint = 0);
     static void ApplyTempoEvents(uint16_t ppq, TempoMap* tempoMap, NoteSequence& notes);
 };
