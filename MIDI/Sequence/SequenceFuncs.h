@@ -138,5 +138,54 @@ public:
     // Merge the tracks inside tick windows: each window is filled on its own thread into exact
     // per-key buffers, so no heap is shared between keys and nothing is reallocated.
     static std::vector<NoteSequence> WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks, uint32_t maxTickHint = 0);
+
+    // Notes with the same tick, gate and key are the same rectangle: layered black MIDIs repeat
+    // them by the million. Keeping one changes neither the sound nor the picture, and gives the
+    // renderer far fewer quads to build.
+    static size_t DeduplicateNotes(NoteSequence& notes)
+    {
+        const size_t count = notes.Size();
+        if (count < 2) return 0;
+
+        size_t kept = 0;
+        size_t removed = 0;
+
+        for (size_t i = 0; i < count; i++)
+        {
+            // packed carries the key, velocity, channel and track, so only notes that are
+            // identical in every way are merged; a different instrument is left alone.
+            if (kept > 0
+                && notes.tick[kept - 1] == notes.tick[i]
+                && notes.gate[kept - 1] == notes.gate[i]
+                && notes.packed[kept - 1] == notes.packed[i])
+            {
+                removed++;
+                continue;
+            }
+
+            if (kept != i)
+            {
+                notes.tick[kept] = notes.tick[i];
+                notes.gate[kept] = notes.gate[i];
+                notes.packed[kept] = notes.packed[i];
+            }
+            kept++;
+        }
+
+        if (removed > 0)
+            notes.Resize(kept);
+
+        return removed;
+    }
+
+    static size_t DeduplicateAll(std::vector<NoteSequence>& sequences)
+    {
+        size_t removed = 0;
+        for (NoteSequence& notes : sequences)
+            removed += DeduplicateNotes(notes);
+
+        return removed;
+    }
+
     static void ApplyTempoEvents(uint16_t ppq, TempoMap* tempoMap, NoteSequence& notes);
 };

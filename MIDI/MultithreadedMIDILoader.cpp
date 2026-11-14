@@ -79,6 +79,14 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		if (ArchiveLoader::IsArchive(path))
 		{
+			// A nested .xz can expand to far more than this machine has RAM, so it is parsed as it
+			// streams instead of being decompressed into one buffer. Other archives fall back below.
+			{
+				std::string streamError;
+				std::unique_ptr<ArchiveStream> stream = ArchiveLoader::OpenStream(path, streamError);
+				if (stream) return LoadStreamed(std::move(stream), timeBasedLoading);
+			}
+
 			SetName("Decompressing archive...");
 			AddBar([this]()
 				{
@@ -440,6 +448,12 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge), (uint32_t)seq->length);
 
+	// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
+	// and the audio never handle millions of identical notes.
+	const size_t deduplicatedNotes = SequenceFuncs::DeduplicateAll(seq->mergedNotes);
+	if (deduplicatedNotes > 0)
+		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
 	SetName("Finalizing (1/2)...");
@@ -537,7 +551,294 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	return seq;
 }
 
-AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const RawTrackChunk& chunk)
+std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_ptr<ArchiveStream> stream, bool timeBasedLoading)
+{
+	running = true;
+	tracksProcessed = 0;
+	archiveDone = 0;
+	archiveTotal = stream->CompressedTotal();
+
+	seq = std::make_shared<MIDISequence>("TODO");
+
+	SetName("Decompressing archive...");
+	AddBar([this]()
+		{
+			const uint64_t total = archiveTotal.load(std::memory_order_relaxed);
+			return total > 0 ? (double)archiveDone.load(std::memory_order_relaxed) / (double)total : 0.0;
+		});
+
+	auto readExact = [&](uint8_t* out, size_t size)
+		{
+			size_t got = 0;
+			while (got < size)
+			{
+				const size_t n = stream->Read(out + got, size - got);
+				if (n == 0) break;
+				got += n;
+			}
+			archiveDone.store(stream->CompressedRead(), std::memory_order_relaxed);
+			return got;
+		};
+
+	uint8_t header[14]{};
+	if (readExact(header, sizeof(header)) != sizeof(header) || std::memcmp(header, "MThd", 4) != 0)
+		throw std::runtime_error("Invalid header");
+	if (ToInt(header + 4) != 6)
+		throw std::runtime_error("Invalid header length");
+
+	uint8_t* headerCur = header + 8;
+	const uint16_t format = ToShort(headerCur); headerCur += 2;
+	const uint16_t declaredTracks = ToShort(headerCur); headerCur += 2;
+	seq->trackCount = declaredTracks;
+	seq->resolution = ToShort(headerCur);
+	(void)format;
+
+	struct SeenTrack
+	{
+		uint64_t hash = 0;
+		size_t length = 0;
+		size_t parsedIndex = 0;
+		uint64_t multiplicity = 1;
+	};
+
+	std::vector<SeenTrack> seen;
+	std::vector<ParsedTrack> parsed;
+	std::vector<uint8_t> chunk;
+
+	uint64_t trusted = 0;
+
+	size_t index = 0;
+	for (; index < declaredTracks && running; index++)
+	{
+		uint32_t window = 0;
+		bool found = false;
+		uint8_t byte = 0;
+		while (readExact(&byte, 1) == 1)
+		{
+			window = (window << 8) | byte;
+			if (window == 0x4D54726Bu)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found) break;
+
+		uint8_t lengthBytes[4]{};
+		if (readExact(lengthBytes, 4) != 4) break;
+		const uint64_t length = ToInt(lengthBytes);
+
+		// A single track still has to fit, but only one is held at a time.
+		if (length > (8ull << 30))
+			throw std::runtime_error("A track inside this archive is larger than Comet can hold in memory.");
+
+		chunk.assign((size_t)length, 0);
+		const size_t got = readExact(chunk.data(), chunk.size());
+		chunk.resize(got);
+
+		uint64_t hash = 1469598103934665603ull ^ (uint64_t)got;
+		for (const uint8_t value : chunk)
+		{
+			hash ^= value;
+			hash *= 1099511628211ull;
+		}
+
+		auto match = std::find_if(seen.begin(), seen.end(), [hash, got](const SeenTrack& entry)
+			{
+				return entry.hash == hash && entry.length == got;
+			});
+
+		if (match != seen.end())
+		{
+			match->multiplicity++;
+
+			// The same track over and over is a layered file. Verifying two of them is enough
+			// once the user has allowed trusting repeats; the rest would only be more of the same.
+			// Only tracks over a gigabyte skip the rest: ordinary songs repeat small tracks in the
+			// middle and still have different music after them.
+			if (assumeLayerRepeats && match->multiplicity >= 2 && match->length > (1ull << 30))
+			{
+				trusted = match->multiplicity;
+				++index;
+				break;
+			}
+
+			chunk.clear();
+			continue;
+		}
+
+		// Only a single pathological track (hundreds of MB of the same note) needs the collapse;
+		// normal files keep every note-on so their on/off pairs stay exact.
+		const bool hugeTrack = chunk.size() > (256ull << 20);
+		ParsedTrack track = ParseTrackData({ chunk.data(), chunk.size(), parsed.size() }, 16u << 20, hugeTrack);
+		seen.push_back({ hash, got, parsed.size(), 1 });
+		parsed.push_back(std::move(track));
+		tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+
+		chunk.clear();
+		chunk.shrink_to_fit();
+
+		if (!running) break;
+	}
+
+	ClearBars();
+	if (!running) return seq;
+
+	if (trusted > 0)
+	{
+		std::cout << "  Trusted a repeated track after " << trusted
+			<< " identical copies; the rest of the archive was not decompressed." << std::endl;
+	}
+
+#pragma region Sequential Assembly
+
+	std::vector<int> illegalTracks;
+	int noteTrackIdx = 0;
+	int trackIdx = 0;
+
+	std::vector<NoteSequence> notesToMerge;
+	notesToMerge.reserve(seen.size());
+	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
+	eventsToMerge.reserve(seen.size());
+
+	for (SeenTrack& entry : seen)
+	{
+		if (!running) return seq;
+		ParsedTrack& trackRes = parsed[entry.parsedIndex];
+		seq->length = std::max(seq->length, trackRes.length);
+
+		if (trackRes.multiChannel)
+			illegalTracks.push_back(trackIdx);
+
+		if (!trackRes.notes.Empty() || trackRes.repeatedNotes > 0)
+		{
+			// Count every copy the file contains, but keep one copy of the notes.
+			seq->notes += (size_t)((uint64_t)(trackRes.notes.Size() + trackRes.repeatedNotes) * entry.multiplicity);
+
+			const uint32_t trackMask = NOTE_TRACK_MASK << NOTE_TRACK_BIT_IDX;
+			for (uint32_t& packed : trackRes.notes.packed)
+				packed = (packed & ~trackMask)
+				| ((noteTrackIdx & NOTE_TRACK_MASK) << NOTE_TRACK_BIT_IDX);
+
+			seq->noteTrackNames.push_back(trackRes.name);
+			noteTrackIdx++;
+			notesToMerge.push_back(std::move(trackRes.notes));
+		}
+
+		if (!trackRes.messages.empty())
+			eventsToMerge.push_back(std::move(trackRes.messages));
+
+		if (!trackRes.tempos.empty())
+			seq->tempos.insert(seq->tempos.end(), trackRes.tempos.begin(), trackRes.tempos.end());
+
+		if (!trackRes.timeSignatures.empty())
+			seq->timeSignatures.insert(seq->timeSignatures.end(), trackRes.timeSignatures.begin(), trackRes.timeSignatures.end());
+		else
+			seq->timeSignatures.emplace_back(0, 4, 4);
+
+		trackIdx++;
+	}
+
+#pragma endregion
+
+	seq->noteTrackCount = noteTrackIdx;
+	SetName("Starting event preprocessing");
+	auto& tempos = seq->tempos;
+	auto& timeSignatures = seq->timeSignatures;
+	std::sort(tempos.begin(), tempos.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
+	std::sort(timeSignatures.begin(), timeSignatures.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
+
+	if (tempos.empty())
+		tempos.emplace_back(0, 120.0);
+	else if (tempos.front().tick > 0)
+		tempos.insert(tempos.begin(), TempoEvent(0, 120.0));
+
+	if (timeSignatures.empty())
+		timeSignatures.emplace_back(0, 4, 4);
+	else if (timeSignatures.front().tick > 0)
+		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
+
+	SetName("Parsing finished! Merging events...");
+	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge), (uint32_t)seq->length);
+
+	// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
+	// and the audio never handle millions of identical notes.
+	const size_t deduplicatedNotes = SequenceFuncs::DeduplicateAll(seq->mergedNotes);
+	if (deduplicatedNotes > 0)
+		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
+
+	SetName("Finalizing (1/2)...");
+	seq->tempoMap = std::make_shared<TempoMap>();
+	seq->tempoMap->RebuildTempoMap(seq.get());
+	ClearBars();
+
+	if (timeBasedLoading)
+	{
+		TempoMap* tempoMap = seq->GetTempoMap();
+		for (auto& notes : seq->mergedNotes)
+			SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, notes);
+
+		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->mergedEvents);
+		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->timeSignatures);
+	}
+	seq->timeBased = timeBasedLoading;
+
+	SetName("Finalizing (2/2)...\nIndexing note blocks...");
+	size_t blockProgress = 0;
+	AddBar([this, &blockProgress]() { return (double)blockProgress / (double)seq->notes; });
+
+	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlockArray{};
+
+	size_t key = 0;
+	for (const NoteSequence& notes : seq->mergedNotes)
+	{
+		std::vector<NoteBlock> blocks{};
+		blocks.reserve((notes.Size() + NOTE_BLOCK_SIZE - 1) / NOTE_BLOCK_SIZE);
+
+		uint32_t blockMin = (uint32_t)(-1);
+		uint32_t blockMax = 0;
+
+		for (size_t i = 0; i < notes.Size(); ++i)
+		{
+			uint32_t tick = notes.tick[i];
+			uint32_t tickEnd = tick + notes.gate[i];
+
+			blockMin = std::min(blockMin, tick);
+			blockMax = std::max(blockMax, tickEnd);
+			++blockProgress;
+
+			if ((i + 1) % NOTE_BLOCK_SIZE == 0)
+			{
+				blocks.emplace_back(blockMin, blockMax);
+				blockMin = (uint32_t)(-1);
+				blockMax = 0;
+			}
+		}
+
+		if (notes.Size() % NOTE_BLOCK_SIZE != 0)
+			blocks.emplace_back(blockMin, blockMax);
+
+		noteBlockArray[key++] = std::move(blocks);
+	}
+	seq->noteBlocks = std::move(noteBlockArray);
+
+	ClearBars();
+	SetName("Done!");
+
+	std::cout << "MIDI has successfully loaded." << std::endl;
+	std::cout << "  " << seq->tempos.size() << " Tempo events" << std::endl;
+	std::cout << "  " << seq->timeSignatures.size() << " Time signature events" << std::endl;
+	std::cout << "  Notes: " << seq->notes << std::endl;
+	std::cout << "  Duration: " << seq->CalcLengthMilliseconds() << "ms" << std::endl;
+
+	if (!illegalTracks.empty())
+		std::cout << "  " << illegalTracks.size() << " track(s) mix channels." << std::endl;
+
+	return seq;
+}
+
+AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const RawTrackChunk& chunk, size_t reserveCap, bool collapseRepeats)
 {
 	ByteCursor cursor{ chunk.data, chunk.data + chunk.length };
 
@@ -573,7 +874,8 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 	// A dense track spends about six bytes per note (on and off). Reserving a fraction of the
 	// chunk keeps the three note arrays from doubling over and over without over-committing.
-	midiTrack.notes.Reserve(chunk.length / 12 + 16);
+	const size_t reserveCount = chunk.length / 12 + 16;
+	midiTrack.notes.Reserve(reserveCap == (size_t)-1 ? reserveCount : std::min(reserveCount, reserveCap));
 
 	while (running && !ended && !cursor.AtEnd())
 	{
@@ -635,6 +937,16 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 				if (vel > 0)
 				{
+					// A layered black MIDI can repeat the same note-on for an already-open note
+					// millions of times. It is the same sound, so count it and store it once.
+					const uint32_t open = headOf(slot);
+					if (collapseRepeats && open != UINT32_MAX && midiTrack.notes.tick[open] == currTick
+						&& midiTrack.notes.GetVelocity(open) == vel)
+					{
+						midiTrack.repeatedNotes++;
+						continue;
+					}
+
 					const uint32_t id = (uint32_t)midiTrack.notes.Size();
 					midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
 					noteNext.push_back(headOf(slot));

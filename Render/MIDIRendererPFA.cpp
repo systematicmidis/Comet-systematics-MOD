@@ -1014,31 +1014,38 @@ void MIDIRendererPFA::RenderNotes()
 				lastTrack = nTrack;
 				lastGate = nGate;
 
+				float yDistStart = (float)((noteStart - accTime) * invViewRegion) * notesCY;
+				float yDistEnd = (float)((noteEnd - accTime) * invViewRegion) * notesCY;
+
+				float noteBottom = notesY + notesCY - yDistStart;
+				float noteTop = notesY + notesCY - yDistEnd;
+				float noteCY = noteBottom - noteTop;
+
+				if (settings.roundedNoteLengths)
+				{
+					noteTop = std::round(noteTop);
+					noteCY = std::round(noteCY);
+				}
+
+				// Shorter than half a pixel is invisible, and at a dense zoom-out that is most of the
+				// file; building quads for those notes only costs frame time.
+				if (noteCY < 0.5f)
+					continue;
+
+				const uint32_t noteColor = colors.GetColor(nTrack, nChannel);
+
 				if (supportsCompute)
 				{
-					gpuInputNotes[noteID++] = { nTick, nGate, nNote, colors.GetColor(nTrack, nChannel) };
+					gpuInputNotes[noteID++] = { nTick, nGate, nNote, noteColor };
 				}
 				else
 				{
-					float yDistStart = (float)((noteStart - accTime) * invViewRegion) * notesCY;
-					float yDistEnd = (float)((noteEnd - accTime) * invViewRegion) * notesCY;
-
-					float noteBottom = notesY + notesCY - yDistStart;
-					float noteTop = notesY + notesCY - yDistEnd;
-
-					float noteCY = noteBottom - noteTop;
-					if (settings.roundedNoteLengths)
-					{
-						noteTop = std::round(noteTop);
-						noteCY = std::round(noteCY);
-					}
-
 					renderNotes[noteID++] = {
 						x,
 						noteTop,
-						isBlack ? cx : whiteCX,
+						cx,
 						noteCY,
-						colors.GetColor(nTrack, nChannel)
+						noteColor
 					};
 				}
 

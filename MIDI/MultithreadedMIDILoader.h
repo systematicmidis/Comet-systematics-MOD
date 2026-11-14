@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "MIDISequence.h"
+#include "IO/ArchiveLoader.h"
 #include "IO/MappedFile.h"
 
 // Parses every track in parallel straight from the file's memory mapping (or from the bytes of a
@@ -41,7 +42,11 @@ private:
 	};
 
 	// isolated worker task to optimize cache usage and eliminate synchronization locks
-	ParsedTrack ParseTrackData(const RawTrackChunk& chunk);
+	ParsedTrack ParseTrackData(const RawTrackChunk& chunk, size_t reserveCap = (size_t)-1, bool collapseRepeats = false);
+
+	// Streams a nested .xz archive straight into the track parser: no decompressed copy is kept
+	// and identical tracks are never parsed twice.
+	std::shared_ptr<MIDISequence> LoadStreamed(std::unique_ptr<ArchiveStream> stream, bool timeBasedLoading);
 
 	std::string file;
 	std::shared_ptr<MIDISequence> seq;

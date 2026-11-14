@@ -3,8 +3,24 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
+
+// A forward-only byte stream of decompressed data. Used for nested .xz files that are far too
+// large to hold in memory, so the MIDI can be parsed track by track while it is still compressed.
+class ArchiveStream
+{
+public:
+	virtual ~ArchiveStream() = default;
+
+	// Fills up to max bytes and returns how many were produced; 0 means the stream ended.
+	virtual size_t Read(uint8_t* out, size_t max) = 0;
+
+	// Bytes of the outermost compressed file consumed so far, for the progress bar.
+	virtual uint64_t CompressedRead() const = 0;
+	virtual uint64_t CompressedTotal() const = 0;
+};
 
 // Reads the MIDI out of a compressed file or archive (7z, xz, lzma, zip, gz, bz2, zst, lz4, rar,
 // tar, and compressed tars), including nested layers such as a .mid.xz inside a .7z. Everything is
@@ -36,4 +52,9 @@ public:
 	// layer divides exactly by that tile's size. Wrong on a layer made of different tiles that
 	// happen to fit, which is why it is off unless the user turns it on for a session.
 	static void SetRiskyFastDedupe(bool on);
+
+	// Opens a nested .xz/.lzma chain as a stream, so a file that expands to hundreds of gigabytes
+	// can be parsed without ever holding it. Returns nullptr and sets `error` when the file is not
+	// a pure xz chain; callers then fall back to Extract(). Nothing is ever written to disk.
+	static std::unique_ptr<ArchiveStream> OpenStream(const std::filesystem::path& path, std::string& error);
 };

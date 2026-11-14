@@ -102,6 +102,9 @@ protected:
 	struct ParsedTrack
 	{
 		NoteSequence notes;
+		// Notes that were exact repeats of a still-open note at the same tick. They are redundant
+		// (a second note-on for a note that is already on), so they are counted but not stored.
+		uint64_t repeatedNotes = 0;
 		std::vector<MIDIMessageEvent> messages;
 		std::vector<TempoEvent> tempos;
 		std::vector<TimeSignatureEvent> timeSignatures;

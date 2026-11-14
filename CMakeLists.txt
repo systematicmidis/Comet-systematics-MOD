@@ -359,6 +359,7 @@ set_source_files_properties(
 
  target_include_directories(Comet PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${xz_SOURCE_DIR}/src/liblzma/api
  )
 
  target_sources(Comet PRIVATE

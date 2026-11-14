@@ -14,9 +14,164 @@
 
 #include <cstdio>
 #include <iostream>
+#include <memory>
+#include <thread>
+
+#include <lzma.h>
 
 namespace
 {
+	// A forward-only file reader; the root of a nested decompression chain.
+	class FileStream final : public ArchiveStream
+	{
+	public:
+		explicit FileStream(const std::filesystem::path& path)
+		{
+#ifdef _WIN32
+			file = _wfopen(path.wstring().c_str(), L"rb");
+#else
+			file = std::fopen(path.string().c_str(), "rb");
+#endif
+			std::error_code ec;
+			size = std::filesystem::file_size(path, ec);
+			if (ec) size = 0;
+		}
+
+		~FileStream() override
+		{
+			if (file) std::fclose(file);
+		}
+
+		bool Ok() const { return file != nullptr; }
+
+		size_t Read(uint8_t* out, size_t max) override
+		{
+			if (!file || max == 0) return 0;
+			const size_t got = std::fread(out, 1, max, file);
+			read += got;
+			return got;
+		}
+
+		uint64_t CompressedRead() const override { return read; }
+		uint64_t CompressedTotal() const override { return size; }
+
+	private:
+		std::FILE* file = nullptr;
+		uint64_t read = 0;
+		uint64_t size = 0;
+	};
+
+	// One .xz/.lzma layer. liblzma decodes concatenated streams too, which is how a "layer" can be
+	// a long run of repeated xz streams.
+	class XzStream final : public ArchiveStream
+	{
+	public:
+		explicit XzStream(std::unique_ptr<ArchiveStream> input) : in(std::move(input))
+		{
+			lzma_stream blank = LZMA_STREAM_INIT;
+			strm = blank;
+
+			lzma_mt options{};
+			options.flags = LZMA_CONCATENATED;
+			options.threads = (uint32_t)std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
+			options.block_size = 0;
+			options.timeout = 0;
+			options.memlimit_threading = 2ull << 30;
+			options.memlimit_stop = UINT64_MAX;
+
+			ok = lzma_stream_decoder_mt(&strm, &options) == LZMA_OK;
+		}
+
+		~XzStream() override { lzma_end(&strm); }
+
+		bool Ok() const { return ok; }
+
+		size_t Read(uint8_t* out, size_t max) override
+		{
+			if (!ok || done || max == 0) return 0;
+
+			strm.next_out = out;
+			strm.avail_out = max;
+
+			while (strm.avail_out > 0 && !done)
+			{
+				if (strm.avail_in == 0)
+				{
+					const size_t got = in ? in->Read(buffer, sizeof(buffer)) : 0;
+					strm.next_in = buffer;
+					strm.avail_in = got;
+
+					if (got == 0)
+					{
+						// Tell the decoder the input is finished so it can flush and verify.
+						const lzma_ret ret = lzma_code(&strm, LZMA_FINISH);
+						done = true;
+						if (ret != LZMA_STREAM_END) ok = false;
+						break;
+					}
+				}
+
+				const lzma_ret ret = lzma_code(&strm, LZMA_RUN);
+				if (ret == LZMA_STREAM_END)
+				{
+					done = true;
+					break;
+				}
+				if (ret != LZMA_OK)
+				{
+					ok = false;
+					done = true;
+					break;
+				}
+			}
+
+			return max - strm.avail_out;
+		}
+
+		uint64_t CompressedRead() const override { return in ? in->CompressedRead() : 0; }
+		uint64_t CompressedTotal() const override { return in ? in->CompressedTotal() : 0; }
+
+	private:
+		std::unique_ptr<ArchiveStream> in;
+		lzma_stream strm = LZMA_STREAM_INIT;
+		uint8_t buffer[1 << 20]{};
+		bool ok = false;
+		bool done = false;
+	};
+
+	// Puts the bytes read while probing the layer back in front of the stream.
+	class PrefixedStream final : public ArchiveStream
+	{
+	public:
+		PrefixedStream(std::unique_ptr<ArchiveStream> input, const uint8_t* data, size_t size)
+			: in(std::move(input)), prefix(data, data + size)
+		{
+		}
+
+		size_t Read(uint8_t* out, size_t max) override
+		{
+			size_t copied = 0;
+			if (pos < prefix.size())
+			{
+				copied = std::min(max, prefix.size() - pos);
+				std::memcpy(out, prefix.data() + pos, copied);
+				pos += copied;
+				if (copied == max) return copied;
+			}
+
+			if (!in) return copied;
+			return copied + in->Read(out + copied, max - copied);
+		}
+
+		uint64_t CompressedRead() const override { return in ? in->CompressedRead() : 0; }
+		uint64_t CompressedTotal() const override { return in ? in->CompressedTotal() : 0; }
+
+	private:
+		std::unique_ptr<ArchiveStream> in;
+		std::vector<uint8_t> prefix;
+		size_t pos = 0;
+	};
+
 	// Nested archives are decompressed layer by layer in memory, so the ceiling is whatever this
 	// machine can actually hold. A fixed limit either refuses files that would have fit or invites an
 	// out-of-memory kill; the headroom keeps the app and the finished MIDI alive too.
@@ -419,6 +574,57 @@ namespace
 		result.error = "No MIDI file was found inside this archive.";
 		return result;
 	}
+}
+
+std::unique_ptr<ArchiveStream> ArchiveLoader::OpenStream(const std::filesystem::path& path, std::string& error)
+{
+	auto file = std::make_unique<FileStream>(path);
+	if (!file->Ok())
+	{
+		error = "Could not open the file.";
+		return nullptr;
+	}
+
+	std::unique_ptr<ArchiveStream> current = std::move(file);
+
+	for (int depth = 0; depth < MAX_NESTING; depth++)
+	{
+		auto layer = std::make_unique<XzStream>(std::move(current));
+
+		uint8_t head[16]{};
+		size_t headSize = 0;
+		while (headSize < sizeof(head))
+		{
+			const size_t got = layer->Read(head + headSize, sizeof(head) - headSize);
+			if (got == 0) break;
+			headSize += got;
+		}
+
+		if (!layer->Ok() && headSize == 0)
+		{
+			error = "This is not an xz stream.";
+			return nullptr;
+		}
+
+		auto peeked = std::make_unique<PrefixedStream>(std::move(layer), head, headSize);
+
+		if (headSize >= 4 && std::memcmp(head, "MThd", 4) == 0)
+			return peeked;
+
+		// Only pure xz chains are streamed; anything else uses the in-memory extractor.
+		const bool xz = headSize >= 6 && head[0] == 0xFD && head[1] == '7' && head[2] == 'z'
+			&& head[3] == 'X' && head[4] == 'Z' && head[5] == 0x00;
+		if (!xz)
+		{
+			error = "The next layer is not xz.";
+			return nullptr;
+		}
+
+		current = std::move(peeked);
+	}
+
+	error = "The file is nested too deeply.";
+	return nullptr;
 }
 
 void ArchiveLoader::SetRiskyFastDedupe(bool on)
