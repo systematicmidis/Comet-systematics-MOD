@@ -28,6 +28,34 @@ namespace
 
 		return nullptr;
 	}
+
+	// A driver can fault inside its own entry points; without this the whole app dies when the
+	// installed OmniMIDI is broken or mismatched. These wrappers turn that into "no MIDI out".
+	bool CallNoArgs(void (*fn)()) noexcept
+	{
+		__try
+		{
+			fn();
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	bool QueryVersion(int (*fn)(), int& version) noexcept
+	{
+		__try
+		{
+			version = fn();
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
 }
 
 void MIDIOut::Initialize()
@@ -74,11 +102,37 @@ void MIDIOut::Initialize()
 		return;
 	}
 
-	// Present in both v1 and v2; reporting it makes a wrong DLL obvious in the log.
+	// Present in both v1 and v2; reporting it makes a wrong DLL obvious in the log. The call is
+	// guarded because an incompatible OmniMIDI build can fault here, which used to crash the app
+	// right after a MIDI finished loading.
 	if (auto version = (int(*)())GetProcAddress(omni, "ReturnKDMAPIVer"))
-		std::cout << "  KDMAPI v" << version() << std::endl;
+	{
+		int value = 0;
+		if (!QueryVersion(version, value))
+		{
+			std::cerr << "  KDMAPI driver faulted in ReturnKDMAPIVer; continuing without MIDI out." << std::endl;
+			FreeLibrary(omni);
+			omni = nullptr;
+			InitStream = nullptr;
+			Send = nullptr;
+			End = nullptr;
+			return;
+		}
 
-	InitStream();
+		std::cout << "  KDMAPI v" << value << std::endl;
+	}
+
+	if (!CallNoArgs(InitStream))
+	{
+		std::cerr << "  KDMAPI driver faulted in InitializeKDMAPIStream; continuing without MIDI out." << std::endl;
+		FreeLibrary(omni);
+		omni = nullptr;
+		InitStream = nullptr;
+		Send = nullptr;
+		End = nullptr;
+		return;
+	}
+
 	initialized = true;
 }
 
@@ -90,7 +144,7 @@ MIDIOut::~MIDIOut()
 void MIDIOut::Shutdown()
 {
 	if (initialized && End)
-		End();
+		CallNoArgs(End);
 
 	if (omni) FreeLibrary(omni);
 
