@@ -198,8 +198,9 @@ void PrerenderedEngine::EventGeneratorLoop()
 {
     // Repeated copies are counted in seq->notes for display, but these events are only the
     // unique merged notes; reserving from the display total would allocate terabytes.
+    const auto& noteLists = seq->mergedNotes.empty() ? seq->trackNotes : seq->mergedNotes;
     size_t eventCount = seq->mergedEvents.size();
-    for (const auto& notes : seq->mergedNotes)
+    for (const auto& notes : noteLists)
         eventCount += notes.Size();
 
     std::vector<PrecalculatedEvent> localEvents;
@@ -213,9 +214,8 @@ void PrerenderedEngine::EventGeneratorLoop()
 
     if (stopFlag) return;
 
-    for (int i = 0; i < MIDI_KEYS; ++i)
+    for (const NoteSequence& notes : noteLists)
     {
-        NoteSequence& notes = seq->mergedNotes[i];
         for (size_t j = 0; j < notes.Size(); j++)
         {
             uint32_t nTick = notes.tick[j];

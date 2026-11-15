@@ -154,6 +154,10 @@ void MaestroEngine::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MID
     if (!seq || !timer || !hasMaestro || maxScheduleTimeUs == 0)
         return;
 
+    // The Maestro scheduler needs the legacy per-key store. Build it only when this backend
+    // is actually selected; the normal packed load never pays for it.
+    seq->EnsureMergedNotes();
+
     Stop();
 
     if (ring.size() != RING_SIZE)

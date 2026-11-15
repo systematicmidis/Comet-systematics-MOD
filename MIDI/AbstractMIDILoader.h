@@ -110,6 +110,7 @@ protected:
 		std::vector<TimeSignatureEvent> timeSignatures;
 		std::string name;
 		long length = 0;
+		uint32_t maxGate = 0;
 		bool multiChannel = false;
 	};
 

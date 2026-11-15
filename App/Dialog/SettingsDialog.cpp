@@ -1694,7 +1694,8 @@ const std::vector<uint64_t>& SettingsDialog::TrackNoteTotals(const MIDISequence*
 	// Every note carries its track index, so one pass over the per-key lists is enough.
 	trackNoteTotals.assign(sequence->noteTrackCount, 0);
 
-	for (const NoteSequence& notes : sequence->mergedNotes)
+	const auto& noteLists = sequence->mergedNotes.empty() ? sequence->trackNotes : sequence->mergedNotes;
+	for (const NoteSequence& notes : noteLists)
 	{
 		const std::size_t count = notes.Size();
 		for (std::size_t i = 0; i < count; i++)

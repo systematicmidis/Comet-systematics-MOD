@@ -1415,9 +1415,221 @@ void MIDIRendererMIDITrail::RenderKeyboard()
 		keyMetas[i].MarkPressed(false);
 }
 
+void MIDIRendererMIDITrail::RenderNotesPacked()
+{
+	auto* renderView = app->GetRenderView();
+	if (!renderView) return;
+
+	size_t notesToRender = 0;
+	double playbackSeconds = app->GetTimer()->Elapsed();
+
+	TempoMap* tempoMap = seq->GetTempoMap();
+	long time = tempoMap->SecsToTicksFromMap(seq->resolution, playbackSeconds);
+	double bpm = tempoMap->GetBPMAtTick(time);
+
+	noteCounterInfo->tick = time >= 0 ? time : 0;
+	noteCounterInfo->timeSeconds = playbackSeconds;
+	noteCounterInfo->bpm = bpm;
+
+	ShaderBind shaderBind(*notesProgram);
+	VertexArrayBind notesVAOBind(*notesVAO);
+	BufferBind notesIBOBind(*notesIBO);
+	BufferBind notesVBOBind(*notesVBO);
+	BufferBind notesEBOBind(*notesEBO);
+
+	notesProgram->SetFloat("kbHeight", keyboardHeight);
+	notesProgram->SetMat4("model", model);
+	notesProgram->SetMat4("view", view);
+	notesProgram->SetMat4("projection", projection);
+	notesProgram->SetFloat("noteTransparency", settings.noteTransparency);
+
+	size_t noteID = 0;
+	size_t notesPassed = 0;
+	size_t polyphony = 0;
+	size_t batchCount = 0;
+
+	const double accTime = isTimeBased ? playbackSeconds : time;
+	const double viewRegion = isTimeBased ? (double)renderView->viewTicks / 1000 : (double)renderView->viewTicks;
+	const double invViewRegion = 1.0 / viewRegion;
+	const double invTimeMultiplier = 1.0 / (double)TIME_BASED_MULTIPLIER;
+
+	double backCutoffTime = settings.eatNotes ? accTime : (isTimeBased
+		? accTime - (viewRegion * settings.backRenderCutoff)
+		: accTime - (renderView->viewTicks * settings.backRenderCutoff));
+	double frontCutoffTime = isTimeBased ?
+		playbackSeconds + viewRegion * settings.frontRenderCutoff :
+		time + renderView->viewTicks * settings.frontRenderCutoff;
+
+	// A note that started before the cull line can still reach into the visible window. Start the
+	// per-track search one longest-note back so those tails are not skipped.
+	double longestSeconds = isTimeBased ? seq->longestNoteLength * invTimeMultiplier : seq->longestNoteLength;
+	double scanStartTime = std::max(0.0, backCutoffTime - longestSeconds);
+	long scanStartTick = isTimeBased
+		? (long)std::llround(scanStartTime * TIME_BASED_MULTIPLIER)
+		: (long)std::llround(scanStartTime);
+	long frontTick = isTimeBased
+		? (long)std::llround(frontCutoffTime * TIME_BASED_MULTIPLIER)
+		: (long)std::llround(frontCutoffTime);
+
+	MIDIPlayerConfig* config = app->GetConfig();
+	int keyFirst = config->render.GetKeyFirst();
+	int keyLast = config->render.GetKeyLast();
+
+	for (const NoteSequence& notes : seq->trackNotes)
+	{
+		if (notes.Empty()) continue;
+
+		size_t noteBegin = std::lower_bound(notes.tick.begin(), notes.tick.end(), scanStartTick) - notes.tick.begin();
+		size_t noteEnd = std::upper_bound(notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin();
+		notesPassed += noteBegin;
+
+		bool haveLast = false;
+		uint32_t lastTick = 0;
+		uint32_t lastGate = 0;
+		uint32_t lastNote = 0;
+		uint8_t lastChannel = 0;
+		uint16_t lastTrack = 0;
+
+		for (size_t i = noteBegin; i < noteEnd; ++i)
+		{
+			uint32_t nTick = notes.tick[i];
+			uint32_t nGate = notes.gate[i];
+			uint8_t nNote = notes.GetKey(i);
+			uint16_t nTrack = notes.GetTrack(i);
+			uint8_t nChannel = notes.GetChannel(i);
+
+			double noteStart = isTimeBased ? (double)nTick * invTimeMultiplier : (double)nTick;
+			double noteEndTime = isTimeBased
+				? (double)(nTick + nGate) * invTimeMultiplier
+				: (double)(nTick + nGate);
+
+			if (noteStart > frontCutoffTime) break;
+
+			if (noteEndTime <= backCutoffTime)
+			{
+				notesPassed++;
+				continue;
+			}
+
+			if (noteEndTime <= accTime) notesPassed++;
+
+			bool isNoteActive = noteStart <= accTime && noteEndTime >= accTime;
+			if (isNoteActive)
+			{
+				keyMetas[nNote].MarkPressed(true);
+				keyMetas[nNote].color = colors.GetColor(nTrack, nChannel);
+
+				notesPassed++;
+				polyphony++;
+
+				constexpr double AURA_PULSE_SECONDS = 0.25;
+				double noteStartSecs = isTimeBased ? noteStart : tempoMap->TicksToSecsFromMap(seq->resolution, nTick);
+				double ageSeconds = playbackSeconds - noteStartSecs;
+				double factor2 = 0.0;
+				if (ageSeconds >= 0.0 && ageSeconds < AURA_PULSE_SECONDS)
+				{
+					double framesSinceStart = ageSeconds / (1.0 / 60.0);
+					factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
+				}
+				float size = static_cast<float>(0.5 + factor2);
+
+				if (nNote < MIDI_KEYS && auraData[nNote].size < size && nNote >= keyFirst && nNote <= keyLast)
+				{
+					auraData[nNote].size = size;
+					auraData[nNote].meta = keyMetas[nNote].GetMeta();
+					auraData[nNote].active = true;
+				}
+			}
+
+			if (haveLast &&
+				nTick == lastTick &&
+				nNote == lastNote &&
+				nChannel == lastChannel &&
+				nTrack == lastTrack &&
+				nGate == lastGate)
+			{
+				continue;
+			}
+
+			haveLast = true;
+			lastTick = nTick;
+			lastNote = nNote;
+			lastChannel = nChannel;
+			lastTrack = nTrack;
+			lastGate = nGate;
+
+			if (nNote < keyFirst || nNote > keyLast) continue;
+
+			bool isBlack = KEY_IS_BLACK(nNote);
+			renderNotes[noteID++] = RenderNote(
+				keyPos[nNote],
+				keyPos[nNote] + keyWidth[nNote],
+				(float)((noteStart - accTime) * invViewRegion),
+				(float)((noteEndTime - accTime) * invViewRegion),
+				colors.GetColor(nTrack, nChannel) | (isBlack << 24) | (isNoteActive << 25)
+			);
+
+			if (noteID >= NOTE_BUFFER_SIZE)
+			{
+				UploadNoteBuffer(NOTE_BUFFER_SIZE);
+				batchCount++;
+				if (batchCount >= NOTES_MAX_BATCHES)
+				{
+					glFlush();
+					batchCount = 0;
+				}
+				noteID = 0;
+			}
+
+			notesToRender++;
+		}
+	}
+
+	if (noteID != 0)
+	{
+		UploadNoteBuffer(noteID);
+		batchCount++;
+	}
+
+	noteCounterInfo->notesPassed = static_cast<uint64_t>(notesPassed);
+	noteCounterInfo->polyphony = static_cast<uint64_t>(polyphony);
+
+	if (!noteCounterInfo->npsHistory.empty() && playbackSeconds < noteCounterInfo->npsHistory.back().timeSeconds)
+	{
+		noteCounterInfo->npsHistory.clear();
+	}
+
+	noteCounterInfo->npsHistory.push_back({ playbackSeconds, static_cast<uint64_t>(notesPassed) });
+	while (!noteCounterInfo->npsHistory.empty() &&
+		(playbackSeconds - noteCounterInfo->npsHistory.front().timeSeconds) > 1.0)
+	{
+		noteCounterInfo->npsHistory.pop_front();
+	}
+
+	if (!noteCounterInfo->npsHistory.empty())
+	{
+		uint64_t notesOneSecondAgo = noteCounterInfo->npsHistory.front().totalNotes;
+		uint64_t currentNotes = static_cast<uint64_t>(notesPassed);
+		noteCounterInfo->notesPerSecond.value = currentNotes >= notesOneSecondAgo
+			? currentNotes - notesOneSecondAgo : 0;
+	}
+	else
+	{
+		noteCounterInfo->notesPerSecond = 0;
+	}
+
+	lastTime = time;
+}
+
 void MIDIRendererMIDITrail::RenderNotes()
 {
 	if (!seq) return;
+	if (!seq->trackNotes.empty())
+	{
+		RenderNotesPacked();
+		return;
+	}
+
 	std::vector<NoteSequence>& notes = seq->mergedNotes;
 	if (notes.empty()) return;
 	auto* renderView = app->GetRenderView();

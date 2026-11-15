@@ -391,7 +391,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		{
 			workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, &parsedOrigin, trackCount]()
 				{
-					constexpr size_t BLOCK = 32;
+					// Large tracks differ wildly in size. Take one at a time so a worker that gets a
+					// huge track cannot strand a whole block behind it; tiny-track files keep batching.
+					const size_t BLOCK = trackCount > 2048 ? 32 : 1;
 					size_t start;
 					while ((start = nextTrack.fetch_add(BLOCK, std::memory_order_relaxed)) < trackCount)
 					{
@@ -434,9 +436,6 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
 
-	std::vector<NoteSequence> notesToMerge;
-	notesToMerge.reserve(trackCount);
-
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(trackCount);
 
@@ -466,7 +465,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 			// render store and let the note-count scale account for the copies, as Kimrashi's
 			// track_copies does; sorting the copies again would only be undone by deduplication.
 			if (parsedOrigin[trackIdx] == (size_t)trackIdx)
-				notesToMerge.push_back(std::move(trackRes.notes));
+				seq->trackNotes.push_back(std::move(trackRes.notes));
 		}
 
 		if (!trackRes.messages.empty())
@@ -527,14 +526,33 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
 	SetName("Parsing finished! Merging events...");
 
-	// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
-	// and the audio never handle millions of identical notes. The collapse happens inside the
-	// parallel per-key sort, and the removed count is still reported.
+	// Large files keep the tick-ordered track store and let MIDITrail/audio walk it directly.
+	// Building the 128 per-key arrays is only worth it for smaller files, where other renderers
+	// can use them without a lazy rebuild.
+	constexpr size_t PACKED_NOTE_THRESHOLD = 4'000'000;
+	size_t uniqueNotes = 0;
+	for (const NoteSequence& track : seq->trackNotes)
+		uniqueNotes += track.Size();
+	for (const auto& track : parsedTrackResults)
+		seq->longestNoteLength = std::max(seq->longestNoteLength, track.maxGate);
+
+	seq->packed = uniqueNotes > PACKED_NOTE_THRESHOLD;
 	size_t deduplicatedNotes = 0;
-	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
-		std::move(notesToMerge), (uint32_t)seq->length, &deduplicatedNotes);
-	if (deduplicatedNotes > 0)
-		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	if (seq->packed)
+	{
+		std::cout << "  Packed track store: " << seq->trackNotes.size() << " track(s), "
+			<< uniqueNotes << " unique notes" << std::endl;
+	}
+	else
+	{
+		// Layered files repeat the same rectangle at the same tick; keep one of each so the
+		// renderer and the audio never handle millions of identical notes.
+		seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
+			std::move(seq->trackNotes), (uint32_t)seq->length, &deduplicatedNotes);
+		seq->trackNotes.clear();
+		if (deduplicatedNotes > 0)
+			std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	}
 	profileLap("merge/sort/dedupe");
 
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
@@ -556,10 +574,24 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		std::cout << "Applying tempo events..." << std::endl;
 		std::cout << "  Processing notes" << std::endl;
 		TempoMap* tempoMap = seq->GetTempoMap();
-		for (auto& notes : seq->mergedNotes)
-		{
-			SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, notes);
-		}
+		auto applyNotes = [&](std::vector<NoteSequence>& list)
+			{
+				for (auto& notes : list)
+					SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, notes);
+			};
+		if (!seq->mergedNotes.empty()) applyNotes(seq->mergedNotes);
+		else applyNotes(seq->trackNotes);
+
+		seq->longestNoteLength = 0;
+		auto measureLongest = [&](const std::vector<NoteSequence>& list)
+			{
+				for (const auto& notes : list)
+					for (size_t i = 0; i < notes.Size(); i++)
+						seq->longestNoteLength = std::max(seq->longestNoteLength, notes.gate[i]);
+			};
+		if (!seq->mergedNotes.empty()) measureLongest(seq->mergedNotes);
+		else measureLongest(seq->trackNotes);
+
 		std::cout << "  Processing events" << std::endl;
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->mergedEvents);
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->timeSignatures);
@@ -567,6 +599,8 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	seq->timeBased = timeBasedLoading;
 #pragma endregion
 
+	if (!seq->packed)
+	{
 	SetName("Finalizing (2/2)...\nIndexing note blocks...");
 	std::atomic<size_t> blockProgress{ 0 };
 	AddBar([this, &blockProgress]() { return (double)blockProgress.load(std::memory_order_relaxed) / (double)seq->notes; });
@@ -627,6 +661,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		if (thread.joinable()) thread.join();
 
 	seq->noteBlocks = std::move(noteBlockArray);
+	}
 
 	ClearBars();
 	profileLap("note blocks");
@@ -801,8 +836,6 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
 
-	std::vector<NoteSequence> notesToMerge;
-	notesToMerge.reserve(seen.size());
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(seen.size());
 
@@ -827,7 +860,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 
 			seq->noteTrackNames.push_back(trackRes.name);
 			noteTrackIdx++;
-			notesToMerge.push_back(std::move(trackRes.notes));
+			seq->trackNotes.push_back(std::move(trackRes.notes));
 		}
 
 		if (!trackRes.messages.empty())
@@ -864,14 +897,30 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
 
 	SetName("Parsing finished! Merging events...");
-		// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
-	// and the audio never handle millions of identical notes. The collapse happens inside the
-	// parallel per-key sort, and the removed count is still reported.
+	constexpr size_t PACKED_NOTE_THRESHOLD = 4'000'000;
+	size_t uniqueNotes = 0;
+	for (const NoteSequence& track : seq->trackNotes)
+		uniqueNotes += track.Size();
+	for (const auto& track : parsed)
+		seq->longestNoteLength = std::max(seq->longestNoteLength, track.maxGate);
+
+	seq->packed = uniqueNotes > PACKED_NOTE_THRESHOLD;
 	size_t deduplicatedNotes = 0;
-	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
-		std::move(notesToMerge), (uint32_t)seq->length, &deduplicatedNotes);
-	if (deduplicatedNotes > 0)
-		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	if (seq->packed)
+	{
+		std::cout << "  Packed track store: " << seq->trackNotes.size() << " track(s), "
+			<< uniqueNotes << " unique notes" << std::endl;
+	}
+	else
+	{
+		// Layered files repeat the same rectangle at the same tick; keep one of each so the
+		// renderer and the audio never handle millions of identical notes.
+		seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
+			std::move(seq->trackNotes), (uint32_t)seq->length, &deduplicatedNotes);
+		seq->trackNotes.clear();
+		if (deduplicatedNotes > 0)
+			std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	}
 
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
@@ -883,14 +932,31 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	if (timeBasedLoading)
 	{
 		TempoMap* tempoMap = seq->GetTempoMap();
-		for (auto& notes : seq->mergedNotes)
-			SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, notes);
+		auto applyNotes = [&](std::vector<NoteSequence>& list)
+			{
+				for (auto& notes : list)
+					SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, notes);
+			};
+		if (!seq->mergedNotes.empty()) applyNotes(seq->mergedNotes);
+		else applyNotes(seq->trackNotes);
+
+		seq->longestNoteLength = 0;
+		auto measureLongest = [&](const std::vector<NoteSequence>& list)
+			{
+				for (const auto& notes : list)
+					for (size_t i = 0; i < notes.Size(); i++)
+						seq->longestNoteLength = std::max(seq->longestNoteLength, notes.gate[i]);
+			};
+		if (!seq->mergedNotes.empty()) measureLongest(seq->mergedNotes);
+		else measureLongest(seq->trackNotes);
 
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->mergedEvents);
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->timeSignatures);
 	}
 	seq->timeBased = timeBasedLoading;
 
+	if (!seq->packed)
+	{
 	SetName("Finalizing (2/2)...\nIndexing note blocks...");
 	std::atomic<size_t> blockProgress{ 0 };
 	AddBar([this, &blockProgress]() { return (double)blockProgress.load(std::memory_order_relaxed) / (double)seq->notes; });
@@ -947,6 +1013,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		if (thread.joinable()) thread.join();
 
 	seq->noteBlocks = std::move(noteBlockArray);
+	}
 
 	ClearBars();
 	SetName("Done!");
@@ -997,9 +1064,9 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 	ParsedTrack midiTrack;
 
-	// A dense track spends about six bytes per note (on and off). Reserving a fraction of the
+	// A dense track spends about eight bytes per note (on and off). Reserving a fraction of the
 	// chunk keeps the three note arrays from doubling over and over without over-committing.
-	const size_t reserveCount = chunk.length / 12 + 16;
+	const size_t reserveCount = chunk.length / 8 + 16;
 	midiTrack.notes.Reserve(reserveCap == (size_t)-1 ? reserveCount : std::min(reserveCount, reserveCap));
 
 	// Polling an atomic every event made the parser wait on the cache line shared by every worker.
@@ -1025,15 +1092,19 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 
 				const uint32_t id = (uint32_t)midiTrack.notes.Size();
 				midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
-				noteNext.push_back(headOf(slot));
+				noteNext.push_back(open);
 				stackGen[slot] = stackGeneration;
 				stackHead[slot] = id;
 			}
-			else if (headOf(slot) != UINT32_MAX)
+			else
 			{
 				const uint32_t n = headOf(slot);
+				if (n == UINT32_MAX) return;
+
 				stackHead[slot] = noteNext[n];
-				midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
+				const uint32_t gate = currTick - midiTrack.notes.tick[n];
+				midiTrack.notes.gate[n] = gate;
+				midiTrack.maxGate = std::max(midiTrack.maxGate, gate);
 			}
 		};
 
@@ -1082,7 +1153,9 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 				if (n != UINT32_MAX)
 				{
 					stackHead[slot] = noteNext[n];
-					midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
+					const uint32_t gate = currTick - midiTrack.notes.tick[n];
+					midiTrack.notes.gate[n] = gate;
+					midiTrack.maxGate = std::max(midiTrack.maxGate, gate);
 				}
 
 				continue;

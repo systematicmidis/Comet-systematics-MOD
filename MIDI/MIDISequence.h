@@ -26,6 +26,11 @@ public:
 	std::vector<TempoEvent> tempos{};
 	std::vector<TimeSignatureEvent> timeSignatures{};
 	std::vector<NoteSequence> mergedNotes{};
+	// Large files keep the parse output as tick-ordered tracks instead of building the 128
+	// per-key render arrays. MIDITrail and the audio event builders can walk these directly;
+	// renderers that need per-key lists call EnsureMergedNotes() when they are selected.
+	std::vector<NoteSequence> trackNotes{};
+	bool packed = false;
 	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlocks{};
 	std::vector<MIDIMessageEvent> mergedEvents{};
 	std::shared_ptr<TempoMap> tempoMap = nullptr;
@@ -67,6 +72,11 @@ public:
 	}
 
 	double CalcLengthMilliseconds();
+
+	// Lazily materialize the legacy per-key store (and its note-block index) when a renderer
+	// that does not understand packed tracks is selected. Normal large-file loading never
+	// calls this path.
+	void EnsureMergedNotes();
 
 	static void Read(std::ifstream* is, size_t size, uint8_t* buf)
 	{

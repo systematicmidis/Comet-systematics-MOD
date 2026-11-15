@@ -28,8 +28,9 @@ void AudioThread::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MIDIT
 
         // `seq->notes` counts every repeated copy for display; the events we build are only the
         // unique merged notes. Reserving from the display total would try to allocate terabytes.
+        const auto& noteLists = seq->mergedNotes.empty() ? seq->trackNotes : seq->mergedNotes;
         size_t eventCount = seq->mergedEvents.size();
-        for (const auto& notes : seq->mergedNotes)
+        for (const auto& notes : noteLists)
             eventCount += notes.Size();
 
         std::vector<PrecalculatedEvent> events;
@@ -40,9 +41,8 @@ void AudioThread::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MIDIT
             events.push_back({ ev.tick, ev.message });
         }
 
-        for (int i = 0; i < MIDI_KEYS; ++i)
+        for (const NoteSequence& notes : noteLists)
         {
-            NoteSequence& notes = seq->mergedNotes[i];
             for (size_t j = 0; j < notes.Size(); j++)
             {
                 uint32_t nTick = notes.tick[j];

@@ -62,17 +62,31 @@ public:
 		}
 	}
 
+	// Packed-track renderers read sequence->trackNotes directly. Everything else lazily builds
+	// the per-key store when it is selected, so a large file still opens at packed speed.
+	virtual bool UsesMergedNotes() const { return true; }
+
 	virtual void LoadSequence(std::shared_ptr<MIDISequence> sequence)
 	{
 		seq = sequence;
 		isTimeBased = seq->timeBased;
 		noteCounterInfo->ppq = sequence->resolution;
 
+		if (UsesMergedNotes()) sequence->EnsureMergedNotes();
+
 		// Deduped note rectangles and repeated archive cycles are stored once. Count them all in
 		// the overlay without making the renderer or audio walk every duplicate.
 		uint64_t renderedNotes = 0;
-		for (const NoteSequence& notes : sequence->mergedNotes)
-			renderedNotes += notes.Size();
+		if (!sequence->mergedNotes.empty())
+		{
+			for (const NoteSequence& notes : sequence->mergedNotes)
+				renderedNotes += notes.Size();
+		}
+		else
+		{
+			for (const NoteSequence& notes : sequence->trackNotes)
+				renderedNotes += notes.Size();
+		}
 
 		if (renderedNotes > 0 && sequence->notes > 0)
 			noteCounterInfo->noteScale = (double)sequence->notes / (double)renderedNotes;

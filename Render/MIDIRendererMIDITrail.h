@@ -127,6 +127,7 @@ public:
 	void Initialize() override;
 	void OnInput(InputState& inputState) override;
 	void ResetRenderer() override;
+	bool UsesMergedNotes() const override { return false; }
 	void LoadSequence(std::shared_ptr<MIDISequence> sequence) override;
 	void Render(double deltaTime) override;
 	void RenderSettings() override;
@@ -229,6 +230,7 @@ private:
 	void CalcKeyPosAndWidth();
 
 	void RenderNotes();
+	void RenderNotesPacked();
 	void UploadNoteBuffer(size_t count);
 
 	void RenderKeyboard();
