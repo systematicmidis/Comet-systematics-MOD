@@ -52,7 +52,7 @@ public:
 		return tempoMap.get();
 	}
 	
-	long GetNotes()
+	long long GetNotes()
 	{
 		return this->notes;
 	}

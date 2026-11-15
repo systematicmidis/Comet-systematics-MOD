@@ -196,8 +196,14 @@ void PrerenderedEngine::BassWriteWrapped(int start, int count)
 
 void PrerenderedEngine::EventGeneratorLoop()
 {
+    // Repeated copies are counted in seq->notes for display, but these events are only the
+    // unique merged notes; reserving from the display total would allocate terabytes.
+    size_t eventCount = seq->mergedEvents.size();
+    for (const auto& notes : seq->mergedNotes)
+        eventCount += notes.Size();
+
     std::vector<PrecalculatedEvent> localEvents;
-    localEvents.reserve(seq->notes * 2 + seq->mergedEvents.size());
+    localEvents.reserve(eventCount * 2);
 
     for (const auto& ev : seq->mergedEvents)
     {

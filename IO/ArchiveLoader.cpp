@@ -61,6 +61,29 @@ namespace
 		uint64_t size = 0;
 	};
 
+	// A read-only view over bytes that are already in memory.
+	class BufferStream final : public ArchiveStream
+	{
+	public:
+		explicit BufferStream(std::vector<uint8_t> bytes) : data(std::move(bytes)) {}
+
+		size_t Read(uint8_t* out, size_t max) override
+		{
+			if (pos >= data.size() || max == 0) return 0;
+			const size_t got = std::min(max, data.size() - pos);
+			std::memcpy(out, data.data() + pos, got);
+			pos += got;
+			return got;
+		}
+
+		uint64_t CompressedRead() const override { return pos; }
+		uint64_t CompressedTotal() const override { return data.size(); }
+
+	private:
+		std::vector<uint8_t> data;
+		size_t pos = 0;
+	};
+
 	// One .xz/.lzma layer. liblzma decodes concatenated streams too, which is how a "layer" can be
 	// a long run of repeated xz streams.
 	class XzStream final : public ArchiveStream
@@ -84,7 +107,7 @@ namespace
 
 		~XzStream() override { lzma_end(&strm); }
 
-		bool Ok() const { return ok; }
+		bool Ok() const override { return ok; }
 
 		size_t Read(uint8_t* out, size_t max) override
 		{
@@ -255,6 +278,172 @@ namespace
 			|| StartsWith(data, size, SIG_LZ4, sizeof(SIG_LZ4))
 			|| StartsWith(data, size, SIG_RAR, sizeof(SIG_RAR))
 			|| StartsWith(data, size, SIG_LZMA, sizeof(SIG_LZMA));
+	}
+
+	bool ReadAll(ArchiveStream& stream, std::vector<uint8_t>& out, size_t limit, std::string& error)
+	{
+		std::vector<uint8_t> buffer(1 << 20);
+		for (;;)
+		{
+			const size_t got = stream.Read(buffer.data(), buffer.size());
+			if (got == 0) break;
+			if (out.size() + got > limit)
+			{
+				error = "This layer is larger than the repeat proof can hold.";
+				return false;
+			}
+			out.insert(out.end(), buffer.data(), buffer.data() + got);
+		}
+
+		if (!stream.Ok())
+		{
+			error = "The compressed layer ended unexpectedly.";
+			return false;
+		}
+		return true;
+	}
+
+	bool DecodeXzBytes(const std::vector<uint8_t>& input, std::vector<uint8_t>& out, size_t limit,
+		std::string& error)
+	{
+		auto source = std::make_unique<BufferStream>(input);
+		auto decoder = std::make_unique<XzStream>(std::move(source));
+		if (!decoder->Ok())
+		{
+			error = "The repeated cycle is not an xz stream.";
+			return false;
+		}
+
+		out.clear();
+		return ReadAll(*decoder, out, limit, error);
+	}
+
+	void FindXzHeaders(const uint8_t* data, size_t size, std::vector<size_t>& offsets)
+	{
+		for (size_t i = 0; i + sizeof(SIG_XZ) <= size; i++)
+		{
+			if (std::memcmp(data + i, SIG_XZ, sizeof(SIG_XZ)) == 0)
+			{
+				offsets.push_back(i);
+				i += sizeof(SIG_XZ) - 1;
+			}
+		}
+	}
+
+	// Reads a layer that is a short prefix followed by byte-identical compressed cycles. Every
+	// byte after the prefix is compared with the first cycle, so the proof is over the complete
+	// layer, not a sample. Returns false for anything that is not exactly periodic.
+	bool ProveCycles(ArchiveStream& layer, std::vector<uint8_t>& preamble, std::vector<uint8_t>& cycle,
+		uint64_t& cycles, std::string& error)
+	{
+		constexpr size_t PROBE_LIMIT = 64ull << 20;
+
+		std::vector<uint8_t> probe;
+		probe.reserve(1u << 20);
+		std::vector<uint8_t> buffer(1 << 20);
+		while (probe.size() < PROBE_LIMIT)
+		{
+			const size_t got = layer.Read(buffer.data(), buffer.size());
+			if (got == 0) break;
+			probe.insert(probe.end(), buffer.data(), buffer.data() + got);
+		}
+
+		if (!layer.Ok())
+		{
+			error = "The layer ended unexpectedly while proving repeats.";
+			return false;
+		}
+
+		std::vector<size_t> headers;
+		FindXzHeaders(probe.data(), probe.size(), headers);
+		if (headers.size() < 2 || headers[0] != 0)
+		{
+			error = "No repeated xz cycle was found.";
+			return false;
+		}
+
+		const size_t start = headers[1];
+		if (start < sizeof(SIG_XZ) || start + 64 > probe.size())
+		{
+			error = "The repeated cycle starts too close to the end of the probe.";
+			return false;
+		}
+
+		size_t period = 0;
+		for (size_t at = start + 64; at + 64 <= probe.size(); at++)
+		{
+			if (std::memcmp(probe.data() + at, probe.data() + start, 64) == 0)
+			{
+				period = at - start;
+				break;
+			}
+		}
+
+		// A cycle shorter than 64 bytes cannot be distinguished from the probe's own header.
+		if (period < 64 || start + period + 64 > probe.size())
+		{
+			error = "No complete repeated cycle was found in the probe.";
+			return false;
+		}
+
+		preamble.assign(probe.begin(), probe.begin() + (std::ptrdiff_t)start);
+		cycle.assign(probe.begin() + (std::ptrdiff_t)start,
+			probe.begin() + (std::ptrdiff_t)(start + period));
+
+		for (size_t pos = start; pos < probe.size();)
+		{
+			const size_t chunk = std::min(period, probe.size() - pos);
+			if (std::memcmp(probe.data() + pos, cycle.data(), chunk) != 0)
+			{
+				error = "The repeated region differs from its first cycle.";
+				return false;
+			}
+			pos += chunk;
+		}
+
+		uint64_t afterStart = probe.size() - start;
+		size_t offset = (size_t)(afterStart % period);
+		for (;;)
+		{
+			const size_t got = layer.Read(buffer.data(), buffer.size());
+			if (got == 0) break;
+
+			size_t done = 0;
+			while (done < got)
+			{
+				const size_t chunk = std::min(period - offset, got - done);
+				if (std::memcmp(buffer.data() + done, cycle.data() + offset, chunk) != 0)
+				{
+					error = "A later cycle differs from the first one.";
+					return false;
+				}
+				done += chunk;
+				offset += chunk;
+				if (offset == period) offset = 0;
+			}
+			afterStart += got;
+		}
+
+		if (!layer.Ok())
+		{
+			error = "The layer ended unexpectedly while proving repeats.";
+			return false;
+		}
+
+		if (afterStart == 0 || afterStart % period != 0)
+		{
+			error = "The repeated region is not a whole number of cycles.";
+			return false;
+		}
+
+		cycles = afterStart / period;
+		if (cycles < 2)
+		{
+			error = "The layer does not contain at least two cycles.";
+			return false;
+		}
+
+		return true;
 	}
 
 	bool EndsWithIgnoreCase(const std::string& text, const char* suffix)
@@ -625,6 +814,149 @@ std::unique_ptr<ArchiveStream> ArchiveLoader::OpenStream(const std::filesystem::
 
 	error = "The file is nested too deeply.";
 	return nullptr;
+}
+
+std::unique_ptr<ArchiveStream> ArchiveLoader::OpenMemoryStream(const uint8_t* data, size_t size)
+{
+	return std::make_unique<BufferStream>(std::vector<uint8_t>(data, data + size));
+}
+
+std::unique_ptr<ArchiveStream> ArchiveLoader::OpenProvenRepeatStream(const std::filesystem::path& path,
+	RepeatedCycleInfo& info, std::string& error)
+{
+	info = {};
+	error.clear();
+
+	auto firstInput = std::make_unique<FileStream>(path);
+	if (!firstInput->Ok())
+	{
+		error = "Could not open the file.";
+		return nullptr;
+	}
+
+	auto firstLayer = std::make_unique<XzStream>(std::move(firstInput));
+	if (!firstLayer->Ok())
+	{
+		error = "This is not an xz stream.";
+		return nullptr;
+	}
+
+	uint8_t head[16]{};
+	size_t headSize = 0;
+	while (headSize < sizeof(head))
+	{
+		const size_t got = firstLayer->Read(head + headSize, sizeof(head) - headSize);
+		if (got == 0) break;
+		headSize += got;
+	}
+
+	// A plain song.mid.xz is already the MIDI; the normal loader handles it without probing.
+	if (headSize >= 4 && std::memcmp(head, "MThd", 4) == 0)
+	{
+		return nullptr;
+	}
+
+	if (headSize < sizeof(SIG_XZ) || std::memcmp(head, SIG_XZ, sizeof(SIG_XZ)) != 0)
+	{
+		error = "The first layer is not xz.";
+		return nullptr;
+	}
+
+	auto restored = std::make_unique<PrefixedStream>(std::move(firstLayer), head, headSize);
+	std::vector<uint8_t> layer1;
+	if (!ReadAll(*restored, layer1, 1ull << 30, error))
+	{
+		return nullptr;
+	}
+
+	if (IsMidiHeader(layer1.data(), layer1.size()))
+	{
+		return nullptr;
+	}
+
+	if (layer1.size() < sizeof(SIG_XZ) || std::memcmp(layer1.data(), SIG_XZ, sizeof(SIG_XZ)) != 0)
+	{
+		error = "The second layer is not xz.";
+		return nullptr;
+	}
+
+	auto secondInput = std::make_unique<BufferStream>(std::move(layer1));
+	auto secondLayer = std::make_unique<XzStream>(std::move(secondInput));
+	if (!secondLayer->Ok())
+	{
+		error = "The second layer is not an xz stream.";
+		return nullptr;
+	}
+
+	std::vector<uint8_t> preamble;
+	std::vector<uint8_t> cycle;
+	uint64_t cycles = 0;
+	if (!ProveCycles(*secondLayer, preamble, cycle, cycles, error))
+	{
+		return nullptr;
+	}
+
+	if (cycles > 65534)
+	{
+		error = "The repeat count does not fit a MIDI track count.";
+		return nullptr;
+	}
+
+	std::vector<uint8_t> preambleInner;
+	if (!DecodeXzBytes(preamble, preambleInner, 64ull << 20, error))
+	{
+		return nullptr;
+	}
+
+	if (preambleInner.size() < sizeof(SIG_XZ)
+		|| std::memcmp(preambleInner.data(), SIG_XZ, sizeof(SIG_XZ)) != 0)
+	{
+		error = "The preamble is not an xz stream.";
+		return nullptr;
+	}
+
+	std::vector<uint8_t> midi;
+	if (!DecodeXzBytes(preambleInner, midi, 64ull << 20, error))
+	{
+		return nullptr;
+	}
+
+	if (!IsMidiHeader(midi.data(), midi.size()) || midi.size() < 14)
+	{
+		error = "The preamble does not contain a MIDI header.";
+		return nullptr;
+	}
+
+	const uint16_t declaredTracks = (uint16_t)(((uint16_t)midi[10] << 8) | (uint16_t)midi[11]);
+	if (declaredTracks != cycles + 1)
+	{
+		error = "The MIDI header does not describe one header track plus one track per cycle.";
+		return nullptr;
+	}
+
+	std::vector<uint8_t> unit;
+	if (!DecodeXzBytes(cycle, unit, 16ull << 20, error))
+	{
+		return nullptr;
+	}
+
+	if (unit.size() < sizeof(SIG_XZ) || std::memcmp(unit.data(), SIG_XZ, sizeof(SIG_XZ)) != 0)
+	{
+		error = "A repeated cycle does not contain an xz track stream.";
+		return nullptr;
+	}
+
+	info.cycles = cycles;
+	info.declaredTracks = declaredTracks;
+	info.preambleMidi = std::move(midi);
+
+	std::cout << "  Layered DeDupe: proved " << cycles << " identical " << cycle.size()
+		<< "-byte compressed cycles; only one is decoded." << std::endl;
+
+	auto unitInput = std::make_unique<BufferStream>(std::move(unit));
+	auto trackStream = std::make_unique<XzStream>(std::move(unitInput));
+	return std::make_unique<PrefixedStream>(std::move(trackStream), info.preambleMidi.data(),
+		info.preambleMidi.size());
 }
 
 void ArchiveLoader::SetRiskyFastDedupe(bool on)

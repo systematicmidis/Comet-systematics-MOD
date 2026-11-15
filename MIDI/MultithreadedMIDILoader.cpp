@@ -79,6 +79,47 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		if (ArchiveLoader::IsArchive(path))
 		{
+			// A layered file can repeat the same compressed cycle tens of thousands of times. Prove
+			// the whole repeated region byte-for-byte, then decode one cycle and multiply its notes.
+			// Any failed check falls through to the complete walk below.
+			if (deduplicateRepeatedTracks)
+			{
+				try
+				{
+					ArchiveLoader::RepeatedCycleInfo repeat;
+					std::string proofError;
+					auto provenStream = ArchiveLoader::OpenProvenRepeatStream(path, repeat, proofError);
+					if (provenStream)
+					{
+						long long prefixNotes = 0;
+						if (!repeat.preambleMidi.empty())
+						{
+							auto prefixStream = ArchiveLoader::OpenMemoryStream(repeat.preambleMidi.data(),
+								repeat.preambleMidi.size());
+							auto prefixSequence = LoadStreamed(std::move(prefixStream), false);
+							if (!prefixSequence) throw std::runtime_error("The repeat preamble did not load.");
+							prefixNotes = prefixSequence->notes;
+						}
+
+						auto proven = LoadStreamed(std::move(provenStream), timeBasedLoading);
+						if (proven)
+						{
+							const long long cycleNotes = proven->notes - prefixNotes;
+							if (cycleNotes > 0)
+								proven->notes = prefixNotes + cycleNotes * (long long)repeat.cycles;
+
+							proven->trackCount = repeat.declaredTracks;
+							std::cout << "  Proven notes: " << proven->notes << std::endl;
+							return proven;
+						}
+					}
+				}
+				catch (...)
+				{
+					// The proof only saves decoding; a failure must never prevent the full walk.
+				}
+			}
+
 			// A nested .xz can expand to far more than this machine has RAM, so it is parsed as it
 			// streams instead of being decompressed into one buffer. Other archives fall back below.
 			{

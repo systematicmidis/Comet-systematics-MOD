@@ -26,8 +26,14 @@ void AudioThread::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MIDIT
         auto* tempoMap = seq->GetTempoMap();
         const auto resolution = seq->resolution;
 
+        // `seq->notes` counts every repeated copy for display; the events we build are only the
+        // unique merged notes. Reserving from the display total would try to allocate terabytes.
+        size_t eventCount = seq->mergedEvents.size();
+        for (const auto& notes : seq->mergedNotes)
+            eventCount += notes.Size();
+
         std::vector<PrecalculatedEvent> events;
-        events.reserve(seq->notes * 2 + seq->mergedEvents.size());
+        events.reserve(eventCount * 2);
 
         for (const auto& ev : seq->mergedEvents)
         {

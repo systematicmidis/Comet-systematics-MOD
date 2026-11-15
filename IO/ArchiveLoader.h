@@ -17,6 +17,9 @@ public:
 	// Fills up to max bytes and returns how many were produced; 0 means the stream ended.
 	virtual size_t Read(uint8_t* out, size_t max) = 0;
 
+	// False when the decoder hit damaged or truncated input.
+	virtual bool Ok() const { return true; }
+
 	// Bytes of the outermost compressed file consumed so far, for the progress bar.
 	virtual uint64_t CompressedRead() const = 0;
 	virtual uint64_t CompressedTotal() const = 0;
@@ -57,4 +60,21 @@ public:
 	// can be parsed without ever holding it. Returns nullptr and sets `error` when the file is not
 	// a pure xz chain; callers then fall back to Extract(). Nothing is ever written to disk.
 	static std::unique_ptr<ArchiveStream> OpenStream(const std::filesystem::path& path, std::string& error);
+
+	// A "header + N identical compressed cycles" archive can be loaded without decoding all N
+	// cycles: this proves every byte of the repeated region matches the first cycle, then returns
+	// a stream holding the MIDI header plus that one cycle. The caller parses it once and
+	// multiplies the notes by `cycles`. Returns nullptr whenever the proof does not hold, so the
+	// caller can fall back to the complete walk.
+	struct RepeatedCycleInfo
+	{
+		uint64_t cycles = 0;
+		uint16_t declaredTracks = 0;
+		std::vector<uint8_t> preambleMidi;
+	};
+	static std::unique_ptr<ArchiveStream> OpenProvenRepeatStream(const std::filesystem::path& path,
+		RepeatedCycleInfo& info, std::string& error);
+
+	// A read-only stream over bytes already in memory (used for the proven preamble).
+	static std::unique_ptr<ArchiveStream> OpenMemoryStream(const uint8_t* data, size_t size);
 };

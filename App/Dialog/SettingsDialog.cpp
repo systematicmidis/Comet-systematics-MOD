@@ -1262,7 +1262,7 @@ void SettingsDialog::DrawModTab()
 	MIDIPlayerConfig* config = app->GetConfig();
 
 	MIDISequence* seq = app->GetRendererSequence();
-	const uint64_t totalNotes = seq != nullptr ? (uint64_t)std::max<long>(0L, seq->GetNotes()) : 0;
+	const uint64_t totalNotes = seq != nullptr ? (uint64_t)std::max<long long>(0LL, seq->GetNotes()) : 0;
 	const uint64_t melody = config->multiplier.melodyNotes;
 
 	// Per-track note totals back the track list below and every projection in this tab. Counting

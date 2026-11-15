@@ -544,3 +544,32 @@ target_include_directories(CometMergeEquivalence PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(CometMergeEquivalence PRIVATE yaml-cpp)
 set_property(TARGET CometMergeEquivalence PROPERTY CXX_STANDARD 20)
 add_test(NAME merge_equivalence COMMAND CometMergeEquivalence)
+
+# Two >1 GB identical tracks followed by a distinct tail: the old trusted-repeat stop dropped the
+# tail. The archive is generated at test time, so nothing large is committed.
+add_executable(CometArchiveRepeatRegression
+    Tests/ArchiveRepeatRegression.cpp
+    MIDI/MultithreadedMIDILoader.cpp
+    MIDI/MIDISequence.cpp
+    MIDI/TempoMap.cpp
+    MIDI/Sequence/SequenceFuncs.cpp
+    IO/ArchiveLoader.cpp
+    IO/MappedFile.cpp
+)
+target_include_directories(CometArchiveRepeatRegression PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${xz_SOURCE_DIR}/src/liblzma/api
+    ${libarchive_SOURCE_DIR}/libarchive
+)
+target_compile_definitions(CometArchiveRepeatRegression PRIVATE LIBARCHIVE_STATIC NOMINMAX)
+target_precompile_headers(CometArchiveRepeatRegression PRIVATE Tests/TestPch.h)
+target_link_libraries(CometArchiveRepeatRegression PRIVATE
+    archive_static
+    zlibstatic
+    comet_bzip2
+    liblzma
+    libzstd_static
+    lz4_static
+)
+set_property(TARGET CometArchiveRepeatRegression PROPERTY CXX_STANDARD 20)
+add_test(NAME archive_repeat_regression COMMAND CometArchiveRepeatRegression)
