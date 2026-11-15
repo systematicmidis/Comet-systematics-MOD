@@ -871,6 +871,26 @@ void MIDIRendererMIDITrail::LoadSequence(std::shared_ptr<MIDISequence> sequence)
 
 	for (auto& id : endRenderIDs)
 		id = 0;
+
+	auraData.fill(AuraData{});
+	lastAuraTime.fill(-1.0e9);
+
+	// The sequence can arrive after the saved settings, so make the shader and the separator
+	// geometry match them now instead of waiting for the user to touch the checkbox.
+	ApplyNoteRenderingState();
+}
+
+void MIDIRendererMIDITrail::ApplyNoteRenderingState()
+{
+	if (notesProgram)
+	{
+		ShaderBind shaderBind(*notesProgram);
+		notesProgram->SetInt("eatNotes", settings.eatNotes ? 1 : 0);
+	}
+
+	if (separatorVBO)
+		UpdateSeparatorLines(settings.frontRenderCutoff,
+			settings.eatNotes ? 0.0f : settings.backRenderCutoff);
 }
 
 // highly requested, but here you lads go!
@@ -1047,17 +1067,7 @@ void MIDIRendererMIDITrail::RenderSettings()
 				SECTION_ENTRY(SECTION_LABEL("Eat notes"),
 					{
 						if (ImGui::Checkbox("##eatNotes", &settings.eatNotes))
-						{
-							if (settings.eatNotes)
-								UpdateSeparatorLines(settings.frontRenderCutoff, 0);
-							else
-								UpdateSeparatorLines(settings.frontRenderCutoff, settings.backRenderCutoff);
-
-							{
-								ShaderBind shaderBind(*notesProgram);
-								notesProgram->SetInt("eatNotes", settings.eatNotes ? 1 : 0);
-							}
-						}
+							ApplyNoteRenderingState();
 					});
 
 				SECTION_ENTRY(SECTION_LABEL("Transparency"),
@@ -1420,6 +1430,10 @@ void MIDIRendererMIDITrail::RenderNotes()
 	TempoMap* tempoMap = seq->GetTempoMap();
 	long time = tempoMap->SecsToTicksFromMap(seq->resolution, playbackSeconds);
 	double bpm = tempoMap->GetBPMAtTick(time);
+
+	// A seek backwards should be able to spark notes on the same key again immediately.
+	if (lastTime > time)
+		lastAuraTime.fill(-1.0e9);
 	noteCounterInfo->tick = time >= 0 ? time : 0;
 	noteCounterInfo->timeSeconds = playbackSeconds;
 	noteCounterInfo->bpm = bpm;
@@ -1560,19 +1574,28 @@ void MIDIRendererMIDITrail::RenderNotes()
 
 				double noteStartSecs = isTimeBased ? noteStart : tempoMap->TicksToSecsFromMap(seq->resolution, nTick);
 
-				double factor = 0.0;
-				double framesSinceStart = (playbackSeconds - noteStartSecs) / tempoFrameStep;
-				double factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
+				// A dense file has thousands of notes sounding at once. Keeping an aura for every
+				// active note built a wall of rings that never faded. Spark only when a note starts,
+				// let the aura fade, and cap repeats on the same key.
+				constexpr double AURA_PULSE_SECONDS = 0.25;
+				constexpr double AURA_REPEAT_SECONDS = 0.06;
 
-				factor = 0.5;
-
-				float size = static_cast<float>(factor + factor2);
-
-				if (auraData[id].size < size && (id >= keyFirst && id <= keyLast))
+				const double ageSeconds = playbackSeconds - noteStartSecs;
+				if (ageSeconds >= 0.0 && ageSeconds < AURA_PULSE_SECONDS
+					&& id >= keyFirst && id <= keyLast
+					&& playbackSeconds >= lastAuraTime[id] + AURA_REPEAT_SECONDS)
 				{
-					auraData[id].size = size;
-					auraData[id].meta = keyMetas[id].GetMeta();
-					auraData[id].active = true;
+					double framesSinceStart = ageSeconds / tempoFrameStep;
+					double factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
+					float size = static_cast<float>(0.5 + factor2);
+
+					if (auraData[id].size < size)
+					{
+						auraData[id].size = size;
+						auraData[id].meta = keyMetas[id].GetMeta();
+						auraData[id].active = true;
+						lastAuraTime[id] = playbackSeconds;
+					}
 				}
 			}
 			
@@ -1886,11 +1909,17 @@ void MIDIRendererMIDITrail::RenderAuras()
 
 void MIDIRendererMIDITrail::UpdateAuras(double deltaTime)
 {
+	// Let each onset spark fade instead of clearing every frame, which made the aura depend on
+	// whether a note happened to still be held at render time.
+	const float fade = static_cast<float>(std::max(0.0, deltaTime)) * 2.0f;
 	for (int i = 0; i < MIDI_KEYS; i++)
 	{
 		AuraData& data = auraData[i];
-		data.size = 0.0f;
-		data.active = false;
+		if (!data.active) continue;
+
+		data.size = std::max(0.0f, data.size - fade);
+		if (data.size <= 0.0f)
+			data.active = false;
 	}
 }
 
@@ -1935,6 +1964,9 @@ void MIDIRendererMIDITrail::ResetRenderer()
 	{
 		key.MarkPressed(false);
 	}
+
+	auraData.fill(AuraData{});
+	lastAuraTime.fill(-1.0e9);
 }
 
 YAML::Node MIDIRendererMIDITrail::GetSettings()
@@ -2028,4 +2060,6 @@ void MIDIRendererMIDITrail::LoadSettings(const YAML::Node& node)
 		LOAD_VAL(aura, "size", settings.auraSize);
 		LOAD_VAL(aura, "texture", settings.auraTexture.string());
 	}
+
+	ApplyNoteRenderingState();
 }

@@ -88,6 +88,11 @@ void NoteCounterRenderer::RenderUMP(float counterScale)
 	MIDIPlayerConfig* config = app->GetConfig();
 	float minCounterWidth = this->counterWidth * counterScale;
 
+	// The renderer walks the deduplicated note store; show every note the file contains.
+	const uint64_t scaledNotesPassed = noteCounterInfo->Scale(noteCounterInfo->notesPassed.value);
+	const uint64_t scaledPolyphony = noteCounterInfo->Scale(noteCounterInfo->polyphony.value);
+	const uint64_t scaledNotesPerSecond = noteCounterInfo->Scale(noteCounterInfo->notesPerSecond.value);
+
 	if (ImGui::Begin("noteCounterUMP", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar))
 	{
 		ImGui::SetWindowFontScale(counterScale);
@@ -120,19 +125,19 @@ void NoteCounterRenderer::RenderUMP(float counterScale)
 		}
 		if (noteCounterInfo->notesPassed.shown)
 		{
-			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatCount(config, noteCounterInfo->notesPassed.value, playedPlainNotes).c_str());
+			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatCount(config, scaledNotesPassed, playedPlainNotes).c_str());
 			rows[rowCount].label = "Notes";
 			rowCount++;
 		}
 		if (noteCounterInfo->notesPerSecond.shown)
 		{
-			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatBoosted(config, noteCounterInfo->notesPerSecond.value, noteCounterInfo->notesPassed.value, plainNotesPerSecond, playedPlainNotes).c_str());
+			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatBoosted(config, scaledNotesPerSecond, scaledNotesPassed, plainNotesPerSecond, playedPlainNotes).c_str());
 			rows[rowCount].label = "NPS";
 			rowCount++;
 		}
 		if (noteCounterInfo->polyphony.shown)
 		{
-			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatBoosted(config, noteCounterInfo->polyphony.value, noteCounterInfo->notesPassed.value, plainPolyphonyNotes, playedPlainNotes).c_str());
+			OverlayUtils::FormatText(rows[rowCount].value, "%s", NoteMultiplier::FormatBoosted(config, scaledPolyphony, scaledNotesPassed, plainPolyphonyNotes, playedPlainNotes).c_str());
 			rows[rowCount].label = "Polyphony";
 			rowCount++;
 		}
@@ -197,6 +202,11 @@ void NoteCounterRenderer::RenderMIDITrail(float counterScale)
 	MIDIPlayerConfig* config = app->GetConfig();
 	float minCounterWidth = this->counterWidth * counterScale;
 
+	// The renderer walks the deduplicated note store; show every note the file contains.
+	const uint64_t scaledNotesPassed = noteCounterInfo->Scale(noteCounterInfo->notesPassed.value);
+	const uint64_t scaledPolyphony = noteCounterInfo->Scale(noteCounterInfo->polyphony.value);
+	const uint64_t scaledNotesPerSecond = noteCounterInfo->Scale(noteCounterInfo->notesPerSecond.value);
+
 	// The MIDITrail counter is a single line, so a big multiplied count can stretch it past the
 	// render target. Cap the window at the viewport width and let the line wrap instead.
 	float windowPaddingX = 5.0f * counterScale;
@@ -235,21 +245,21 @@ void NoteCounterRenderer::RenderMIDITrail(float counterScale)
 		if (noteCounterInfo->notesPassed.shown)
 		{
 			if (hasFirstField) stats << "  ";
-			stats << "NOTES:" << NoteMultiplier::FormatCount(config, noteCounterInfo->notesPassed.value, playedPlainNotes);
+			stats << "NOTES:" << NoteMultiplier::FormatCount(config, scaledNotesPassed, playedPlainNotes);
 			hasFirstField = true;
 		}
 
 		if (noteCounterInfo->notesPerSecond.shown)
 		{
 			if (hasFirstField) stats << "  ";
-			stats << "NPS:" << NoteMultiplier::FormatBoosted(config, noteCounterInfo->notesPerSecond.value, noteCounterInfo->notesPassed.value, plainNotesPerSecond, playedPlainNotes);
+			stats << "NPS:" << NoteMultiplier::FormatBoosted(config, scaledNotesPerSecond, scaledNotesPassed, plainNotesPerSecond, playedPlainNotes);
 			hasFirstField = true;
 		}
 
 		if (noteCounterInfo->polyphony.shown)
 		{
 			if (hasFirstField) stats << "  ";
-			stats << "POLY:" << NoteMultiplier::FormatBoosted(config, noteCounterInfo->polyphony.value, noteCounterInfo->notesPassed.value, plainPolyphonyNotes, playedPlainNotes);
+			stats << "POLY:" << NoteMultiplier::FormatBoosted(config, scaledPolyphony, scaledNotesPassed, plainPolyphonyNotes, playedPlainNotes);
 		}
 
 		float wrapRight = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;

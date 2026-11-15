@@ -5,6 +5,8 @@
 #include <cstring>
 #include <iterator>
 #include <thread>
+#include <chrono>
+#include <cstdlib>
 #include <unordered_map>
 #include "Sequence/SequenceFuncs.h"
 #include "TempoMap.h"
@@ -65,6 +67,21 @@ MultithreadedMIDILoader::MultithreadedMIDILoader(std::shared_ptr<InputStream> is
 
 std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoading)
 {
+	const bool profileLoad = std::getenv("COMET_PROFILE_LOAD") != nullptr;
+	auto profileStart = std::chrono::steady_clock::now();
+	auto profileLast = profileStart;
+	auto profileLap = [&](const char* phase)
+		{
+			if (!profileLoad) return;
+			auto now = std::chrono::steady_clock::now();
+			std::cout << "  [profile] " << phase << ": "
+				<< std::chrono::duration_cast<std::chrono::milliseconds>(now - profileLast).count()
+				<< " ms (total "
+				<< std::chrono::duration_cast<std::chrono::milliseconds>(now - profileStart).count()
+				<< " ms)" << std::endl;
+			profileLast = now;
+		};
+
 	running = true;
 	tracksProcessed = 0;
 	archiveDone = 0;
@@ -180,6 +197,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 			}
 
 			seq = std::make_shared<MIDISequence>("TODO");
+			profileLap("open/index");
 		}
 	}
 	else
@@ -280,53 +298,68 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	if (deduplicateRepeatedTracks && trackCount > 1)
 	{
-		// A hash of the chunk finds repeats in one pass. Comparing every track with every earlier
-		// one was quadratic, which a file with thousands of tracks feels; the length is folded in
-		// so only same-size chunks can collide, and the bytes are still compared before merging.
+		// Only tracks of the same byte length can be exact repeats. Grouping by length first means
+		// an ordinary MIDI hashes almost nothing: on the 100-million-note test file, 800 MB shrinks
+		// to the 35 MB that actually shares a length with another track.
+		std::unordered_map<size_t, std::vector<size_t>> byLength;
+		byLength.reserve(trackCount);
+		for (size_t i = 0; i < trackCount; i++)
+			byLength[rawChunks[i].length].push_back(i);
+
 		auto hashChunk = [](const uint8_t* data, size_t length)
 		{
 			uint64_t hash = 1469598103934665603ull ^ (uint64_t)length;
-			for (size_t i = 0; i < length; i++)
+			size_t i = 0;
+			for (; i + 8 <= length; i += 8)
 			{
-				hash ^= data[i];
-				hash *= 1099511628211ull;
+				uint64_t word = 0;
+				std::memcpy(&word, data + i, 8);
+				hash = (hash ^ word) * 1099511628211ull;
 			}
+			for (; i < length; i++)
+				hash = (hash ^ data[i]) * 1099511628211ull;
 			return hash;
 		};
 
 		std::unordered_map<uint64_t, std::vector<size_t>> byHash;
 		byHash.reserve(trackCount);
 
-		for (size_t i = 0; i < trackCount; i++)
+		for (const auto& [length, members] : byLength)
 		{
-			const RawTrackChunk& chunk = rawChunks[i];
-			std::vector<size_t>& bucket = byHash[hashChunk(chunk.data, chunk.length)];
+			if (members.size() < 2) continue;
 
-			bool duplicate = false;
-			for (size_t candidate : bucket)
+			for (size_t i : members)
 			{
-				const RawTrackChunk& earlier = rawChunks[candidate];
+				const RawTrackChunk& chunk = rawChunks[i];
+				std::vector<size_t>& bucket = byHash[hashChunk(chunk.data, chunk.length)];
 
-				// With the size assumption on, a matching hash counts as a repeat: comparing two
-				// multi-megabyte chunks byte for byte would cost as much as parsing them.
-				if (assumeLayerRepeats || chunk.length == 0
-					|| std::memcmp(earlier.data, chunk.data, chunk.length) == 0)
+				bool duplicate = false;
+				for (size_t candidate : bucket)
 				{
-					parsedOrigin[i] = candidate;
-					uniqueTrackCount--;
-					duplicate = true;
-					break;
-				}
-			}
+					const RawTrackChunk& earlier = rawChunks[candidate];
 
-			if (!duplicate)
-				bucket.push_back(i);
+					// With the size assumption on, a matching hash counts as a repeat: comparing two
+					// multi-megabyte chunks byte for byte would cost as much as parsing them.
+					if (assumeLayerRepeats || chunk.length == 0
+						|| std::memcmp(earlier.data, chunk.data, chunk.length) == 0)
+					{
+						parsedOrigin[i] = candidate;
+						uniqueTrackCount--;
+						duplicate = true;
+						break;
+					}
+				}
+
+				if (!duplicate)
+					bucket.push_back(i);
+			}
 		}
 
 		if (uniqueTrackCount < trackCount)
 			std::cout << "  Layered DeDupe: " << (trackCount - uniqueTrackCount)
 				<< " repeated track(s) will not be decoded again" << std::endl;
 	}
+	profileLap("track hash");
 
 
 	if (trackCount > 0)
@@ -389,6 +422,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		ClearBars();
 	}
+	profileLap("track parse");
 
 
 #pragma endregion
@@ -451,6 +485,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 		trackIdx++;
 	}
+	profileLap("assembly");
 #pragma endregion
 
 #pragma region Post-processing & Merging
@@ -487,21 +522,25 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
 	SetName("Parsing finished! Merging events...");
 
-	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge), (uint32_t)seq->length);
-
 	// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
-	// and the audio never handle millions of identical notes.
-	const size_t deduplicatedNotes = SequenceFuncs::DeduplicateAll(seq->mergedNotes);
+	// and the audio never handle millions of identical notes. The collapse happens inside the
+	// parallel per-key sort, and the removed count is still reported.
+	size_t deduplicatedNotes = 0;
+	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
+		std::move(notesToMerge), (uint32_t)seq->length, &deduplicatedNotes);
 	if (deduplicatedNotes > 0)
 		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+	profileLap("merge/sort/dedupe");
 
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
+	profileLap("event merge");
 
 	SetName("Finalizing (1/2)...");
 	std::cout << "  Finishing up" << std::endl;
 
 	seq->tempoMap = std::make_shared<TempoMap>();
 	seq->tempoMap->RebuildTempoMap(seq.get());
+	profileLap("tempo map");
 
 	// NEW: Apply note bounds
 	ClearBars();
@@ -566,6 +605,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	seq->noteBlocks = std::move(noteBlockArray);
 
 	ClearBars();
+	profileLap("note blocks");
 
 	SetName("Done!");
 	std::cout << "MIDI has successfully loaded." << std::endl;
@@ -800,13 +840,15 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
 
 	SetName("Parsing finished! Merging events...");
-	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(std::move(notesToMerge), (uint32_t)seq->length);
-
-	// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
-	// and the audio never handle millions of identical notes.
-	const size_t deduplicatedNotes = SequenceFuncs::DeduplicateAll(seq->mergedNotes);
+		// Layered files repeat the same rectangle at the same tick; keep one of each so the renderer
+	// and the audio never handle millions of identical notes. The collapse happens inside the
+	// parallel per-key sort, and the removed count is still reported.
+	size_t deduplicatedNotes = 0;
+	seq->mergedNotes = SequenceFuncs::WindowedMergeAndDistribute(
+		std::move(notesToMerge), (uint32_t)seq->length, &deduplicatedNotes);
 	if (deduplicatedNotes > 0)
 		std::cout << "  DeDupe: " << deduplicatedNotes << " identical note(s) kept once" << std::endl;
+
 	seq->mergedEvents = SequenceFuncs::FlattenSequence(std::move(eventsToMerge));
 
 	SetName("Finalizing (1/2)...");
@@ -918,8 +960,13 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 	const size_t reserveCount = chunk.length / 12 + 16;
 	midiTrack.notes.Reserve(reserveCap == (size_t)-1 ? reserveCount : std::min(reserveCount, reserveCap));
 
-	while (running && !ended && !cursor.AtEnd())
+	// Polling an atomic every event made the parser wait on the cache line shared by every worker.
+	// A cancellation check every few thousand events is still immediate to a human and keeps the
+	// per-event loop free of synchronization.
+	size_t eventCount = 0;
+	while (!ended && !cursor.AtEnd())
 	{
+		if ((++eventCount & 0xFFF) == 0 && !running.load(std::memory_order_relaxed)) break;
 		currTick += cursor.VLQ();
 		if (cursor.AtEnd()) break;
 

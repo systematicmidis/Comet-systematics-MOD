@@ -133,12 +133,13 @@ void GraphOverlayRenderer::Render(float heightOffset)
 
 	// The rates and the per-track plain split come from the same place the counter reads them, so
 	// the graph plots exactly the numbers the counter prints - from the very first note.
+	const uint64_t scaledNotesPassed = counter->Scale(counter->notesPassed.value);
 	const double npsRate = std::min(
-		NoteMultiplier::DisplayedRate(config, counter->notesPerSecond.value, counter->notesPassed.value,
+		NoteMultiplier::DisplayedRate(config, counter->Scale(counter->notesPerSecond.value), scaledNotesPassed,
 			app->GetPlainNotesPerSecond(), graphMultiply, app->GetPlainPlayedNotes()),
 		MAX_PLOT_VALUE);
 	const double polyRate = std::min(
-		NoteMultiplier::DisplayedRate(config, counter->polyphony.value, counter->notesPassed.value,
+		NoteMultiplier::DisplayedRate(config, counter->Scale(counter->polyphony.value), scaledNotesPassed,
 			app->GetPlainPolyphony(), graphMultiply, app->GetPlainPlayedNotes()),
 		MAX_PLOT_VALUE);
 

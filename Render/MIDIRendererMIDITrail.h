@@ -206,6 +206,7 @@ private:
 
 	std::array<RenderAura, MIDI_KEYS> renderAuras{};
 	std::array<AuraData, MIDI_KEYS> auraData{};
+	std::array<double, MIDI_KEYS> lastAuraTime{};
 	#pragma endregion
 
 	#pragma region Camera data
@@ -242,6 +243,11 @@ private:
 	void LoadAuraTexture();
 	void RenderAuras();
 	void UpdateAuras(double deltaTime);
+
+	// Applies saved note settings to the shader and separator geometry. Loading the renderer used
+	// to set the C++ flags but leave "eatNotes" at the shader's default of false, so the first
+	// switch into MIDITrail did not eat notes until the checkbox was toggled.
+	void ApplyNoteRenderingState();
 
 	void UpdateMatrices();
 	glm::mat4 GetViewMatrixFromEuler();

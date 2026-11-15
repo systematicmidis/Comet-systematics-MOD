@@ -67,6 +67,17 @@ public:
 		seq = sequence;
 		isTimeBased = seq->timeBased;
 		noteCounterInfo->ppq = sequence->resolution;
+
+		// Deduped note rectangles and repeated archive cycles are stored once. Count them all in
+		// the overlay without making the renderer or audio walk every duplicate.
+		uint64_t renderedNotes = 0;
+		for (const NoteSequence& notes : sequence->mergedNotes)
+			renderedNotes += notes.Size();
+
+		if (renderedNotes > 0 && sequence->notes > 0)
+			noteCounterInfo->noteScale = (double)sequence->notes / (double)renderedNotes;
+		else
+			noteCounterInfo->noteScale = 1.0;
 	}
 
 	virtual std::shared_ptr<MIDISequence> GetSequence()

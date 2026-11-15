@@ -7,6 +7,7 @@ void NoteCounterInfo::ResetCounter()
 	notesPassed.value = 0;
 	polyphony.value = 0;
 	timeSeconds.value = 0;
+	noteScale = 1.0;
 	notesPerSecond.value = 0;
 	bpm.value = 120;
 	tick.value = 0;
