@@ -873,7 +873,6 @@ void MIDIRendererMIDITrail::LoadSequence(std::shared_ptr<MIDISequence> sequence)
 		id = 0;
 
 	auraData.fill(AuraData{});
-	lastAuraTime.fill(-1.0e9);
 
 	// The sequence can arrive after the saved settings, so make the shader and the separator
 	// geometry match them now instead of waiting for the user to touch the checkbox.
@@ -1431,9 +1430,6 @@ void MIDIRendererMIDITrail::RenderNotes()
 	long time = tempoMap->SecsToTicksFromMap(seq->resolution, playbackSeconds);
 	double bpm = tempoMap->GetBPMAtTick(time);
 
-	// A seek backwards should be able to spark notes on the same key again immediately.
-	if (lastTime > time)
-		lastAuraTime.fill(-1.0e9);
 	noteCounterInfo->tick = time >= 0 ? time : 0;
 	noteCounterInfo->timeSeconds = playbackSeconds;
 	noteCounterInfo->bpm = bpm;
@@ -1574,28 +1570,24 @@ void MIDIRendererMIDITrail::RenderNotes()
 
 				double noteStartSecs = isTimeBased ? noteStart : tempoMap->TicksToSecsFromMap(seq->resolution, nTick);
 
-				// A dense file has thousands of notes sounding at once. Keeping an aura for every
-				// active note built a wall of rings that never faded. Spark only when a note starts,
-				// let the aura fade, and cap repeats on the same key.
+				// One aura per key: keep it visible while any note on the key is sounding, and
+				// add the short onset pulse without ever stacking a second ring. Notes on the same
+				// key all update the same entry, so dense files cannot multiply the effect.
 				constexpr double AURA_PULSE_SECONDS = 0.25;
-				constexpr double AURA_REPEAT_SECONDS = 0.06;
-
 				const double ageSeconds = playbackSeconds - noteStartSecs;
-				if (ageSeconds >= 0.0 && ageSeconds < AURA_PULSE_SECONDS
-					&& id >= keyFirst && id <= keyLast
-					&& playbackSeconds >= lastAuraTime[id] + AURA_REPEAT_SECONDS)
+				double factor2 = 0.0;
+				if (ageSeconds >= 0.0 && ageSeconds < AURA_PULSE_SECONDS)
 				{
 					double framesSinceStart = ageSeconds / tempoFrameStep;
-					double factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
-					float size = static_cast<float>(0.5 + factor2);
+					factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
+				}
+				float size = static_cast<float>(0.5 + factor2);
 
-					if (auraData[id].size < size)
-					{
-						auraData[id].size = size;
-						auraData[id].meta = keyMetas[id].GetMeta();
-						auraData[id].active = true;
-						lastAuraTime[id] = playbackSeconds;
-					}
+				if (auraData[id].size < size && id >= keyFirst && id <= keyLast)
+				{
+					auraData[id].size = size;
+					auraData[id].meta = keyMetas[id].GetMeta();
+					auraData[id].active = true;
 				}
 			}
 			
@@ -1872,7 +1864,7 @@ void MIDIRendererMIDITrail::RenderAuras()
 		if (!data.active) continue;
 
 		float centerPos = keyPos[i] + (keyWidth[i] * 0.5f);
-		float visualSize = data.size * settings.auraSize * 1.5f;
+		float visualSize = data.size * settings.auraSize * 4.0f;
 		renderAuras[activeAuras++] = RenderAura(visualSize, centerPos, data.meta);
 	}
 
@@ -1966,7 +1958,6 @@ void MIDIRendererMIDITrail::ResetRenderer()
 	}
 
 	auraData.fill(AuraData{});
-	lastAuraTime.fill(-1.0e9);
 }
 
 YAML::Node MIDIRendererMIDITrail::GetSettings()

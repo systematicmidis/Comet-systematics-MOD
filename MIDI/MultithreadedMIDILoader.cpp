@@ -461,7 +461,12 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 			// baked into the note data here.
 			seq->noteTrackNames.push_back(trackRes.name);
 			noteTrackIdx++;
-			notesToMerge.push_back(std::move(trackRes.notes));
+
+			// A repeated track is the same rectangle stream as its origin. Keep the origin in the
+			// render store and let the note-count scale account for the copies, as Kimrashi's
+			// track_copies does; sorting the copies again would only be undone by deduplication.
+			if (parsedOrigin[trackIdx] == (size_t)trackIdx)
+				notesToMerge.push_back(std::move(trackRes.notes));
 		}
 
 		if (!trackRes.messages.empty())
@@ -563,45 +568,64 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 #pragma endregion
 
 	SetName("Finalizing (2/2)...\nIndexing note blocks...");
-	size_t blockProgress = 0;
-	AddBar([this, &blockProgress]() { return (double)blockProgress / (double)seq->notes; });
+	std::atomic<size_t> blockProgress{ 0 };
+	AddBar([this, &blockProgress]() { return (double)blockProgress.load(std::memory_order_relaxed) / (double)seq->notes; });
 
 	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlockArray{};
+	std::atomic<size_t> nextBlockKey{ 0 };
 
-	size_t key = 0;
-	for (const NoteSequence& notes : seq->mergedNotes)
-	{
-		std::vector<NoteBlock> blocks{};
-		blocks.reserve((notes.Size() + NOTE_BLOCK_SIZE - 1) / NOTE_BLOCK_SIZE);
-
-		uint32_t blockMin = (uint32_t)(-1); // funny underflow hack
-		uint32_t blockMax = 0;
-
-		for (size_t i = 0; i < notes.Size(); ++i)
+	// Every key owns one slice, so indexing the 128 keys is embarrassingly parallel. This used
+	// to be a serial pass over every merged note and cost about as much as the merge itself.
+	auto buildKeyBlocks = [&]()
 		{
-			uint32_t tick = notes.tick[i];
-			uint32_t tickEnd = tick + notes.gate[i];
-
-			blockMin = std::min(blockMin, tick);
-			blockMax = std::max(blockMax, tickEnd);
-
-			++blockProgress;
-
-			if ((i + 1) % NOTE_BLOCK_SIZE == 0)
+			size_t key;
+			while ((key = nextBlockKey.fetch_add(1, std::memory_order_relaxed)) < MIDI_KEYS)
 			{
-				blocks.emplace_back(blockMin, blockMax);
-				blockMin = (uint32_t)(-1);
-				blockMax = 0;
+				const NoteSequence& notes = seq->mergedNotes[key];
+				std::vector<NoteBlock> blocks{};
+				blocks.reserve((notes.Size() + NOTE_BLOCK_SIZE - 1) / NOTE_BLOCK_SIZE);
+
+				uint32_t blockMin = (uint32_t)(-1); // funny underflow hack
+				uint32_t blockMax = 0;
+
+				for (size_t i = 0; i < notes.Size(); ++i)
+				{
+					uint32_t tick = notes.tick[i];
+					uint32_t tickEnd = tick + notes.gate[i];
+
+					blockMin = std::min(blockMin, tick);
+					blockMax = std::max(blockMax, tickEnd);
+
+					if ((i + 1) % NOTE_BLOCK_SIZE == 0)
+					{
+						blocks.emplace_back(blockMin, blockMax);
+						blockMin = (uint32_t)(-1);
+						blockMax = 0;
+					}
+				}
+
+				if (notes.Size() % NOTE_BLOCK_SIZE != 0)
+				{
+					blocks.emplace_back(blockMin, blockMax);
+				}
+
+				blockProgress.fetch_add(notes.Size(), std::memory_order_relaxed);
+				noteBlockArray[key] = std::move(blocks);
 			}
-		}
+		};
 
-		if (notes.Size() % NOTE_BLOCK_SIZE != 0)
-		{
-			blocks.emplace_back(blockMin, blockMax);
-		}
+	size_t blockWorkers = std::min<size_t>(12, std::thread::hardware_concurrency());
+	if (blockWorkers == 0) blockWorkers = 1;
+	if (seq->notes < (1u << 20)) blockWorkers = 1;
 
-		noteBlockArray[key++] = std::move(blocks);
-	}
+	std::vector<std::thread> blockThreads;
+	blockThreads.reserve(blockWorkers > 1 ? blockWorkers : 0);
+	for (size_t i = 1; i < blockWorkers; i++)
+		blockThreads.emplace_back(buildKeyBlocks);
+	buildKeyBlocks();
+	for (auto& thread : blockThreads)
+		if (thread.joinable()) thread.join();
+
 	seq->noteBlocks = std::move(noteBlockArray);
 
 	ClearBars();
@@ -868,42 +892,60 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	seq->timeBased = timeBasedLoading;
 
 	SetName("Finalizing (2/2)...\nIndexing note blocks...");
-	size_t blockProgress = 0;
-	AddBar([this, &blockProgress]() { return (double)blockProgress / (double)seq->notes; });
+	std::atomic<size_t> blockProgress{ 0 };
+	AddBar([this, &blockProgress]() { return (double)blockProgress.load(std::memory_order_relaxed) / (double)seq->notes; });
 
 	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlockArray{};
+	std::atomic<size_t> nextBlockKey{ 0 };
 
-	size_t key = 0;
-	for (const NoteSequence& notes : seq->mergedNotes)
-	{
-		std::vector<NoteBlock> blocks{};
-		blocks.reserve((notes.Size() + NOTE_BLOCK_SIZE - 1) / NOTE_BLOCK_SIZE);
-
-		uint32_t blockMin = (uint32_t)(-1);
-		uint32_t blockMax = 0;
-
-		for (size_t i = 0; i < notes.Size(); ++i)
+	auto buildKeyBlocks = [&]()
 		{
-			uint32_t tick = notes.tick[i];
-			uint32_t tickEnd = tick + notes.gate[i];
-
-			blockMin = std::min(blockMin, tick);
-			blockMax = std::max(blockMax, tickEnd);
-			++blockProgress;
-
-			if ((i + 1) % NOTE_BLOCK_SIZE == 0)
+			size_t key;
+			while ((key = nextBlockKey.fetch_add(1, std::memory_order_relaxed)) < MIDI_KEYS)
 			{
-				blocks.emplace_back(blockMin, blockMax);
-				blockMin = (uint32_t)(-1);
-				blockMax = 0;
+				const NoteSequence& notes = seq->mergedNotes[key];
+				std::vector<NoteBlock> blocks{};
+				blocks.reserve((notes.Size() + NOTE_BLOCK_SIZE - 1) / NOTE_BLOCK_SIZE);
+
+				uint32_t blockMin = (uint32_t)(-1);
+				uint32_t blockMax = 0;
+
+				for (size_t i = 0; i < notes.Size(); ++i)
+				{
+					uint32_t tick = notes.tick[i];
+					uint32_t tickEnd = tick + notes.gate[i];
+
+					blockMin = std::min(blockMin, tick);
+					blockMax = std::max(blockMax, tickEnd);
+
+					if ((i + 1) % NOTE_BLOCK_SIZE == 0)
+					{
+						blocks.emplace_back(blockMin, blockMax);
+						blockMin = (uint32_t)(-1);
+						blockMax = 0;
+					}
+				}
+
+				if (notes.Size() % NOTE_BLOCK_SIZE != 0)
+					blocks.emplace_back(blockMin, blockMax);
+
+				blockProgress.fetch_add(notes.Size(), std::memory_order_relaxed);
+				noteBlockArray[key] = std::move(blocks);
 			}
-		}
+		};
 
-		if (notes.Size() % NOTE_BLOCK_SIZE != 0)
-			blocks.emplace_back(blockMin, blockMax);
+	size_t blockWorkers = std::min<size_t>(12, std::thread::hardware_concurrency());
+	if (blockWorkers == 0) blockWorkers = 1;
+	if (seq->notes < (1u << 20)) blockWorkers = 1;
 
-		noteBlockArray[key++] = std::move(blocks);
-	}
+	std::vector<std::thread> blockThreads;
+	blockThreads.reserve(blockWorkers > 1 ? blockWorkers : 0);
+	for (size_t i = 1; i < blockWorkers; i++)
+		blockThreads.emplace_back(buildKeyBlocks);
+	buildKeyBlocks();
+	for (auto& thread : blockThreads)
+		if (thread.joinable()) thread.join();
+
 	seq->noteBlocks = std::move(noteBlockArray);
 
 	ClearBars();
@@ -963,6 +1005,38 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 	// Polling an atomic every event made the parser wait on the cache line shared by every worker.
 	// A cancellation check every few thousand events is still immediate to a human and keeps the
 	// per-event loop free of synchronization.
+	auto addNoteOn = [&](uint8_t channel, uint8_t key, uint8_t vel)
+		{
+			if (key >= MIDI_KEYS) return;
+
+			const uint32_t slot = ((uint32_t)key << 4) | channel;
+
+			if (vel > 0)
+			{
+				// A layered black MIDI can repeat the same note-on for an already-open note
+				// millions of times. It is the same sound, so count it and store it once.
+				const uint32_t open = headOf(slot);
+				if (collapseRepeats && open != UINT32_MAX && midiTrack.notes.tick[open] == currTick
+					&& midiTrack.notes.GetVelocity(open) == vel)
+				{
+					midiTrack.repeatedNotes++;
+					return;
+				}
+
+				const uint32_t id = (uint32_t)midiTrack.notes.Size();
+				midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
+				noteNext.push_back(headOf(slot));
+				stackGen[slot] = stackGeneration;
+				stackHead[slot] = id;
+			}
+			else if (headOf(slot) != UINT32_MAX)
+			{
+				const uint32_t n = headOf(slot);
+				stackHead[slot] = noteNext[n];
+				midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
+			}
+		};
+
 	size_t eventCount = 0;
 	while (!ended && !cursor.AtEnd())
 	{
@@ -1019,33 +1093,49 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 				const uint8_t key = cursor.Byte();
 				const uint8_t vel = cursor.Byte();
 
-				if (key >= MIDI_KEYS) continue;
+				addNoteOn(channel, key, vel);
 
-				const uint32_t slot = ((uint32_t)key << 4) | channel;
-
+				// Dense black MIDI writes long runs of note-ons at the same tick with running
+				// status. Parsing those as one tight loop skips a VLQ and a switch per note.
 				if (vel > 0)
 				{
-					// A layered black MIDI can repeat the same note-on for an already-open note
-					// millions of times. It is the same sound, so count it and store it once.
-					const uint32_t open = headOf(slot);
-					if (collapseRepeats && open != UINT32_MAX && midiTrack.notes.tick[open] == currTick
-						&& midiTrack.notes.GetVelocity(open) == vel)
+					const uint8_t status = (uint8_t)(0x90 | channel);
+					while (cursor.Remaining() >= 3 && cursor.p[0] == 0x00)
 					{
-						midiTrack.repeatedNotes++;
-						continue;
-					}
+						uint8_t runKey;
+						uint8_t runVel;
+						size_t advance;
 
-					const uint32_t id = (uint32_t)midiTrack.notes.Size();
-					midiTrack.notes.Emplace(chunk.index, channel, currTick, key, (uint32_t)(-1), vel);
-					noteNext.push_back(headOf(slot));
-					stackGen[slot] = stackGeneration;
-					stackHead[slot] = id;
-				}
-				else if (headOf(slot) != UINT32_MAX)
-				{
-					const uint32_t n = headOf(slot);
-					stackHead[slot] = noteNext[n];
-					midiTrack.notes.gate[n] = currTick - midiTrack.notes.tick[n];
+						if (cursor.p[1] < 0x80)
+						{
+							if (cursor.p[2] >= 0x80) break;
+							runKey = cursor.p[1];
+							runVel = cursor.p[2];
+							advance = 3;
+						}
+						else if (cursor.p[1] == status)
+						{
+							if (cursor.Remaining() < 4 || cursor.p[2] >= 0x80 || cursor.p[3] >= 0x80) break;
+							runKey = cursor.p[2];
+							runVel = cursor.p[3];
+							advance = 4;
+						}
+						else
+						{
+							break;
+						}
+
+						// Velocity zero is a note-off: leave it to the main loop.
+						if (runVel == 0) break;
+
+						cursor.p += advance;
+						if (((++eventCount) & 0xFFF) == 0 && !running.load(std::memory_order_relaxed))
+						{
+							ended = true;
+							break;
+						}
+						addNoteOn(channel, runKey, runVel);
+					}
 				}
 				continue;
 			}
