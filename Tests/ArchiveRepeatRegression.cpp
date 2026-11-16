@@ -165,6 +165,66 @@ namespace
 			std::filesystem::remove(path, error);
 		}
 	};
+
+	bool BuildSmallLegacyMidi(const std::filesystem::path& path)
+	{
+		const uint8_t header[] = { 'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1, 0, 7, 0, 0x60 };
+		const uint8_t tempo[] = {
+			0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,
+			0x00, 0xFF, 0x2F, 0x00
+		};
+		const uint8_t empty[] = {
+			0x00, 0xFF, 0x03, 0x04, 'p', 'a', 'd', ' ',
+			0x00, 0xFF, 0x2F, 0x00
+		};
+
+		std::vector<uint8_t> bytes(header, header + sizeof(header));
+		auto addTrack = [&](const uint8_t* data, uint32_t size)
+		{
+			const uint8_t chunk[] = {
+				'M', 'T', 'r', 'k',
+				(uint8_t)(size >> 24), (uint8_t)(size >> 16), (uint8_t)(size >> 8), (uint8_t)size
+			};
+			bytes.insert(bytes.end(), chunk, chunk + sizeof(chunk));
+			bytes.insert(bytes.end(), data, data + size);
+		};
+		auto addNoteTrack = [&](uint8_t key)
+		{
+			const uint8_t note[] = {
+				0x00, 0x90, key, 0x64,
+				0x60, 0x80, key, 0x00,
+				0x00, 0xFF, 0x2F, 0x00
+			};
+			addTrack(note, sizeof(note));
+		};
+
+		addTrack(tempo, sizeof(tempo));
+		addNoteTrack(60);
+		addNoteTrack(60); // duplicate of the first note track
+		addTrack(empty, sizeof(empty));
+		addNoteTrack(64);
+		addNoteTrack(64); // duplicate of the second note track
+		addNoteTrack(67);
+
+		std::ofstream file(path, std::ios::binary);
+		if (!file) return false;
+		file.write((const char*)bytes.data(), (std::streamsize)bytes.size());
+		return (bool)file;
+	}
+
+	bool CheckLegacyMapping(const std::shared_ptr<MIDISequence>& sequence)
+	{
+		if (!sequence || sequence->noteTrackCount != 5) return false;
+		if (sequence->trackCopies.size() != 3
+			|| sequence->trackCopies[0] != 2
+			|| sequence->trackCopies[1] != 2
+			|| sequence->trackCopies[2] != 1) return false;
+		if (sequence->noteTrackStoredIndex.size() != 5) return false;
+		const int expected[] = { 0, 0, 1, 1, 2 };
+		for (size_t i = 0; i < sequence->noteTrackStoredIndex.size(); i++)
+			if (sequence->noteTrackStoredIndex[i] != expected[i]) return false;
+		return !sequence->mergedNotes.empty();
+	}
 }
 
 int main()
@@ -205,6 +265,22 @@ int main()
 		return 1;
 	}
 
-	std::cout << "PASS: two huge repeats counted and the tail track kept" << std::endl;
+	TempFile legacyTemp{ std::filesystem::temp_directory_path() / "comet_legacy_track_mapping.mid" };
+	if (!BuildSmallLegacyMidi(legacyTemp.path))
+	{
+		std::cerr << "FAIL: could not build the legacy mapping file" << std::endl;
+		return 1;
+	}
+
+	MultithreadedMIDILoader legacyLoader(legacyTemp.path.string().c_str());
+	legacyLoader.SetLayeredDedupe(true, true);
+	const auto legacy = legacyLoader.Load();
+	if (!CheckLegacyMapping(legacy))
+	{
+		std::cerr << "FAIL: note-track indices do not map to the stored repeated tracks" << std::endl;
+		return 1;
+	}
+
+	std::cout << "PASS: two huge repeats counted, tail kept, and legacy repeat weights mapped" << std::endl;
 	return 0;
 }
