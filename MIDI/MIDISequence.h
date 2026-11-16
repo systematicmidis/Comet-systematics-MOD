@@ -30,6 +30,15 @@ public:
 	// per-key render arrays. MIDITrail and the audio event builders can walk these directly;
 	// renderers that need per-key lists call EnsureMergedNotes() when they are selected.
 	std::vector<NoteSequence> trackNotes{};
+	// Number of archive copies represented by each stored track. Packed loading stores one
+	// copy of a repeated track, so this lets the aura reflect the stack that was collapsed.
+	std::vector<uint16_t> trackCopies{};
+	// Repeated note-ons collapsed inside a single huge track (packed loading stores one copy).
+	// Kept capped because the aura only needs to know that the stack is heavy.
+	std::vector<uint16_t> trackNoteWeights{};
+	// Extra multiplier for a proven repeated-cycle archive. Aura stacking uses this (capped)
+	// so a compressed file looks as stacked as its decoded cycles would.
+	float compressedStackScale = 1.0f;
 	bool packed = false;
 	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlocks{};
 	std::vector<MIDIMessageEvent> mergedEvents{};

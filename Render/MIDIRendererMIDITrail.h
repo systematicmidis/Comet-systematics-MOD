@@ -207,6 +207,9 @@ private:
 
 	std::array<RenderAura, MIDI_KEYS> renderAuras{};
 	std::array<AuraData, MIDI_KEYS> auraData{};
+	std::array<uint32_t, MIDI_KEYS> auraStacks{};
+	std::array<float, MIDI_KEYS> auraPulses{};
+	std::array<uint32_t, MIDI_KEYS> auraMetas{};
 	#pragma endregion
 
 	#pragma region Camera data
@@ -242,6 +245,7 @@ private:
 	void RenderMeasureLines();
 
 	void LoadAuraTexture();
+	void CommitAuras(int keyFirst, int keyLast);
 	void RenderAuras();
 	void UpdateAuras(double deltaTime);
 

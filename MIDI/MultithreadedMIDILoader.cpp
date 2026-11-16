@@ -126,6 +126,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 								proven->notes = prefixNotes + cycleNotes * (long long)repeat.cycles;
 
 							proven->trackCount = repeat.declaredTracks;
+							// Cap the visual stack: a proven archive can represent tens of thousands of
+							// copies, but the aura only needs to know that the layer is heavily stacked.
+							proven->compressedStackScale = std::min(16.0f, (float)repeat.cycles);
 							std::cout << "  Proven notes: " << proven->notes << std::endl;
 							return proven;
 						}
@@ -435,6 +438,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
+	std::vector<int> storedTrackIndex(trackCount, -1);
 
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(trackCount);
@@ -465,7 +469,23 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 			// render store and let the note-count scale account for the copies, as Kimrashi's
 			// track_copies does; sorting the copies again would only be undone by deduplication.
 			if (parsedOrigin[trackIdx] == (size_t)trackIdx)
+			{
+				const uint64_t storedNotes = trackRes.notes.Size();
+				const uint64_t noteWeight = storedNotes == 0 ? 1
+					: 1 + trackRes.repeatedNotes / storedNotes;
+
+				storedTrackIndex[trackIdx] = (int)seq->trackNotes.size();
 				seq->trackNotes.push_back(std::move(trackRes.notes));
+				seq->trackCopies.push_back(1);
+				seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
+			}
+			else
+			{
+				const size_t origin = parsedOrigin[trackIdx];
+				const int stored = origin < storedTrackIndex.size() ? storedTrackIndex[origin] : -1;
+				if (stored >= 0 && seq->trackCopies[stored] < UINT16_MAX)
+					seq->trackCopies[stored]++;
+			}
 		}
 
 		if (!trackRes.messages.empty())
@@ -860,7 +880,12 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 
 			seq->noteTrackNames.push_back(trackRes.name);
 			noteTrackIdx++;
+			const uint64_t storedNotes = trackRes.notes.Size();
+			const uint64_t noteWeight = storedNotes == 0 ? 1
+				: 1 + trackRes.repeatedNotes / storedNotes;
 			seq->trackNotes.push_back(std::move(trackRes.notes));
+			seq->trackCopies.push_back((uint16_t)std::min<uint64_t>(entry.multiplicity, UINT16_MAX));
+			seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
 		}
 
 		if (!trackRes.messages.empty())

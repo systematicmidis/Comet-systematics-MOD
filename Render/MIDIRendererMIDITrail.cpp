@@ -1475,9 +1475,18 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 	int keyFirst = config->render.GetKeyFirst();
 	int keyLast = config->render.GetKeyLast();
 
-	for (const NoteSequence& notes : seq->trackNotes)
+	auraStacks.fill(0);
+	auraPulses.fill(0.0f);
+	auraMetas.fill(0);
+
+	for (size_t trackIdx = 0; trackIdx < seq->trackNotes.size(); ++trackIdx)
 	{
+		const NoteSequence& notes = seq->trackNotes[trackIdx];
 		if (notes.Empty()) continue;
+		uint32_t auraWeight = trackIdx < seq->trackCopies.size()
+			? std::max<uint32_t>(1, seq->trackCopies[trackIdx]) : 1;
+		if (trackIdx < seq->trackNoteWeights.size())
+			auraWeight = (uint32_t)std::min<uint64_t>((uint64_t)auraWeight * seq->trackNoteWeights[trackIdx], UINT32_MAX);
 
 		size_t noteBegin = std::lower_bound(notes.tick.begin(), notes.tick.end(), scanStartTick) - notes.tick.begin();
 		size_t noteEnd = std::upper_bound(notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin();
@@ -1531,13 +1540,11 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 					double framesSinceStart = ageSeconds / (1.0 / 60.0);
 					factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
 				}
-				float size = static_cast<float>(0.5 + factor2);
-
-				if (nNote < MIDI_KEYS && auraData[nNote].size < size && nNote >= keyFirst && nNote <= keyLast)
+				if (nNote < MIDI_KEYS)
 				{
-					auraData[nNote].size = size;
-					auraData[nNote].meta = keyMetas[nNote].GetMeta();
-					auraData[nNote].active = true;
+					auraStacks[nNote] += auraWeight;
+					auraPulses[nNote] = std::max(auraPulses[nNote], (float)factor2);
+					auraMetas[nNote] = keyMetas[nNote].GetMeta();
 				}
 			}
 
@@ -1584,6 +1591,8 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 			notesToRender++;
 		}
 	}
+
+	CommitAuras(keyFirst, keyLast);
 
 	if (noteID != 0)
 	{
@@ -1675,6 +1684,10 @@ void MIDIRendererMIDITrail::RenderNotes()
 	MIDIPlayerConfig* config = app->GetConfig();
 	int keyFirst = config->render.GetKeyFirst();
 	int keyLast = config->render.GetKeyLast();
+
+	auraStacks.fill(0);
+	auraPulses.fill(0.0f);
+	auraMetas.fill(0);
 
 	for (uint8_t id : kbIDs)
 	{
@@ -1778,13 +1791,12 @@ void MIDIRendererMIDITrail::RenderNotes()
 				polyphony++;
 
 				double tempoFrameStep = 1.0 / 60.0;
-				double maxAuraLen = 0.5;
 
 				double noteStartSecs = isTimeBased ? noteStart : tempoMap->TicksToSecsFromMap(seq->resolution, nTick);
 
-				// One aura per key: keep it visible while any note on the key is sounding, and
-				// add the short onset pulse without ever stacking a second ring. Notes on the same
-				// key all update the same entry, so dense files cannot multiply the effect.
+				// One ring per key; repeated/stacked notes increase its weight instead of drawing
+				// a separate aura for every copy. The packed path counts track copies too, so a
+				// compressed file keeps the same stack as its decoded form.
 				constexpr double AURA_PULSE_SECONDS = 0.25;
 				const double ageSeconds = playbackSeconds - noteStartSecs;
 				double factor2 = 0.0;
@@ -1793,13 +1805,16 @@ void MIDIRendererMIDITrail::RenderNotes()
 					double framesSinceStart = ageSeconds / tempoFrameStep;
 					factor2 = std::pow(std::max(10.0 - framesSinceStart, 0.0), 2.0) / 600;
 				}
-				float size = static_cast<float>(0.5 + factor2);
 
-				if (auraData[id].size < size && id >= keyFirst && id <= keyLast)
+				uint32_t auraWeight = 1;
+				if (nTrack < seq->trackCopies.size() && seq->trackCopies[nTrack] > 0)
+					auraWeight = seq->trackCopies[nTrack];
+
+				if (id < MIDI_KEYS)
 				{
-					auraData[id].size = size;
-					auraData[id].meta = keyMetas[id].GetMeta();
-					auraData[id].active = true;
+					auraStacks[id] += auraWeight;
+					auraPulses[id] = std::max(auraPulses[id], (float)factor2);
+					auraMetas[id] = keyMetas[id].GetMeta();
 				}
 			}
 			
@@ -1845,6 +1860,8 @@ void MIDIRendererMIDITrail::RenderNotes()
 			notesToRender++;
 		}
 	}
+
+	CommitAuras(keyFirst, keyLast);
 
 	if (noteID != 0)
 	{
@@ -2064,6 +2081,31 @@ void MIDIRendererMIDITrail::RenderMeasureLines()
 	}
 }
 
+void MIDIRendererMIDITrail::CommitAuras(int keyFirst, int keyLast)
+{
+	const float compressedScale = seq
+		? std::clamp(seq->compressedStackScale, 1.0f, 16.0f)
+		: 1.0f;
+
+	for (int i = 0; i < MIDI_KEYS; i++)
+	{
+		if (auraStacks[i] == 0) continue;
+
+		// A stack contributes logarithmically so a layered black-MIDI chord grows the ring
+		// noticeably without turning the keyboard into one giant glow.
+		const double weightedStack = (double)auraStacks[i] * (double)compressedScale;
+		const float stackBoost = (float)std::min(0.35, 0.08 * std::log2(std::max(1.0, weightedStack)));
+		const float size = 0.5f + auraPulses[i] + stackBoost;
+
+		if (i >= keyFirst && i <= keyLast && auraData[i].size < size)
+		{
+			auraData[i].size = size;
+			auraData[i].meta = auraMetas[i];
+			auraData[i].active = true;
+		}
+	}
+}
+
 void MIDIRendererMIDITrail::RenderAuras()
 {
 	if (!auraProgram || !auraVAO) return;
@@ -2076,7 +2118,8 @@ void MIDIRendererMIDITrail::RenderAuras()
 		if (!data.active) continue;
 
 		float centerPos = keyPos[i] + (keyWidth[i] * 0.5f);
-		float visualSize = data.size * settings.auraSize * 4.0f;
+		// 0.5 is the held-note base, so the saved aura size is the visible diameter at rest.
+		float visualSize = data.size * settings.auraSize * 2.0f;
 		renderAuras[activeAuras++] = RenderAura(visualSize, centerPos, data.meta);
 	}
 
