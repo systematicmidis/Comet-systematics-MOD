@@ -32,7 +32,7 @@ The standalone EXEs are **not complete portable packages**. Keep them beside you
 2. Start it and open a `.mid`, `.midi`, or a supported compressed archive.
 3. For large files, use MIDITrail and leave the per-key renderer data to build lazily.
 4. Settings are saved to `config.yml`; the previous good copy is kept as `config.yml.bak`, and a malformed file is moved aside as `config.yml.broken` instead of blocking every launch.
-5. If a bad setting prevents startup, run `Comet.exe --safe-mode` once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
+5. If a bad setting prevents startup, run `Comet.exe --safe-mode` (portable ZIP) or `Comet-Release.exe --safe-mode` (standalone) once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
 
 Supported archive wrappers include `7z`, `xz`, `lzma`, `zip`, `gz`, `bz2`, `zst`, `lz4`, `rar`, `tar`, and compressed tars. Layers can be nested, for example a `.mid.xz` inside a `.7z`. A plain `.mid.xz` can be streamed without being fully decompressed first.
 
