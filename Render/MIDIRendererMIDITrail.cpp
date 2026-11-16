@@ -1807,8 +1807,17 @@ void MIDIRendererMIDITrail::RenderNotes()
 				}
 
 				uint32_t auraWeight = 1;
-				if (nTrack < seq->trackCopies.size() && seq->trackCopies[nTrack] > 0)
-					auraWeight = seq->trackCopies[nTrack];
+				if (nTrack < seq->noteTrackStoredIndex.size())
+				{
+					const int stored = seq->noteTrackStoredIndex[nTrack];
+					if (stored >= 0 && stored < (int)seq->trackCopies.size())
+					{
+						auraWeight = std::max<uint32_t>(1, seq->trackCopies[stored]);
+						if (stored < (int)seq->trackNoteWeights.size())
+							auraWeight = (uint32_t)std::min<uint64_t>(
+								(uint64_t)auraWeight * seq->trackNoteWeights[stored], UINT32_MAX);
+					}
+				}
 
 				if (id < MIDI_KEYS)
 				{

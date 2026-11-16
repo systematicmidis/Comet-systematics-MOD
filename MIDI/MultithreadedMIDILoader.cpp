@@ -438,7 +438,8 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
-	std::vector<int> storedTrackIndex(trackCount, -1);
+	std::vector<int> noteTrackIndexForRaw(trackCount, -1);
+	std::vector<int> noteTrackStoredIndex;
 
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(trackCount);
@@ -462,8 +463,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 			// Names are pushed in this same order, so they line up with the track indices that get
 			// baked into the note data here.
+			const int currentNoteTrack = noteTrackIdx;
 			seq->noteTrackNames.push_back(trackRes.name);
 			noteTrackIdx++;
+			noteTrackIndexForRaw[trackIdx] = currentNoteTrack;
 
 			// A repeated track is the same rectangle stream as its origin. Keep the origin in the
 			// render store and let the note-count scale account for the copies, as Kimrashi's
@@ -473,8 +476,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 				const uint64_t storedNotes = trackRes.notes.Size();
 				const uint64_t noteWeight = storedNotes == 0 ? 1
 					: 1 + trackRes.repeatedNotes / storedNotes;
+				const int stored = (int)seq->trackNotes.size();
 
-				storedTrackIndex[trackIdx] = (int)seq->trackNotes.size();
+				noteTrackStoredIndex.push_back(stored);
 				seq->trackNotes.push_back(std::move(trackRes.notes));
 				seq->trackCopies.push_back(1);
 				seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
@@ -482,8 +486,15 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 			else
 			{
 				const size_t origin = parsedOrigin[trackIdx];
-				const int stored = origin < storedTrackIndex.size() ? storedTrackIndex[origin] : -1;
-				if (stored >= 0 && seq->trackCopies[stored] < UINT16_MAX)
+				const int originNoteTrack = origin < noteTrackIndexForRaw.size()
+					? noteTrackIndexForRaw[origin] : -1;
+				const int stored = originNoteTrack >= 0
+					&& originNoteTrack < (int)noteTrackStoredIndex.size()
+					? noteTrackStoredIndex[originNoteTrack] : -1;
+
+				noteTrackStoredIndex.push_back(stored);
+				if (stored >= 0 && stored < (int)seq->trackCopies.size()
+					&& seq->trackCopies[stored] < UINT16_MAX)
 					seq->trackCopies[stored]++;
 			}
 		}
@@ -515,6 +526,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 #pragma region Post-processing & Merging
 
 	seq->noteTrackCount = noteTrackIdx;
+	seq->noteTrackStoredIndex = std::move(noteTrackStoredIndex);
 	std::cout << "\nLoaded all tracks, sorting tempo events." << std::endl;
 	SetName("Starting event preprocessing");
 	auto& tempos = seq->tempos;
@@ -855,6 +867,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	std::vector<int> illegalTracks;
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
+	std::vector<int> noteTrackStoredIndex;
 
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(seen.size());
@@ -883,6 +896,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 			const uint64_t storedNotes = trackRes.notes.Size();
 			const uint64_t noteWeight = storedNotes == 0 ? 1
 				: 1 + trackRes.repeatedNotes / storedNotes;
+			noteTrackStoredIndex.push_back((int)seq->trackNotes.size());
 			seq->trackNotes.push_back(std::move(trackRes.notes));
 			seq->trackCopies.push_back((uint16_t)std::min<uint64_t>(entry.multiplicity, UINT16_MAX));
 			seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
@@ -905,6 +919,7 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 #pragma endregion
 
 	seq->noteTrackCount = noteTrackIdx;
+	seq->noteTrackStoredIndex = std::move(noteTrackStoredIndex);
 	SetName("Starting event preprocessing");
 	auto& tempos = seq->tempos;
 	auto& timeSignatures = seq->timeSignatures;

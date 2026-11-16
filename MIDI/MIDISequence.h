@@ -36,6 +36,9 @@ public:
 	// Repeated note-ons collapsed inside a single huge track (packed loading stores one copy).
 	// Kept capped because the aura only needs to know that the stack is heavy.
 	std::vector<uint16_t> trackNoteWeights{};
+	// The note's baked track index is the UI/note-track index, which can skip entries when
+	// tracks have no notes or are repeated. This maps it to the corresponding stored track.
+	std::vector<int> noteTrackStoredIndex{};
 	// Extra multiplier for a proven repeated-cycle archive. Aura stacking uses this (capped)
 	// so a compressed file looks as stacked as its decoded cycles would.
 	float compressedStackScale = 1.0f;
