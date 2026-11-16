@@ -11,8 +11,18 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 .vs
+
+# Local credentials and runtime settings
+.env
+.env.*
+config.yml
+config.yml.bak
+config.yml.broken
+config.yml.broken.prev
+config.yml.tmp
 out
 build
+dist
 installer
 *.diagsession
 .vscode

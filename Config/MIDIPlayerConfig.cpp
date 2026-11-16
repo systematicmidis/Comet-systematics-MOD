@@ -4,6 +4,7 @@
 #include <optional>
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
 #include "Utils.h"
 #include <filesystem>
 
@@ -17,6 +18,12 @@
 
 void MIDIPlayerConfig::LoadConfigOrDefault()
 {
+	if (std::getenv("COMET_SAFE_MODE") != nullptr)
+	{
+		std::cout << "Safe mode: ignoring config.yml and using defaults" << std::endl;
+		return;
+	}
+
 	std::optional<ConfigSection> config;
 	try
 	{
@@ -29,6 +36,11 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 
 		YAML::Node root = YAML::Load(stream);
 		config = ConfigSection(root);
+
+		const int configVersion = config->GetInt("version", 1);
+		if (configVersion < 2)
+			std::cout << "Migrating config version " << configVersion
+				<< " to 2; unknown fields keep their defaults." << std::endl;
 
 		std::optional<ConfigSection> appSec = config->GetSection("app");
 		
@@ -211,7 +223,21 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 	}
 	catch (...)
 	{
-		std::cout << "Failed to load config (config.yaml). Using a default config." << std::endl;
+		std::cout << "Failed to load config (config.yml). Backing it up and using defaults." << std::endl;
+
+		// Keep the bad file so the user can inspect it, but stop every launch from failing on the
+		// same malformed YAML. A previous backup is retained as config.yml.broken.prev.
+		std::error_code error;
+		const std::filesystem::path original("./config.yml");
+		if (std::filesystem::exists(original, error))
+		{
+			const std::filesystem::path backup("./config.yml.broken");
+			const std::filesystem::path previous("./config.yml.broken.prev");
+			std::filesystem::remove(previous, error);
+			if (std::filesystem::exists(backup, error))
+				std::filesystem::rename(backup, previous, error);
+			std::filesystem::rename(original, backup, error);
+		}
 	}
 }
 
@@ -292,6 +318,27 @@ void MIDIPlayerConfig::SaveConfig()
 		config["renderers"] = renderersSettings;
 	}
 
-	std::ofstream file("./config.yml");
-	file << config;
+	// Write through a temporary file and keep the previous good copy. A crash or a full disk
+	// can then leave either the old config or the new one, never a half-written YAML file.
+	std::error_code error;
+	if (std::filesystem::exists("./config.yml", error))
+	{
+		std::filesystem::copy_file("./config.yml", "./config.yml.bak",
+			std::filesystem::copy_options::overwrite_existing, error);
+	}
+
+	const std::filesystem::path target("./config.yml");
+	const std::filesystem::path temporary("./config.yml.tmp");
+	{
+		std::ofstream file(temporary);
+		file << config;
+	}
+
+	std::filesystem::rename(temporary, target, error);
+	if (error)
+	{
+		// Some filesystems do not replace an existing file with rename; remove and retry.
+		std::filesystem::remove(target, error);
+		std::filesystem::rename(temporary, target, error);
+	}
 }

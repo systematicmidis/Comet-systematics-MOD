@@ -4,6 +4,10 @@
 
 #include "Comet.h"
 
+#ifndef COMET_CRASH_WEBHOOK
+#define COMET_CRASH_WEBHOOK ""
+#endif
+
 // Platform headers first: <windows.h> defines macros that break the C++ headers if it lands after
 // them. NOMINMAX keeps its min/max macros out of the way.
 #if defined(_WIN32)
@@ -78,8 +82,9 @@ namespace CrashReporter
 		std::string g_version = COMET_VERSION;
 		std::string g_buildType = "Unknown";
 		std::string g_buildConfig = "";
-		// Defaults to the compiled-in endpoint; only the test harness overrides it via SetWebhookUrl.
-		std::string g_webhookUrl = DISCORD_WEBHOOK_URL;
+		// Defaults to the build/environment endpoint; only the test harness overrides it via
+		// SetWebhookUrl.
+		std::string g_webhookUrl = DefaultWebhookUrl();
 		bool g_enabled = false;
 
 		bool g_installed = false;
@@ -1700,10 +1705,17 @@ namespace CrashReporter
 		}).detach();
 	}
 
+	std::string DefaultWebhookUrl()
+	{
+		if (const char* fromEnv = std::getenv(WEBHOOK_URL_ENV); fromEnv != nullptr && *fromEnv != '\0')
+			return fromEnv;
+
+		return COMET_CRASH_WEBHOOK;
+	}
+
 	std::string WebhookUrl()
 	{
-		// Fixed by design: nothing the user can edit (config.yml included) changes this.
-		return DISCORD_WEBHOOK_URL;
+		return g_webhookUrl;
 	}
 
 	int RunSenderMode()

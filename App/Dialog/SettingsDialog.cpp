@@ -384,9 +384,18 @@ void SettingsDialog::DrawCrashReportsTab()
 
 	SECTION_HEADER("Crash reports");
 
+	const std::string webhook = CrashReporter::WebhookUrl();
+	const bool hasWebhook = !webhook.empty();
+
 	ImGui::TextWrapped(
 		"When Comet crashes it can send a report so the failure can be looked at without having to "
 		"reproduce it. Reporting is off until you turn it on.");
+
+	if (!hasWebhook)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+			"No crash endpoint is configured in this build; reports will stay in the queue folder.");
+	}
 
 	ImGui::Spacing();
 
@@ -398,19 +407,18 @@ void SettingsDialog::DrawCrashReportsTab()
 	}
 
 	ImGui::SetItemTooltip(
-		"Reports go to the fixed Discord webhook and nowhere else. Nothing is uploaded while this "
-		"is off.");
+		"Reports go only to the endpoint configured at build time or through COMET_CRASH_WEBHOOK. "
+		"Nothing is uploaded while this is off.");
 
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	// The destination is intentionally not shown or editable here: it is compiled into the app
-	// (CrashReporter::DISCORD_WEBHOOK_URL) and can only be changed in the source.
-	ImGui::BeginDisabled(crashTest->inFlight.load());
+	// The destination is intentionally not editable here. Configure it with the
+	// COMET_CRASH_WEBHOOK build setting or the environment variable of the same name.
+	ImGui::BeginDisabled(crashTest->inFlight.load() || !hasWebhook);
 	if (ImGui::Button("Send test report"))
 	{
-		const std::string webhook = CrashReporter::DISCORD_WEBHOOK_URL;
 		const auto state = crashTest;
 		state->inFlight.store(true);
 		state->succeeded.store(false);
@@ -435,6 +443,12 @@ void SettingsDialog::DrawCrashReportsTab()
 		}).detach();
 	}
 	ImGui::EndDisabled();
+
+	if (!hasWebhook)
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("Upload disabled");
+	}
 
 	ImGui::SameLine();
 	if (ImGui::Button("Copy report to clipboard"))

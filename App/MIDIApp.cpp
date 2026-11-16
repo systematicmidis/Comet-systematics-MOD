@@ -104,7 +104,7 @@ namespace
 void MIDIApp::UpdateCrashContext()
 {
 	CrashReporter::SetEnabled(config.crashReports.enabled);
-	// The endpoint is compiled in (CrashReporter::DISCORD_WEBHOOK_URL); nothing here sets it.
+	// The endpoint comes from the build setting or COMET_CRASH_WEBHOOK; nothing here stores it.
 	CrashReporter::SetSettingsSnapshot(BuildSettingsSnapshot(config));
 }
 

@@ -473,6 +473,12 @@ else()
     target_compile_definitions(Comet PRIVATE COMET_BUILD_CONFIG="unknown")
 endif()
 
+# Crash-report endpoints are credentials, not source constants. Supply one with
+# -DCOMET_CRASH_WEBHOOK=... in a local build or a CI secret; an empty value disables uploads
+# and leaves captured reports queued on disk. COMET_CRASH_WEBHOOK can also be set at runtime.
+set(COMET_CRASH_WEBHOOK "" CACHE STRING "Optional crash-report webhook URL (keep it out of source control)")
+target_compile_definitions(Comet PRIVATE COMET_CRASH_WEBHOOK="${COMET_CRASH_WEBHOOK}")
+
 # SymFromAddr/SymGetLineFromAddr64 come from DbgHelp; the crash reporter links it directly
 # as well through a #pragma comment, so standalone builds of the same sources work too.
 if(WIN32)

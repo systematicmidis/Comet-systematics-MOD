@@ -22,10 +22,11 @@ namespace CrashReporter
 	constexpr const char* KIND_TEST = "test";
 	constexpr const char* KIND_MANUAL = "manual";
 
-	// The one and only destination for crash reports, compiled in on purpose. There is deliberately
-	// no setting, no config entry and no UI field that could point reports anywhere else.
-	constexpr const char* DISCORD_WEBHOOK_URL =
-		"https://discord.com/api/webhooks/1554603296235454464/_y6bRHcoqWnijeoXpJDDHp-2t-J8tQHkpty_CSYkCPD7sgH9Ng74_ZTPj2F0k339RuTZ";
+	// The endpoint is supplied at build time (COMET_CRASH_WEBHOOK) or at runtime through the
+	// COMET_CRASH_WEBHOOK environment variable. It is intentionally not stored in the source tree:
+	// a public webhook URL is a credential, and anyone who has it can post to the channel.
+	constexpr const char* WEBHOOK_URL_ENV = "COMET_CRASH_WEBHOOK";
+	std::string DefaultWebhookUrl();
 
 	struct MidiInfo
 	{
@@ -71,8 +72,7 @@ namespace CrashReporter
 	// Master switch: while false, crashes are not captured at all.
 	void SetEnabled(bool enabled);
 
-	// Overrides the endpoint in this process. Test hook only: the app never calls this, and
-	// DISCORD_WEBHOOK_URL remains the source of truth for reports and the sender.
+	// Overrides the endpoint in this process. Test hook only; empty disables uploads.
 	void SetWebhookUrl(std::string url);
 
 	// Folder holding pending/, sent/ and failed/. Overridable with COMET_CRASH_REPORT_DIR.
@@ -106,7 +106,8 @@ namespace CrashReporter
 	// Entry point for the helper process ("--send-crash-reports").
 	int RunSenderMode();
 
-	// The fixed endpoint reports go to, used when a queued report carries none of its own.
+	// The endpoint reports go to, used when a queued report carries none of its own. Empty means
+	// the build/environment has no endpoint configured and reports are queued locally only.
 	std::string WebhookUrl();
 
 	// Deliberately dereferences a null pointer so the whole pipeline can be exercised in tests.

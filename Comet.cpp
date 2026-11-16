@@ -4,6 +4,7 @@
 #include "Telemetry/CrashReporter.h"
 #include "UpdateBuilder.h"
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <curl/curl.h>
 #include <filesystem>
@@ -45,6 +46,14 @@ int main(int argc, char** argv)
 	// After a crash Comet relaunches itself with this flag to upload the queued report. That
 	// helper must not open a window, load a config or install crash handlers of its own.
 	const bool senderMode = HasArgument(argc, argv, "--send-crash-reports");
+	if (HasArgument(argc, argv, "--safe-mode"))
+	{
+#if defined(_WIN32)
+		_putenv_s("COMET_SAFE_MODE", "1");
+#else
+		setenv("COMET_SAFE_MODE", "1", 1);
+#endif
+	}
 
 	// A path argument opens that MIDI once the window exists, which is also how the release build
 	// gets exercised without a file dialog.

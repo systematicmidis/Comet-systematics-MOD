@@ -205,8 +205,8 @@ struct MIDIPlayerConfig
 		bool riskyFastDedupe = false;
 	};
 
-	// Crash reporting. The destination is compiled into the app (CrashReporter::DISCORD_WEBHOOK_URL),
-	// so there is no URL here for a user or a config file to change; only the on/off switch lives in
+	// Crash reporting. The destination comes from the build setting (COMET_CRASH_WEBHOOK) or the
+	// environment, so there is no URL here for a user or a config file to change; only the switch lives in
 	// config. Nothing is captured or sent until the user opts in.
 	struct ConfigCrashReports
 	{

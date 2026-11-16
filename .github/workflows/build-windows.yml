@@ -1,4 +1,4 @@
-name: Build (Windows)
+name: Build and test (Windows)
 
 on:
   workflow_dispatch:
@@ -15,21 +15,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -B build -S . -A x64
+      - name: Reject committed webhook URLs
+        shell: bash
+        run: |
+          if grep -RInE 'discord(app)?\.com/api/webhooks|hooks\.slack\.com/services' \
+            --exclude-dir=.git --exclude-dir=build --exclude-dir=out .; then
+            echo "A webhook URL is committed. Remove it and rotate the credential."
+            exit 1
+          fi
 
-      - name: Build
+      - name: Configure
+        run: cmake -B build -S . -A x64 -DCOMET_CRASH_WEBHOOK=
+
+      - name: Build application
         run: cmake --build build --config ${{ inputs.build_type }} --parallel
 
-      - name: Collect output
+      - name: Build regression tests
+        run: >-
+          cmake --build build --config ${{ inputs.build_type }} --parallel
+          --target CometMergeEquivalence CometArchiveRepeatRegression
+
+      - name: Run regression tests
+        run: ctest --test-dir build -C ${{ inputs.build_type }} --output-on-failure
+
+      - name: Collect portable package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item -Recurse "build/${{ inputs.build_type }}/*" dist/
-          Remove-Item dist/*.pdb -ErrorAction SilentlyContinue
+          $out = "build/${{ inputs.build_type }}"
+          $pkg = "dist/Comet-Systematics-MOD-windows-x64"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          Copy-Item "$out/Comet.exe" $pkg
+          Copy-Item -Recurse "$out/assets" $pkg
+          Copy-Item "$out/*.dll" $pkg
+          Copy-Item README.md, LICENSE.txt $pkg
+          Remove-Item "$pkg/*.pdb" -ErrorAction SilentlyContinue
+          Remove-Item "$pkg/CometMergeEquivalence.exe" -ErrorAction SilentlyContinue
+          Remove-Item "$pkg/CometArchiveRepeatRegression.exe" -ErrorAction SilentlyContinue
+          Remove-Item "$pkg/config.yml" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$pkg/*" -DestinationPath "dist/Comet-Systematics-MOD-windows-x64.zip"
+          Get-FileHash "dist/Comet-Systematics-MOD-windows-x64.zip" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $($_.Path)" } |
+            Set-Content "dist/SHA256SUMS.txt"
+          Get-Content "dist/SHA256SUMS.txt"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Comet-windows-x64-${{ inputs.build_type }}
-          path: dist
+          name: Comet-Systematics-MOD-windows-x64-${{ inputs.build_type }}
+          path: |
+            dist/Comet-Systematics-MOD-windows-x64.zip
+            dist/SHA256SUMS.txt
           if-no-files-found: error
