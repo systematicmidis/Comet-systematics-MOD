@@ -57,7 +57,7 @@ public:
 	bool IsGLReady() const;
 	void LoadResources();
 	void LoadColorPalettes();
-	void LoadMIDI(const char* path);
+	void LoadMIDI(const char* path, std::string archiveEntry = {});
 	void UnloadMIDI();
 	void UpdatePendingSequence();
 	void RenderMIDIVideo(const RenderSettings& renderSettings);
@@ -116,6 +116,8 @@ public:
 	}
 
 	bool IsLoading() const { return loading.load(); }
+	bool IsPreparingPerKeyData() const;
+	float GetPerKeyPreparationProgress() const;
 
 	// A load that failed leaves its reason here so the window can show it once, instead of the
 	// reason only reaching the console and the loading dialog simply vanishing.
@@ -135,7 +137,7 @@ public:
 
 	// Body lives in MIDIApp.cpp: constructs MIDILoader/MultithreadedMIDILoader
 	// via make_shared, which needs their complete types.
-	std::shared_ptr<AbstractMIDILoader> CreateLoader(const char* path);
+	std::shared_ptr<AbstractMIDILoader> CreateLoader(const char* path, const std::string& archiveEntry = {});
 
 	bool hasSequence = false;
 	std::atomic_bool rendering = false;
@@ -147,6 +149,11 @@ private:
 	std::unique_ptr<ThemesList> themesList;
 	std::unique_ptr<FontList> fontList;
 	std::unique_ptr<AbstractMIDIRenderer> renderer;
+	// A renderer that needs the merged per-key store is built immediately but installed only
+	// after the worker has finished converting a packed sequence. The old renderer keeps drawing
+	// in the meantime, so selecting Piano From Above on a huge file no longer freezes the window.
+	std::unique_ptr<AbstractMIDIRenderer> pendingRenderer;
+	std::shared_ptr<MIDISequence> pendingRendererSequence;
 	std::vector<std::unique_ptr<AbstractOverlayRenderer>> overlays;
 	std::unique_ptr<NavigationBar> navigationBar;
 	std::shared_ptr<NoteCounterInfo> noteCounterInfo;
@@ -204,10 +211,15 @@ private:
 	std::string pendingTitle = "";
 	// Full path of the MIDI currently being loaded, kept for crash reports.
 	std::string pendingPath = "";
+	std::string currentMidiPath = "";
 	std::atomic_bool hasPendingSeq{ false };
 
 	// Cheap per-frame half of UpdateCrashContext: just the flags that change as playback runs.
 	void UpdateCrashRuntimeFlags();
+	void FinishPendingRenderer();
+	// Per-file presets are applied on the render thread after the sequence is safely staged.
+	void ApplyFilePreset(const std::string& path);
+	void SaveFilePreset(const std::string& path);
 
 	// prepares the app for rendering (disabling navigation, ui, etc.)
 	void PrepareRendering();

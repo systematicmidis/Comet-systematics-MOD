@@ -43,13 +43,25 @@ public:
 		std::string error;
 	};
 
+	struct EntryInfo
+	{
+		std::string name;
+		uint64_t size = 0;
+	};
+
+	// Lists named MIDI entries without decompressing them. This is what the entry picker uses
+	// when an archive contains more than one song. Returns an empty list for ordinary files.
+	static std::vector<EntryInfo> ListMidiEntries(const std::filesystem::path& path,
+		std::string* error = nullptr);
+
 	// Decompresses the MIDI entry to memory. When the archive holds several, the largest MIDI wins;
 	// when an entry is itself compressed, the layers are followed. done/total track the outermost
 	// file so the loading dialog can show a progress bar, and cancel is polled while reading.
 	static Result Extract(const std::filesystem::path& path,
 		const std::atomic<bool>* cancel,
 		std::atomic<uint64_t>* done = nullptr,
-		std::atomic<uint64_t>* total = nullptr);
+		std::atomic<uint64_t>* total = nullptr,
+		const std::string& preferredEntry = {});
 
 	// Risky fast dedup: stop decoding a layer once its first tile has repeated and the rest of the
 	// layer divides exactly by that tile's size. Wrong on a layer made of different tiles that

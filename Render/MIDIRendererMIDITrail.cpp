@@ -872,6 +872,10 @@ void MIDIRendererMIDITrail::LoadSequence(std::shared_ptr<MIDISequence> sequence)
 	for (auto& id : endRenderIDs)
 		id = 0;
 
+	packedTrackBegin.assign(sequence->trackNotes.size(), 0);
+	packedLastScanTick = -1;
+	packedCursorsValid = false;
+
 	auraData.fill(AuraData{});
 
 	// The sequence can arrive after the saved settings, so make the shader and the separator
@@ -1475,6 +1479,15 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 	int keyFirst = config->render.GetKeyFirst();
 	int keyLast = config->render.GetKeyLast();
 
+	const SparseSeekIndex& seekIndex = seq->GetSparseSeekIndex();
+	const bool resetCursors = !packedCursorsValid || packedTrackBegin.size() != seq->trackNotes.size()
+		|| scanStartTick < packedLastScanTick;
+	if (resetCursors)
+	{
+		packedTrackBegin.assign(seq->trackNotes.size(), 0);
+		packedCursorsValid = true;
+	}
+
 	auraStacks.fill(0);
 	auraPulses.fill(0.0f);
 	auraMetas.fill(0);
@@ -1483,13 +1496,36 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 	{
 		const NoteSequence& notes = seq->trackNotes[trackIdx];
 		if (notes.Empty()) continue;
+
+		if (!seekIndex.Empty() && !seekIndex.Overlaps(trackIdx, (uint32_t)std::max(0L, scanStartTick), (uint32_t)std::max(0L, frontTick)))
+		{
+			// A track entirely behind the scan window contributes all of its notes to the played
+			// counter. A track that starts beyond the front contributes none. The old unconditional
+			// skip made the counter under-report on large sparse files.
+			if (seekIndex.LastTick(trackIdx) < (uint32_t)std::max(0L, scanStartTick))
+				notesPassed += notes.Size();
+			continue;
+		}
 		uint32_t auraWeight = trackIdx < seq->trackCopies.size()
 			? std::max<uint32_t>(1, seq->trackCopies[trackIdx]) : 1;
 		if (trackIdx < seq->trackNoteWeights.size())
 			auraWeight = (uint32_t)std::min<uint64_t>((uint64_t)auraWeight * seq->trackNoteWeights[trackIdx], UINT32_MAX);
 
-		size_t noteBegin = std::lower_bound(notes.tick.begin(), notes.tick.end(), scanStartTick) - notes.tick.begin();
-		size_t noteEnd = std::upper_bound(notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin();
+		size_t noteBegin = packedTrackBegin[trackIdx];
+		if (resetCursors)
+		{
+			noteBegin = seekIndex.Empty()
+				? (size_t)(std::lower_bound(notes.tick.begin(), notes.tick.end(), scanStartTick) - notes.tick.begin())
+				: seekIndex.LowerBound(trackIdx, (uint32_t)std::max(0L, scanStartTick), seq->trackNotes);
+		}
+		else
+		{
+			while (noteBegin < notes.Size() && notes.tick[noteBegin] < scanStartTick)
+				++noteBegin;
+		}
+
+		const size_t noteEnd = std::upper_bound(notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin();
+		packedTrackBegin[trackIdx] = noteBegin;
 		notesPassed += noteBegin;
 
 		bool haveLast = false;
@@ -1627,6 +1663,7 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		noteCounterInfo->notesPerSecond = 0;
 	}
 
+	packedLastScanTick = scanStartTick;
 	lastTime = time;
 }
 

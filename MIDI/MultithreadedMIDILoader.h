@@ -27,6 +27,9 @@ public:
 	// 0 leaves the worker count to the machine; 1 parses on this thread.
 	void SetWorkerLimit(size_t workers) { workerLimit = workers; }
 
+	// Exact entry selected in the archive picker. Empty means the largest MIDI wins.
+	void SetArchiveEntry(std::string entry) { preferredArchiveEntry = std::move(entry); }
+
 	void Stop() override
 	{
 		AbstractMIDILoader::Stop();
@@ -49,6 +52,7 @@ private:
 	std::shared_ptr<MIDISequence> LoadStreamed(std::unique_ptr<ArchiveStream> stream, bool timeBasedLoading);
 
 	std::string file;
+	std::string preferredArchiveEntry;
 	std::shared_ptr<MIDISequence> seq;
 	std::shared_ptr<InputStream> is;
 

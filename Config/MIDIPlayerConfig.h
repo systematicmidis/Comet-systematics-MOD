@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum class RendererType
@@ -363,6 +364,11 @@ struct MIDIPlayerConfig
 
 	YAML::Node audioSettings;
 	YAML::Node renderersSettings;
+
+	// Optional per-file settings. The key is the path exactly as it was opened, so copying a MIDI
+	// to a new folder gives it a fresh preset instead of silently sharing one.
+	bool rememberFilePresets = false;
+	std::unordered_map<std::string, YAML::Node> filePresets{};
 
 	void LoadConfigOrDefault();
 	void SaveConfig();

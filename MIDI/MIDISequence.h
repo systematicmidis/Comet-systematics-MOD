@@ -8,7 +8,11 @@
 #include "Events/TimeSignatureEvent.h"
 #include <fstream>
 #include <memory>
+#include <future>
+#include <mutex>
+#include <atomic>
 #include "MIDIDefs.h"
+#include "SparseSeekIndex.h"
 #define NOTE_BLOCK_SIZE 1024
 
 class TempoMap;
@@ -44,6 +48,24 @@ public:
 	float compressedStackScale = 1.0f;
 	bool packed = false;
 	std::array<std::vector<NoteBlock>, MIDI_KEYS> noteBlocks{};
+
+	// Packed files normally never build mergedNotes. Selecting a renderer that needs per-key
+	// lists starts this on a worker so the window keeps rendering instead of freezing for the
+	// duration of the conversion.
+	std::atomic<int> mergeState{ 0 }; // 0 = absent, 1 = preparing, 2 = ready
+	std::atomic<float> mergeProgress{ 0.0f };
+	std::atomic_bool mergeFailed{ false };
+
+	void StartMergedNotesPreparation();
+	void WaitForMergedNotes();
+	bool IsMergedNotesReady() const { return mergeState.load(std::memory_order_acquire) == 2; }
+	bool IsMergedNotesPreparing() const { return mergeState.load(std::memory_order_acquire) == 1; }
+	float GetMergedNotesProgress() const { return mergeProgress.load(std::memory_order_relaxed); }
+
+	// Built from packed trackNotes and used by the packed renderer/audio seek paths. It is
+	// immutable once built, so multiple render/worker threads can read it safely.
+	void BuildSparseSeekIndex();
+	const SparseSeekIndex& GetSparseSeekIndex() const { return sparseIndex; }
 	std::vector<MIDIMessageEvent> mergedEvents{};
 	std::shared_ptr<TempoMap> tempoMap = nullptr;
 	size_t noteTrackCount;
@@ -52,11 +74,21 @@ public:
 	uint32_t longestNoteLength = 0;
 	bool timeBased = false;
 
+private:
+	std::mutex mergeMutex;
+	std::mutex mergeFutureMutex;
+	std::future<void> mergeFuture;
+	SparseSeekIndex sparseIndex;
+
+public:
 	MIDISequence() : MIDISequence("Unnamed") {}
 	MIDISequence(const char* name)
 		: name(name), tracks({}), tempos({}), timeSignatures({}) {}
 	~MIDISequence()
 	{
+		// A renderer switch may still be converting packed tracks. Do not destroy the vector it
+		// is reading from.
+		WaitForMergedNotes();
 		tracks.clear();
 		tempos.clear();
 		mergedNotes.clear();

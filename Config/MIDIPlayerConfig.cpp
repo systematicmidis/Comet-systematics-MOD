@@ -112,6 +112,17 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			this->midi = midi;
 		}
 
+		rememberFilePresets = config->GetBoolean("rememberFilePresets", false);
+		if (root["filePresets"] && root["filePresets"].IsMap())
+		{
+			for (const auto& entry : root["filePresets"])
+			{
+				const std::string key = entry.first.as<std::string>("");
+				if (!key.empty() && entry.second.IsMap())
+					filePresets[key] = entry.second;
+			}
+		}
+
 		std::optional<ConfigSection> navigationSec = config->GetSection("navigation");
 		if (navigationSec)
 		{
@@ -289,6 +300,17 @@ void MIDIPlayerConfig::SaveConfig()
 	config["layeredDeDupe"]["assumeLayerRepeats"] = layeredDedupe.assumeLayerRepeats;
 
 	config["crashReports"]["enabled"] = crashReports.enabled;
+	config["rememberFilePresets"] = rememberFilePresets;
+
+	{
+		YAML::Node presets;
+		for (const auto& [path, preset] : filePresets)
+		{
+			if (!path.empty() && preset.IsMap())
+				presets[path] = preset;
+		}
+		config["filePresets"] = presets;
+	}
 
 	config["render"]["width"] = render.GetWidth();
 	config["render"]["height"] = render.GetHeight();

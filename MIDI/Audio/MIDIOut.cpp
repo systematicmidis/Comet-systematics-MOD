@@ -2,6 +2,9 @@
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <atomic>
+#include <cstdlib>
+#include <vector>
 #include "Utils.h"
 
 #ifdef _WIN32
@@ -49,6 +52,17 @@ namespace
 	std::string noticeMessage;
 	bool noticePending = false;
 
+	std::atomic<bool> g_isolationEnabled{ true };
+	std::atomic<bool> g_isolationConfigured{ false };
+
+	void ApplyIsolationEnvironment()
+	{
+		if (g_isolationConfigured.exchange(true, std::memory_order_acq_rel)) return;
+		const char* value = std::getenv("COMET_MIDI_ISOLATION");
+		if (value != nullptr && (value[0] == '0' || value[0] == 'f' || value[0] == 'F'))
+			g_isolationEnabled.store(false, std::memory_order_release);
+	}
+
 	void SetFaultNotice(const char* message)
 	{
 		std::lock_guard<std::mutex> lock(noticeMutex);
@@ -84,16 +98,43 @@ namespace
 	}
 }
 
+void MIDIOut::SetIsolationEnabled(bool enabled)
+{
+	g_isolationEnabled.store(enabled, std::memory_order_release);
+	g_isolationConfigured.store(true, std::memory_order_release);
+}
+
+bool MIDIOut::IsIsolationEnabled()
+{
+	ApplyIsolationEnvironment();
+	return g_isolationEnabled.load(std::memory_order_acquire);
+}
+
 void MIDIOut::Initialize()
 {
 	if (attempted) return;
 	attempted = true;
 
+	// Prefer a separate helper process. If it cannot be started, the guarded in-process path is
+	// still available, so a missing helper never turns into silent no-audio.
+	if (IsIsolationEnabled() && StartIsolated())
+	{
+		isolated = true;
+		std::cout << "MIDI out: isolated helper process" << std::endl;
+		return;
+	}
+
+	InitializeInProcess();
+}
+
+void MIDIOut::InitializeInProcess(bool interactive)
+{
 	std::cout << "Loading MIDI out" << std::endl;
 
 	omni = LoadOmniMIDI();
 	if (!omni)
 	{
+		if (!interactive) return;
 		Utils::Dialogs::ShowDialog(
 			"KDMAPI warning",
 			"OmniMIDI v2 is not installed, or OmniMIDI.dll could not be found. Comet expects the "
@@ -114,7 +155,8 @@ void MIDIOut::Initialize()
 
 	if (!InitStream || !Send || !End)
 	{
-		Utils::Dialogs::ShowDialog(
+		if (interactive)
+			Utils::Dialogs::ShowDialog(
 			"KDMAPI warning",
 			"OmniMIDI was found, but one or more required KDMAPI functions could not be loaded.",
 			Utils::Dialogs::DialogType::DIALOG_WARNING
@@ -185,6 +227,17 @@ MIDIOut::~MIDIOut()
 
 void MIDIOut::Shutdown()
 {
+	if (isolated)
+	{
+		ShutdownIsolated();
+		return;
+	}
+
+	ShutdownInProcess();
+}
+
+void MIDIOut::ShutdownInProcess()
+{
 	if (initialized && End)
 		CallNoArgs(End);
 
@@ -202,6 +255,17 @@ void MIDIOut::Shutdown()
 
 void MIDIOut::SendEvent(uint32_t msg)
 {
+	if (isolated)
+	{
+		SendIsolated(msg);
+		return;
+	}
+
+	SendInProcess(msg);
+}
+
+void MIDIOut::SendInProcess(uint32_t msg)
+{
 	if (!initialized || !Send) return;
 
 	if (!CallSend(Send, msg))
@@ -212,6 +276,114 @@ void MIDIOut::SendEvent(uint32_t msg)
 			"MIDI device and playback will be silent.\n\n"
 			"Reinstall OmniMIDI (v2) if you need playback through a MIDI device.");
 	}
+}
+
+bool MIDIOut::StartIsolated()
+{
+	wchar_t module[MAX_PATH]{};
+	if (GetModuleFileNameW(nullptr, module, MAX_PATH) == 0) return false;
+
+	SECURITY_ATTRIBUTES attributes{};
+	attributes.nLength = sizeof(attributes);
+	attributes.bInheritHandle = TRUE;
+
+	HANDLE readPipe = nullptr;
+	HANDLE writePipe = nullptr;
+	if (!CreatePipe(&readPipe, &writePipe, &attributes, 0)) return false;
+	SetHandleInformation(writePipe, HANDLE_FLAG_INHERIT, 0);
+
+	HANDLE nullOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		&attributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+	std::wstring commandLine = L"\"" + std::wstring(module) + L"\" --midi-host";
+	std::vector<wchar_t> command(commandLine.begin(), commandLine.end());
+	command.push_back(L'\0');
+
+	STARTUPINFOW startup{};
+	startup.cb = sizeof(startup);
+	startup.dwFlags = STARTF_USESTDHANDLES;
+	startup.hStdInput = readPipe;
+	startup.hStdOutput = nullOutput;
+	startup.hStdError = nullOutput;
+
+	PROCESS_INFORMATION process{};
+	const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE,
+		CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+
+	CloseHandle(readPipe);
+	if (nullOutput != INVALID_HANDLE_VALUE) CloseHandle(nullOutput);
+
+	if (!started)
+	{
+		CloseHandle(writePipe);
+		return false;
+	}
+
+	CloseHandle(process.hThread);
+	hostProcess = process.hProcess;
+	hostInput = writePipe;
+	return true;
+}
+
+bool MIDIOut::SendIsolated(uint32_t msg)
+{
+	if (hostInput == nullptr) return false;
+
+	DWORD written = 0;
+	if (!WriteFile((HANDLE)hostInput, &msg, sizeof(msg), &written, nullptr) || written != sizeof(msg))
+	{
+		std::cerr << "  MIDI helper process stopped; disabling MIDI out." << std::endl;
+		SetFaultNotice("The isolated OmniMIDI helper stopped unexpectedly. Comet and playback keep "
+			"running, but this session will have no MIDI output.\n\n"
+			"Reinstall OmniMIDI (v2) or set COMET_MIDI_ISOLATION=0 to use the old in-process path.");
+		ShutdownIsolated();
+		return false;
+	}
+
+	return true;
+}
+
+void MIDIOut::ShutdownIsolated()
+{
+	if (hostInput != nullptr)
+	{
+		const uint32_t stop = 0xFFFFFFFFu;
+		DWORD written = 0;
+		WriteFile((HANDLE)hostInput, &stop, sizeof(stop), &written, nullptr);
+		CloseHandle((HANDLE)hostInput);
+		hostInput = nullptr;
+	}
+
+	if (hostProcess != nullptr)
+	{
+		if (WaitForSingleObject((HANDLE)hostProcess, 1500) == WAIT_TIMEOUT)
+			TerminateProcess((HANDLE)hostProcess, 0);
+		CloseHandle((HANDLE)hostProcess);
+		hostProcess = nullptr;
+	}
+
+	isolated = false;
+	initialized = false;
+	attempted = false;
+}
+
+int MIDIOut::RunHostMode()
+{
+	MIDIOut device;
+	device.InitializeInProcess(false);
+	if (!device.initialized) return 1;
+
+	uint32_t message = 0;
+	DWORD read = 0;
+	while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), &message, sizeof(message), &read, nullptr)
+		&& read == sizeof(message))
+	{
+		if (message == 0xFFFFFFFFu) break;
+		device.SendInProcess(message);
+	}
+
+	device.ShutdownInProcess();
+	return 0;
 }
 
 #else

@@ -1238,6 +1238,17 @@ void SettingsDialog::DrawMIDITab()
 
 		SECTION_ENTRY(
 			TABLE_LABEL_TOOLTIP(
+				"Remember settings per file",
+				"When enabled, the renderer options and key range are stored for the current MIDI and "
+				"restored the next time that exact path is opened. Off by default."
+			),
+			{
+				ImGui::Checkbox("##rememberFilePresets", &config->rememberFilePresets);
+			}
+		);
+
+		SECTION_ENTRY(
+			TABLE_LABEL_TOOLTIP(
 				"CJCMCG note source",
 				"An optional .CJCMCG chart. When loaded, the note counter and the graph count this chart's "
 				"note timeline instead of the MIDI's notes, while the MIDI keeps being drawn and played."

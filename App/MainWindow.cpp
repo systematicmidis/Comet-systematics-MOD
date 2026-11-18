@@ -6,6 +6,8 @@
 #include "Dialog/SettingsDialog.h"
 #include "Dialog/MessageDialog.h"
 #include "Dialog/UpdateDialog.h"
+#include "Dialog/ArchiveEntryDialog.h"
+#include "IO/ArchiveLoader.h"
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
@@ -18,6 +20,8 @@
 #include "Config/MIDIPlayerConfig.h"
 #include "UpdateChecker.h"
 #include "Telemetry/CrashReporter.h"
+#include <filesystem>
+#include <sstream>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -100,6 +104,7 @@ void MainWindow::InitializeDialogs()
 	dialogManager.RegisterDialog<SettingsDialog>(midiApp.get());
 	dialogManager.RegisterDialog<MessageDialog>();
 	dialogManager.RegisterDialog<UpdateDialog>(this->updateChecker.get());
+	dialogManager.RegisterDialog<ArchiveEntryDialog>(this);
 }
 
 void MainWindow::OpenMIDIDialog()
@@ -116,7 +121,54 @@ void MainWindow::LoadMIDIFile(const std::string& path)
 {
 	if (path.empty() || !midiApp) return;
 
-	this->midiApp->LoadMIDI(path.c_str());
+	// A container with several named songs would otherwise load whichever one happened to be
+	// largest. Ask once, before the loading dialog, so the picker cannot race a load.
+	std::string archiveError;
+	auto entries = ArchiveLoader::ListMidiEntries(path, &archiveError);
+	if (entries.size() > 1)
+	{
+		if (auto* picker = this->dialogManager.GetDialog<ArchiveEntryDialog>())
+		{
+			picker->Open(path, entries);
+			return;
+		}
+	}
+
+	LoadMIDIFile(path, std::string());
+}
+
+void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiveEntry, bool preflight)
+{
+	if (path.empty() || !midiApp) return;
+
+	// Preflight before a multi-hundred-megabyte load. This is deliberately a confirmation, not
+	// an automatic refusal: the packed loader can handle files that would exhaust other players.
+	std::error_code sizeError;
+	const uint64_t bytes = std::filesystem::file_size(path, sizeError);
+	constexpr uint64_t LARGE_FILE_BYTES = 512ull << 20;
+	if (preflight && !sizeError && bytes >= LARGE_FILE_BYTES)
+	{
+		std::ostringstream message;
+		message << "This file is " << (bytes / (1024.0 * 1024.0)) << " MB.\n\n"
+			<< "Large files use the packed track store. MIDITrail can draw it immediately; selecting "
+			<< "a per-key renderer builds that data in the background and may use several GB of RAM.\n\n"
+			<< "Continue loading?";
+
+		if (auto* messageDialog = dialogManager.GetDialog<MessageDialog>())
+		{
+			messageDialog->Open("Large MIDI file", message.str(), MessageDialog::ButtonType::YesNo,
+				[this, path, archiveEntry](MessageDialog::Result result)
+				{
+					if (result != MessageDialog::Result::Yes) return;
+					this->midiApp->LoadMIDI(path.c_str(), archiveEntry);
+					if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
+						loading->Open();
+				});
+			return;
+		}
+	}
+
+	this->midiApp->LoadMIDI(path.c_str(), archiveEntry);
 	if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
 		loading->Open();
 }
@@ -426,6 +478,21 @@ void MainWindow::ToggleFullscreen()
 void MainWindow::RenderUI()
 {
 	if (CanShowNavigationBar()) menuBuilder.Draw();
+
+	// Converting a packed track store to per-key arrays runs on a worker. Keep the old renderer
+	// usable and show why note density may look different for a few moments.
+	if (midiApp && midiApp->IsPreparingPerKeyData())
+	{
+		ImGui::SetNextWindowPos(ImVec2(18.0f, 18.0f), ImGuiCond_Always);
+		ImGui::SetNextWindowBgAlpha(0.88f);
+		ImGui::Begin("##per_key_preparation", nullptr,
+			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+			ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+		ImGui::Text("Preparing per-key render data...");
+		ImGui::ProgressBar(midiApp->GetPerKeyPreparationProgress(), ImVec2(260.0f, 0.0f));
+		ImGui::TextDisabled("The current renderer stays active until this finishes.");
+		ImGui::End();
+	}
 }
 
 void MainWindow::InitializeTheme()

@@ -2,6 +2,7 @@
 #include "App/MainWindow.h"
 #include "Telemetry/CometLog.h"
 #include "Telemetry/CrashReporter.h"
+#include "MIDI/Audio/MIDIOut.h"
 #include "UpdateBuilder.h"
 #include <cstring>
 #include <cstdlib>
@@ -45,6 +46,12 @@ int main(int argc, char** argv)
 
 	// After a crash Comet relaunches itself with this flag to upload the queued report. That
 	// helper must not open a window, load a config or install crash handlers of its own.
+#ifdef _WIN32
+	// The isolated OmniMIDI helper is this same executable without a window, GL context or config.
+	if (HasArgument(argc, argv, "--midi-host"))
+		return MIDIOut::RunHostMode();
+#endif
+
 	const bool senderMode = HasArgument(argc, argv, "--send-crash-reports");
 	if (HasArgument(argc, argv, "--safe-mode"))
 	{
@@ -122,7 +129,7 @@ int main(int argc, char** argv)
 	CrashReporter::FlushPendingInBackground();
 
 	if (!startupMIDI.empty())
-		mainWindow.LoadMIDIFile(startupMIDI);
+		mainWindow.LoadMIDIFile(startupMIDI, std::string(), false);
 
 	mainWindow.Run();
 

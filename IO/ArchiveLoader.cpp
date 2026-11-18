@@ -571,7 +571,8 @@ namespace
 
 	// Walks the entries of an already-open archive and leaves the best MIDI candidate in `best`.
 	bool FindBestEntry(archive* a, const std::atomic<bool>* cancel,
-		std::atomic<uint64_t>* done, Candidate& best, std::string& error)
+		std::atomic<uint64_t>* done, Candidate& best, std::string& error,
+		const std::string& preferredEntry)
 	{
 		archive_entry* entry = nullptr;
 
@@ -600,6 +601,14 @@ namespace
 			const char* rawName = archive_entry_pathname_utf8(entry);
 			if (rawName == nullptr) rawName = archive_entry_pathname(entry);
 			const std::string name = rawName != nullptr ? rawName : std::string();
+
+			// The picker selected one exact entry. Ignore the others instead of silently loading
+			// the largest one, which is what the automatic path does.
+			if (!preferredEntry.empty() && name != preferredEntry)
+			{
+				archive_read_data_skip(a);
+				continue;
+			}
 
 			const bool sizeKnown = archive_entry_size_is_set(entry) != 0;
 			const int64_t declaredSize = sizeKnown ? archive_entry_size(entry) : -1;
@@ -695,14 +704,14 @@ namespace
 	}
 
 	ArchiveLoader::Result ExtractFromArchive(archive* a, const std::atomic<bool>* cancel,
-		std::atomic<uint64_t>* done)
+		std::atomic<uint64_t>* done, const std::string& preferredEntry = {})
 	{
 		ArchiveLoader::Result result;
 
 		Candidate best;
 		std::string error;
 
-		if (!FindBestEntry(a, cancel, done, best, error))
+		if (!FindBestEntry(a, cancel, done, best, error, preferredEntry))
 		{
 			result.error = error;
 			return result;
@@ -747,6 +756,8 @@ namespace
 				return result;
 			}
 
+			// The selection names the outer entry. Once inside it, the normal largest-MIDI choice
+			// applies again (a nested archive can contain several files).
 			ArchiveLoader::Result next = ExtractFromArchive(inner, cancel, nullptr);
 			archive_read_free(inner);
 
@@ -981,10 +992,74 @@ bool ArchiveLoader::IsArchive(const std::filesystem::path& path)
 	return LooksCompressed(header, read);
 }
 
+std::vector<ArchiveLoader::EntryInfo> ArchiveLoader::ListMidiEntries(
+	const std::filesystem::path& path, std::string* error)
+{
+	std::vector<EntryInfo> entries;
+	if (!IsArchive(path)) return entries;
+
+	archive* a = archive_read_new();
+	if (a == nullptr)
+	{
+		if (error) *error = "Could not initialize the archive reader.";
+		return entries;
+	}
+
+	archive_read_support_filter_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+
+#ifdef _WIN32
+	const int openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
+#else
+	const int openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
+#endif
+
+	if (openResult != ARCHIVE_OK)
+	{
+		if (error) *error = archive_error_string(a) != nullptr ? archive_error_string(a)
+			: "Could not open the archive.";
+		archive_read_free(a);
+		return entries;
+	}
+
+	archive_entry* entry = nullptr;
+	while (archive_read_next_header(a, &entry) == ARCHIVE_OK)
+	{
+		if (archive_entry_filetype(entry) == AE_IFDIR)
+		{
+			archive_read_data_skip(a);
+			continue;
+		}
+
+		const char* rawName = archive_entry_pathname_utf8(entry);
+		if (rawName == nullptr) rawName = archive_entry_pathname(entry);
+		const std::string name = rawName != nullptr ? rawName : std::string();
+
+		if (NameSuggestsMidi(name))
+		{
+			EntryInfo info;
+			info.name = name;
+			if (archive_entry_size_is_set(entry))
+			{
+				const int64_t size = archive_entry_size(entry);
+				info.size = size > 0 ? (uint64_t)size : 0;
+			}
+			entries.push_back(std::move(info));
+		}
+
+		archive_read_data_skip(a);
+	}
+
+	archive_read_free(a);
+	return entries;
+}
+
 ArchiveLoader::Result ArchiveLoader::Extract(const std::filesystem::path& path,
 	const std::atomic<bool>* cancel,
 	std::atomic<uint64_t>* done,
-	std::atomic<uint64_t>* total)
+	std::atomic<uint64_t>* total,
+	const std::string& preferredEntry)
 {
 	Result result;
 
@@ -1017,7 +1092,7 @@ ArchiveLoader::Result ArchiveLoader::Extract(const std::filesystem::path& path,
 		return result;
 	}
 
-	result = ExtractFromArchive(a, cancel, done);
+	result = ExtractFromArchive(a, cancel, done, preferredEntry);
 
 	// The reader consumed the outer file, so the bar is full even when we cancelled.
 	if (done != nullptr)

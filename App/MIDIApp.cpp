@@ -151,6 +151,49 @@ MIDIApp::~MIDIApp()
 	Models::UnloadModels();
 }
 
+void MIDIApp::ApplyFilePreset(const std::string& path)
+{
+	if (!config.rememberFilePresets || path.empty() || !renderer) return;
+
+	auto it = config.filePresets.find(path);
+	if (it == config.filePresets.end() || !it->second.IsMap()) return;
+
+	const YAML::Node& preset = it->second;
+	const std::string currentKey = renderer->GetSerializationKey();
+	const std::string savedKey = preset["rendererKey"] ? preset["rendererKey"].as<std::string>("") : "";
+	if (!savedKey.empty() && savedKey != currentKey) return;
+
+	if (preset["rendererSettings"] && preset["rendererSettings"].IsMap())
+	{
+		config.renderersSettings[currentKey] = preset["rendererSettings"];
+		renderer->LoadSettings(preset["rendererSettings"]);
+	}
+
+	if (preset["keyFirst"])
+		config.render.SetKeyFirst(preset["keyFirst"].as<int>(config.render.GetKeyFirst()));
+	if (preset["keyLast"])
+		config.render.SetKeyLast(preset["keyLast"].as<int>(config.render.GetKeyLast()));
+
+	if (preset["audioSettings"] && preset["audioSettings"].IsMap() && midiAudio)
+	{
+		config.audioSettings = preset["audioSettings"];
+		midiAudio->LoadSettings(preset["audioSettings"]);
+	}
+}
+
+void MIDIApp::SaveFilePreset(const std::string& path)
+{
+	if (!config.rememberFilePresets || path.empty() || !renderer || !hasSequence || pendingRenderer) return;
+
+	YAML::Node preset;
+	preset["rendererKey"] = renderer->GetSerializationKey();
+	preset["rendererSettings"] = renderer->GetSettings();
+	preset["keyFirst"] = config.render.GetKeyFirst();
+	preset["keyLast"] = config.render.GetKeyLast();
+	if (midiAudio) preset["audioSettings"] = midiAudio->GetSettings();
+	config.filePresets[path] = preset;
+}
+
 void MIDIApp::SaveSettings()
 {
 	// Audio and the active renderer own their own settings, so fold them back into the config
@@ -164,6 +207,7 @@ void MIDIApp::SaveSettings()
 	{
 		config.renderersSettings[renderer->GetSerializationKey()] = renderer->GetSettings();
 	}
+	SaveFilePreset(currentMidiPath);
 	config.SaveConfig();
 }
 
@@ -173,12 +217,13 @@ bool MIDIApp::IsGLReady() const
 	return mainWindow->IsGLReady();
 }
 
-std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
+std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path, const std::string& archiveEntry)
 {
 	// The mapped loader is the fast one on every file - archives included, because extraction
 	// already leaves the MIDI in memory - so it is always used. The loading-thread setting then
 	// only decides whether it spreads the tracks over the machine or parses them on this thread.
 	auto loader = std::make_shared<MultithreadedMIDILoader>(path);
+	loader->SetArchiveEntry(archiveEntry);
 	loader->SetWorkerLimit(config.midi.multithreadedLoading ? 0 : 1);
 
 	loader->SetLoadOnlyNotes(config.midi.loadNotesOnly);
@@ -192,7 +237,7 @@ std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path)
 	return loader;
 }
 
-void MIDIApp::LoadMIDI(const char* path)
+void MIDIApp::LoadMIDI(const char* path, std::string archiveEntry)
 {
 	std::lock_guard<std::mutex> lock(appMutex);
 
@@ -205,7 +250,7 @@ void MIDIApp::LoadMIDI(const char* path)
 		hasLoadError = false;
 		loadError.clear();
 	}
-	std::shared_ptr<AbstractMIDILoader> loader = CreateLoader(path);
+	std::shared_ptr<AbstractMIDILoader> loader = CreateLoader(path, archiveEntry);
 	prog = loader;
 
 	std::thread([this, loader, pathStr = std::string(path)]() {
@@ -315,11 +360,15 @@ bool MIDIApp::ConsumeLoadError(std::string& message)
 
 void MIDIApp::UnloadMIDI()
 {
+	pendingRenderer.reset();
+	pendingRendererSequence.reset();
 	if (!hasSequence) return;
+	SaveFilePreset(currentMidiPath);
 	timer->Pause();
 	midiAudio->Reset();
 	renderer->UnloadSequence();
 	hasSequence = false;
+	currentMidiPath.clear();
 	mainWindow->SetTitleInfo();
 
 	CrashReporter::ClearMidiInfo();
@@ -333,6 +382,18 @@ void MIDIApp::UpdatePendingSequence()
 	std::shared_ptr<MIDISequence> seq = pendingSeq;
 	pendingSeq.reset();
 
+	// A packed sequence only has the tick-ordered track store. A per-key renderer would have to
+	// materialize hundreds of megabytes before the first frame; MIDITrail can draw the packed
+	// store directly, so use it unless the user later switches and accepts the background build.
+	if (seq->packed && renderer && renderer->UsesMergedNotes())
+	{
+		std::cout << "Packed file: switching to MIDITrail for the fast path." << std::endl;
+		config.render.SetCurrentRenderer(RendererType::MIDITrail);
+		SetRenderer<MIDIRendererMIDITrail>();
+	}
+
+	currentMidiPath = pendingPath;
+	ApplyFilePreset(currentMidiPath);
 	renderer->LoadSequence(seq);
 	navigationBar->SetMIDILengthFromSeq(*seq.get());
 	noteCounterInfo->ppq.value = seq->resolution;
@@ -365,6 +426,12 @@ void MIDIApp::SetRenderer()
 {
 	static_assert(std::is_base_of_v<AbstractMIDIRenderer, T>, "T must derive from AbstractMIDIRenderer");
 
+	// A new renderer choice supersedes a conversion that was waiting for the previous one.
+	// Save the outgoing choice against the current file before replacing it.
+	SaveFilePreset(currentMidiPath);
+	pendingRenderer.reset();
+	pendingRendererSequence.reset();
+
 	int width = config.render.GetWidth();
 	int height = config.render.GetHeight();
 	// hacky but oh well
@@ -384,18 +451,31 @@ void MIDIApp::SetRenderer()
 	std::shared_ptr<MIDISequence> seq;
 	if (this->renderer) seq = GetRenderer()->GetSequence();
 
-	this->renderer = std::make_unique<T>(this);
-	this->renderer->OnResize(width, height);
-	this->renderer->SetNoteCounter(noteCounterInfo);
-	this->renderer->Initialize();
+	auto newRenderer = std::make_unique<T>(this);
+	newRenderer->OnResize(width, height);
+	newRenderer->SetNoteCounter(noteCounterInfo);
+	newRenderer->Initialize();
 
 	// load new renderer settings IF they exist in config storage
-	std::string newKey = this->renderer->GetSerializationKey();
+	std::string newKey = newRenderer->GetSerializationKey();
 	if (config.renderersSettings[newKey])
 	{
-		this->renderer->LoadSettings(config.renderersSettings[newKey]);
+		newRenderer->LoadSettings(config.renderersSettings[newKey]);
 	}
 
+	// A packed sequence has no mergedNotes yet. Start that on a worker and keep the existing
+	// renderer visible until it is ready; this is the difference between a responsive window and
+	// several seconds of a frozen one on a spam file.
+	if (seq != nullptr && newRenderer->UsesMergedNotes() && !seq->trackNotes.empty()
+		&& !seq->IsMergedNotesReady())
+	{
+		seq->StartMergedNotesPreparation();
+		pendingRenderer = std::move(newRenderer);
+		pendingRendererSequence = seq;
+		return;
+	}
+
+	this->renderer = std::move(newRenderer);
 	if (seq != nullptr) this->renderer->LoadSequence(seq);
 
 	if (blurredQuadRenderer)
@@ -412,6 +492,53 @@ void MIDIApp::SetRenderer()
 	}
 
 	// shuffle colors!
+	if (config.render.shuffleColors) colorAsset.ShuffleColors(config.render.shuffleSeed);
+	else colorAsset.RestoreColors();
+}
+
+bool MIDIApp::IsPreparingPerKeyData() const
+{
+	return pendingRendererSequence && pendingRendererSequence->IsMergedNotesPreparing();
+}
+
+float MIDIApp::GetPerKeyPreparationProgress() const
+{
+	return pendingRendererSequence ? pendingRendererSequence->GetMergedNotesProgress() : 0.0f;
+}
+
+void MIDIApp::FinishPendingRenderer()
+{
+	if (!pendingRenderer || !pendingRendererSequence) return;
+	if (!pendingRendererSequence->IsMergedNotesReady()) return;
+
+	if (pendingRendererSequence->mergeFailed.load(std::memory_order_acquire))
+	{
+		pendingRenderer.reset();
+		pendingRendererSequence.reset();
+		SetLoadError("Comet could not build the per-key render data for this file. It may be too large "
+			"for the selected renderer; MIDITrail can play it without that conversion.");
+		return;
+	}
+
+	auto seq = pendingRendererSequence;
+	this->renderer = std::move(pendingRenderer);
+	this->pendingRendererSequence.reset();
+	if (!this->renderer) return;
+
+	this->renderer->LoadSequence(seq);
+
+	if (blurredQuadRenderer)
+		blurredQuadRenderer->SetSceneTexture(this->renderer->GetSceneTexture());
+
+	auto* colorList = GetColorList();
+	ColorAsset& colorAsset = this->renderer->GetColorAsset();
+	if (colorList && config.render.GetUseColorsFromImage())
+	{
+		colorList->SetPalette(config.render.paletteID);
+		auto& palette = colorList->GetCurrentPalette();
+		colorAsset.LoadColors(palette.palette, config.render.loopColors);
+	}
+
 	if (config.render.shuffleColors) colorAsset.ShuffleColors(config.render.shuffleSeed);
 	else colorAsset.RestoreColors();
 }
@@ -523,7 +650,15 @@ MIDISequence* MIDIApp::GetRendererSequence()
 
 void MIDIApp::Update()
 {
+	FinishPendingRenderer();
 	UpdatePendingSequence();
+
+	if (!renderer)
+	{
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		return;
+	}
 
 	ImVec4 bgColor = config.render.GetBackground();
 	renderFramebuffer->Bind();

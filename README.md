@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.9b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.9b)
+**v1.11.10b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.10b)
 
 | Asset | Use it for |
 | --- | --- |
@@ -30,7 +30,7 @@ The standalone EXEs are **not complete portable packages**. Keep them beside you
 
 1. Put `Comet-Release.exe` in the same folder as your existing Comet installation.
 2. Start it and open a `.mid`, `.midi`, or a supported compressed archive.
-3. For large files, use MIDITrail and leave the per-key renderer data to build lazily.
+3. Packed files open in MIDITrail automatically. Selecting a per-key renderer such as Piano From Above builds its data on a worker; the window stays usable and shows preparation progress.
 4. Settings are saved to `config.yml`; the previous good copy is kept as `config.yml.bak`, and a malformed file is moved aside as `config.yml.broken` instead of blocking every launch.
 5. If a bad setting prevents startup, run `Comet.exe --safe-mode` (portable ZIP) or `Comet-Release.exe --safe-mode` (standalone) once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
 
@@ -42,16 +42,16 @@ This table compares this MOD with the upstream [MrCHB1/Comet](https://github.com
 
 | Area | Normal Comet (upstream) | Comet Systematics MOD |
 | --- | --- | --- |
-| **Very large MIDI loading** | Builds the per-key render store while loading. Large files can be slow and memory-heavy. | Files above roughly 4 million unique notes use a packed per-track store. MIDITrail and audio walk that store directly; legacy per-key data is built lazily only when another renderer needs it. |
+| **Very large MIDI loading** | Builds the per-key render store while loading. Large files can be slow and memory-heavy. | Files above roughly 4 million unique notes use a packed per-track store. MIDITrail and audio walk that store directly; legacy per-key data is built lazily on a background worker only when another renderer needs it. A confirmation appears before files of 512 MB or more are opened from the UI. |
 | **Note totals** | Large files can be limited by the loader's storage and count path. | Keeps the complete non-deduplicated note count, including repeated tracks and repeated note-ons. Tested with a 100,000,000-note file and a 35-trillion-note archive. |
-| **Compressed files and archives** | Plain MIDI files are the normal input path. | Nested archive support, streaming `.xz` chains, and repeated-cycle proof for archives that contain the same compressed cycle many times. |
+| **Compressed files and archives** | Plain MIDI files are the normal input path. | Nested archive support, streaming `.xz` chains, repeated-cycle proof, and a picker when an archive contains more than one named MIDI. |
 | **Repeated layers/tracks** | No Mod-tab dedupe controls. | **Layered DeDupe** can detect repeated tracks and layered archive repeats, while still counting every represented note. Optional fast modes trade certainty for speed. |
 | **Note counter** | Shows the loaded note values and rates. | Adds a display-only **note multiplier**, a target-count solver, melody-note protection, per-track exclusions, NPS/polyphony thresholds, and an optional multiplied graph. |
 | **MIDITrail auras** | Basic held-note aura sizing. | Auras follow the configured `auraSize` instead of being multiplied to twice the requested size. Repeated/stacked notes increase the aura weight; compressed archives carry the same stack weight as their raw equivalent. |
-| **MIDI output** | KDMAPI/OmniMIDI path. | Targets OmniMIDI v2+, guards the version probe and every per-note send, and shows an in-app warning if the driver faults instead of crashing. |
+| **MIDI output** | KDMAPI/OmniMIDI path. | Targets OmniMIDI v2+ and runs the DLL in a small isolated helper process, so a driver fault stops the helper instead of Comet. The old guarded in-process path remains available with `COMET_MIDI_ISOLATION=0`. |
 | **Updates** | Checks the official project release. | **Help → Check for Updates** can check either the official `MrCHB1/Comet` branch or this MOD's branch, with a source-build update path. |
 | **Diagnostics** | Console-oriented error reporting. | Adds crash reporting and diagnostic logging so driver/load failures can be investigated after the app closes. |
-| **MIDI tab / Mod tab** | Standard settings tabs. | Adds a **Mod** tab for dedupe and note-farming display controls. |
+| **MIDI tab / Mod tab** | Standard settings tabs. | Adds a **Mod** tab for dedupe and note-farming display controls, plus optional per-file presets for renderer options, key range, and audio settings. |
 
 ## Large MIDI and archive notes
 
@@ -61,10 +61,12 @@ This table compares this MOD with the upstream [MrCHB1/Comet](https://github.com
 - **Repeated-cycle proof is conservative.** If the archive's repeated region cannot be proven, Comet falls back to the complete decode instead of guessing.
 - **Do not enable "Risky fast dedup" unless you know the file.** It can stop early when different tiles happen to divide evenly; it is off at startup and is not saved.
 - **A 4-million-note threshold is deliberate.** Below it, small files keep the established merged render path; above it, the packed track store avoids building 128 per-key arrays up front.
+- **Packed seeks use a sparse per-track index.** MIDITrail keeps one cursor per track and skips tracks that cannot overlap the visible window, so zooming and seeking do not rebuild a full event list.
+- **Per-key preparation can be cancelled by choosing another renderer.** The old renderer keeps drawing until the conversion finishes; the temporary store is only installed after it is complete.
 
 Representative development-machine results, not guarantees:
 
-- 100,000,000-note test MIDI: **516 ms** to load in the current Release build, with the full 100,000,000 count. The same 763 MB file takes Ziggy **918.563 ms** to parse on the same machine, so Comet's packed load is faster on this workload.
+- 100,000,000-note test MIDI: **628 ms** to load in the current Release build, with the full 100,000,000 count. The same 763 MB file takes Ziggy **918.563 ms** to parse on the same machine, so Comet's packed load is faster on this workload.
 - 4,101,001-note packed test: about 134 ms raw and 168 ms from `.xz`.
 - Four-layer 35-trillion-note archive: about 11.4–11.9 seconds to prove and load, with the full repeated count preserved.
 
@@ -72,10 +74,11 @@ The Ziggy comparison is a parse-vs-load comparison on the 100M file. On an 8,000
 
 ## Settings worth knowing
 
+- **MIDI tab → Remember settings per file:** stores the active renderer's options, key range, and audio settings for the exact file path. Off by default; copying or moving a file starts a fresh preset.
 - **Mod tab → note multiplier:** purely cosmetic. It changes the counter and optionally the graph, never the actual notes, rendering, or audio.
 - **Mod tab → Layered DeDupe:** skips decoding repeated tracks/layers while preserving the represented note count.
 - **Visual → MIDITrail → Aura size:** the value is the visual scale; stacked notes add a small logarithmic boost rather than drawing one aura per note.
-- **Audio → MIDI out:** choose OmniMIDI for real-time MIDI out, or an internal Prerendered/Maestro mode.
+- **Audio → MIDI out:** choose OmniMIDI for real-time MIDI out, or an internal Prerendered/Maestro mode. OmniMIDI is hosted in a separate `Comet.exe --midi-host` process by default; set `COMET_MIDI_ISOLATION=0` only when troubleshooting the old in-process path.
 
 ## Crash reports and private configuration
 
@@ -110,7 +113,7 @@ The archive regression test builds its own synthetic archive and a small raw MID
 
 ## Troubleshooting
 
-- **OmniMIDI warning:** install OmniMIDI v2 or newer, or switch the MIDI output mode to an internal renderer.
+- **OmniMIDI warning:** install OmniMIDI v2 or newer, or switch the MIDI output mode to an internal renderer. If the isolated helper stops, playback continues silently; restart or set `COMET_MIDI_ISOLATION=0` to compare with the legacy path.
 - **A huge file is slow in a non-MIDITrail renderer:** switch to MIDITrail or wait for the lazy per-key build to finish.
 - **App does not start:** verify that `assets/` and the Visual C++ runtime DLLs are beside the executable, and check the diagnostic log/crash report.
 - **Archive load fails:** try extracting the MIDI first. Nested or malformed archives can fall back to a full decode or be rejected.

@@ -45,8 +45,10 @@ public:
 	// File > Open: pick a MIDI, start loading it and show the loading dialog.
 	void OpenMIDIDialog();
 	// Starts loading a known path and shows the loading dialog; used by File > Open and by a
-	// path passed on the command line.
+	// path passed on the command line. The overload with an entry name is used by the archive
+	// picker when the container holds more than one MIDI.
 	void LoadMIDIFile(const std::string& path);
+	void LoadMIDIFile(const std::string& path, const std::string& archiveEntry, bool preflight = true);
 	GLFWwindow* GetInternalWindow() { return window; }
 
 	bool IsGLReady() const

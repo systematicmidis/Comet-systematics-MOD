@@ -155,7 +155,8 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 					return total > 0 ? (double)archiveDone.load(std::memory_order_relaxed) / (double)total : 0.0;
 				});
 
-			ArchiveLoader::Result extracted = ArchiveLoader::Extract(path, &hasStopped, &archiveDone, &archiveTotal);
+			ArchiveLoader::Result extracted = ArchiveLoader::Extract(path, &hasStopped, &archiveDone, &archiveTotal,
+				preferredArchiveEntry);
 			ClearBars();
 
 			if (!running) return seq = std::make_shared<MIDISequence>();
@@ -695,6 +696,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	seq->noteBlocks = std::move(noteBlockArray);
 	}
 
+	// Only the packed track store needs this index. Non-packed files already have per-key
+	// blocks, which are the better seek structure for that layout.
+	if (seq->packed) seq->BuildSparseSeekIndex();
+
 	ClearBars();
 	profileLap("note blocks");
 
@@ -1054,6 +1059,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 
 	seq->noteBlocks = std::move(noteBlockArray);
 	}
+
+	// Only the packed track store needs this index. Non-packed files already have per-key
+	// blocks, which are the better seek structure for that layout.
+	if (seq->packed) seq->BuildSparseSeekIndex();
 
 	ClearBars();
 	SetName("Done!");

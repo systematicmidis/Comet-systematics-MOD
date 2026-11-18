@@ -5,6 +5,8 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <queue>
+#include <functional>
 #include "MIDI/TempoMap.h"
 #include "MIDI/MIDIDefs.h"
 
@@ -24,9 +26,131 @@ void AudioThread::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr<MIDIT
 
     std::thread audioThread([this, seq, timer]() {
         auto* tempoMap = seq->GetTempoMap();
-        const auto resolution = seq->resolution;
+        		const auto resolution = seq->resolution;
 
-        // `seq->notes` counts every repeated copy for display; the events we build are only the
+		// Packed giant files cannot be flattened into one event vector: 100M notes would need a
+		// multi-gigabyte allocation and a full stable sort. Stream note-ons from the already
+		// tick-sorted per-track cursors and keep only the currently sounding note-offs in a heap.
+		if (seq->packed)
+		{
+			struct NoteOff
+			{
+				long tick;
+				uint32_t message;
+				bool operator>(const NoteOff& other) const { return tick > other.tick; }
+			};
+
+			const auto& tracks = seq->trackNotes;
+			const SparseSeekIndex& index = seq->GetSparseSeekIndex();
+			std::vector<size_t> cursors(tracks.size(), 0);
+			std::priority_queue<NoteOff, std::vector<NoteOff>, std::greater<NoteOff>> noteOffs;
+			size_t eventCursor = 0;
+
+			auto sendControlEventsUpTo = [&](long tick)
+			{
+				while (eventCursor < seq->mergedEvents.size() && seq->mergedEvents[eventCursor].tick <= tick)
+				{
+					const uint32_t message = seq->mergedEvents[eventCursor++].message;
+					if ((message & 0xF0) != 0x80 && (message & 0xF0) != 0x90)
+						midiOut->SendEvent(message);
+				}
+			};
+
+			auto seekCursors = [&](long tick)
+			{
+				for (size_t track = 0; track < tracks.size(); ++track)
+				{
+					if (index.TrackCount() == tracks.size())
+						cursors[track] = index.LowerBound(track, (uint32_t)std::max(0L, tick), tracks);
+					else
+						cursors[track] = (size_t)(std::lower_bound(tracks[track].tick.begin(),
+							tracks[track].tick.end(), (uint32_t)std::max(0L, tick)) - tracks[track].tick.begin());
+				}
+
+				while (!noteOffs.empty()) noteOffs.pop();
+				eventCursor = 0;
+				sendControlEventsUpTo(tick);
+			};
+
+			auto playUpTo = [&](long tick)
+			{
+				while (!noteOffs.empty() && noteOffs.top().tick <= tick)
+				{
+					midiOut->SendEvent(noteOffs.top().message);
+					noteOffs.pop();
+				}
+
+				sendControlEventsUpTo(tick);
+
+				for (size_t track = 0; track < tracks.size(); ++track)
+				{
+					const NoteSequence& notes = tracks[track];
+					size_t& cursor = cursors[track];
+					while (cursor < notes.Size() && (long)notes.tick[cursor] <= tick)
+					{
+						const uint32_t noteTick = notes.tick[cursor];
+						const uint8_t channel = notes.GetChannel(cursor);
+						const uint8_t key = notes.GetKey(cursor);
+						const uint8_t velocity = notes.GetVelocity(cursor);
+
+						midiOut->SendEvent(0x90u | channel | ((uint32_t)key << 8) | ((uint32_t)velocity << 16));
+						noteOffs.push({ (long)noteTick + (long)notes.gate[cursor],
+							0x80u | channel | ((uint32_t)key << 8) });
+						++cursor;
+					}
+				}
+			};
+
+			{
+				double currentTime = timer->IsPaused() ? timer->GetPauseTime() : timer->Elapsed();
+				const long startTick = seq->timeBased
+					? (long)(currentTime * TIME_BASED_MULTIPLIER)
+					: (long)tempoMap->SecsToTicksFromMap(resolution, currentTime);
+				seekCursors(startTick);
+			}
+
+			while (!stopFlag)
+			{
+				if (audioMuted)
+				{
+					std::this_thread::sleep_for(std::chrono::microseconds(500));
+					continue;
+				}
+
+				const bool navigated = timer->HasNavigatedRecently();
+				const long currentTick = (long)tempoMap->SecsToTicksFromMap(resolution, timer->Elapsed());
+				const long currPos = seq->timeBased
+					? (long)(timer->Elapsed() * TIME_BASED_MULTIPLIER) : currentTick;
+
+				if (navigated)
+				{
+					ResetEvents();
+					const long targetTick = seq->timeBased
+						? (long)(timer->GetPauseTime() * TIME_BASED_MULTIPLIER)
+						: (long)tempoMap->SecsToTicksFromMap(resolution, timer->GetPauseTime());
+					seekCursors(targetTick);
+				}
+
+				if (navigated || timer->PauseRequestedRecently())
+				{
+					for (int ch = 0; ch < 16; ch++)
+						midiOut->SendEvent(0xB0u | ch | (123u << 8));
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					continue;
+				}
+
+				if (!timer->IsPaused())
+					playUpTo(currPos);
+
+				std::this_thread::sleep_for(std::chrono::microseconds(500));
+			}
+
+			ResetEvents();
+			threadWorking = false;
+			return;
+		}
+
+		// `seq->notes` counts every repeated copy for display; the events we build are only the
         // unique merged notes. Reserving from the display total would try to allocate terabytes.
         const auto& noteLists = seq->mergedNotes.empty() ? seq->trackNotes : seq->mergedNotes;
         size_t eventCount = seq->mergedEvents.size();
