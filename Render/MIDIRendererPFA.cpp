@@ -1027,11 +1027,6 @@ void MIDIRendererPFA::RenderNotes()
 					noteCY = std::round(noteCY);
 				}
 
-				// Shorter than half a pixel is invisible, and at a dense zoom-out that is most of the
-				// file; building quads for those notes only costs frame time.
-				if (noteCY < 0.5f)
-					continue;
-
 				const uint32_t noteColor = colors.GetColor(nTrack, nChannel);
 
 				if (supportsCompute)
