@@ -34,11 +34,11 @@ void MIDISequence::StartMergedNotesPreparation()
 			try
 			{
 				mergeProgress.store(0.05f, std::memory_order_relaxed);
-				std::vector<NoteSequence> tracks = trackNotes;
-				mergeProgress.store(0.12f, std::memory_order_relaxed);
+				// The merge only reads the packed tracks, so it runs on them directly. Copying the
+				// store first doubled peak memory and delayed the first per-key frame.
 				size_t deduplicated = 0;
 				auto merged = SequenceFuncs::WindowedMergeAndDistribute(
-					std::move(tracks), (uint32_t)length, &deduplicated);
+					trackNotes, (uint32_t)length, &deduplicated);
 				mergeProgress.store(0.85f, std::memory_order_relaxed);
 
 				std::array<std::vector<NoteBlock>, MIDI_KEYS> blocks{};

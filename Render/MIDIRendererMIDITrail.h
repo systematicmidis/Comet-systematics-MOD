@@ -235,12 +235,6 @@ private:
 	void RenderNotes();
 	void RenderNotesPacked();
 
-	// Cursors into the packed track store. Sequential playback advances these instead of doing a
-	// lower_bound over every track on every frame; a backward seek resets them through the sparse
-	// index. This is the hot path for spam files with thousands of tracks.
-	std::vector<size_t> packedTrackBegin{};
-	long packedLastScanTick = -1;
-	bool packedCursorsValid = false;
 	void UploadNoteBuffer(size_t count);
 
 	void RenderKeyboard();

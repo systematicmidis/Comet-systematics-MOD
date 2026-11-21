@@ -615,16 +615,6 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		if (!seq->mergedNotes.empty()) applyNotes(seq->mergedNotes);
 		else applyNotes(seq->trackNotes);
 
-		seq->longestNoteLength = 0;
-		auto measureLongest = [&](const std::vector<NoteSequence>& list)
-			{
-				for (const auto& notes : list)
-					for (size_t i = 0; i < notes.Size(); i++)
-						seq->longestNoteLength = std::max(seq->longestNoteLength, notes.gate[i]);
-			};
-		if (!seq->mergedNotes.empty()) measureLongest(seq->mergedNotes);
-		else measureLongest(seq->trackNotes);
-
 		std::cout << "  Processing events" << std::endl;
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->mergedEvents);
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->timeSignatures);
@@ -984,16 +974,6 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 			};
 		if (!seq->mergedNotes.empty()) applyNotes(seq->mergedNotes);
 		else applyNotes(seq->trackNotes);
-
-		seq->longestNoteLength = 0;
-		auto measureLongest = [&](const std::vector<NoteSequence>& list)
-			{
-				for (const auto& notes : list)
-					for (size_t i = 0; i < notes.Size(); i++)
-						seq->longestNoteLength = std::max(seq->longestNoteLength, notes.gate[i]);
-			};
-		if (!seq->mergedNotes.empty()) measureLongest(seq->mergedNotes);
-		else measureLongest(seq->trackNotes);
 
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->mergedEvents);
 		SequenceFuncs::ApplyTempoEvents(seq->resolution, tempoMap, seq->timeSignatures);

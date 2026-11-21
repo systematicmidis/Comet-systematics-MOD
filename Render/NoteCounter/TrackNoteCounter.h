@@ -34,7 +34,7 @@ public:
 			// Different MIDI or track selection, or the playhead moved backwards, so rewind and let
 			// the loops below walk forward to the current position again.
 			cursors.assign(KeyCount(sequence), 0);
-			soundingBlocks.assign(KeyCount(sequence), 0);
+			soundingEnds.assign(KeyCount(sequence), {});
 			playedPlain = 0;
 			soundingPlain = 0;
 			lastThreshold = 0.0;
@@ -71,13 +71,20 @@ public:
 			while (cursor < count && (double)notes.tick[cursor] <= threshold)
 			{
 				if (!IsMultiplied(notes.GetTrack(cursor), unmultiplied))
+				{
 					++playedPlain;
+					// Remembered while the note plays, so polyphony never has to look at notes that
+					// started long ago again. A single long note used to pin the first 1,024-note block
+					// and make every frame re-walk millions of already-finished notes.
+					soundingEnds[key].push_back(notes.tick[cursor] + notes.gate[cursor]);
+				}
 
 				++cursor;
 			}
 		}
 
-		soundingPlain = wantPolyphony ? CountSounding(*sequence, threshold, unmultiplied) : 0;
+		soundingPlain = CountSounding(threshold);
+		if (!wantPolyphony) soundingPlain = 0;
 
 		// The same one-second window the renderers use for NPS, over the unticked notes only.
 		if (!history.empty() && playbackSeconds < history.back().time)
@@ -129,34 +136,22 @@ private:
 		return std::find(unmultiplied.begin(), unmultiplied.end(), track) == unmultiplied.end();
 	}
 
-	// Sounding notes are the ones that started but haven't finished yet. Blocks whose last note has
-	// already ended are skipped in bulk, exactly like the renderers' own polyphony pass, so the
-	// per-note work is limited to the blocks that are still open.
-	uint64_t CountSounding(const MIDISequence& sequence, double threshold, const std::vector<uint16_t>& unmultiplied)
+	// Sounding notes are the ones that started but haven't finished yet. The ends were recorded as
+	// the playhead passed each note, so one pass over the notes still open is all a frame needs.
+	uint64_t CountSounding(double threshold)
 	{
 		uint64_t sounding = 0;
 
-		for (std::size_t key = 0; key < sequence.mergedNotes.size() && key < soundingBlocks.size(); ++key)
+		for (std::vector<uint32_t>& ends : soundingEnds)
 		{
-			const std::vector<NoteBlock>& blocks = sequence.noteBlocks[key];
-			if (blocks.empty())
-				continue;
-
-			std::size_t& block = soundingBlocks[key];
-			while (block < blocks.size() && (double)blocks[block].maxBound <= threshold)
-				++block;
-
-			const NoteSequence& notes = sequence.mergedNotes[key];
-			const std::size_t cursor = std::min(cursors[key], notes.Size());
-
-			for (std::size_t i = block * NOTE_BLOCK_SIZE; i < cursor; ++i)
+			std::size_t keep = 0;
+			for (std::size_t i = 0; i < ends.size(); ++i)
 			{
-				if ((double)(notes.tick[i] + notes.gate[i]) <= threshold)
-					continue;
-
-				if (!IsMultiplied(notes.GetTrack(i), unmultiplied))
-					++sounding;
+				if ((double)ends[i] > threshold)
+					ends[keep++] = ends[i];
 			}
+			ends.resize(keep);
+			sounding += keep;
 		}
 
 		return sounding;
@@ -171,7 +166,7 @@ private:
 	const MIDISequence* cachedSequence = nullptr;
 	std::vector<uint16_t> cachedUnmultiplied{};
 	std::vector<std::size_t> cursors{};
-	std::vector<std::size_t> soundingBlocks{};
+	std::vector<std::vector<uint32_t>> soundingEnds{};
 	uint64_t playedPlain = 0;
 	uint64_t soundingPlain = 0;
 	uint64_t plainNotesPerSecond = 0;

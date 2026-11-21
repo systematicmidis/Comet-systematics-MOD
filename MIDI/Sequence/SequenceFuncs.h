@@ -140,7 +140,9 @@ public:
     // `deduplicatedNotes`, when given, receives the number of identical notes collapsed while
     // the per-key lists are finalized. The collapse is part of the parallel sort so it costs no
     // extra serial pass over every note.
-    static std::vector<NoteSequence> WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks, uint32_t maxTickHint = 0, size_t* deduplicatedNotes = nullptr);
+    // Reads the track store without consuming it, so a packed sequence can be converted to the
+    // per-key layout while the packed renderer still draws from the same notes.
+    static std::vector<NoteSequence> WindowedMergeAndDistribute(const std::vector<NoteSequence>& tracks, uint32_t maxTickHint = 0, size_t* deduplicatedNotes = nullptr);
 
     // Notes with the same tick, gate and key are the same rectangle: layered black MIDIs repeat
     // them by the million. Keeping one changes neither the sound nor the picture, and gives the

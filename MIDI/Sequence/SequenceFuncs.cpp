@@ -79,7 +79,7 @@ NoteSequence SequenceFuncs::FlattenSequence(std::vector<NoteSequence>&& tracks)
     return result;
 }
 
-std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(std::vector<NoteSequence>&& tracks, uint32_t maxTickHint, size_t* deduplicatedNotes)
+std::vector<NoteSequence> SequenceFuncs::WindowedMergeAndDistribute(const std::vector<NoteSequence>& tracks, uint32_t maxTickHint, size_t* deduplicatedNotes)
 {
     std::vector<NoteSequence> result(MIDI_KEYS);
     if (deduplicatedNotes) *deduplicatedNotes = 0;

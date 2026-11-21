@@ -679,6 +679,9 @@ void MIDIApp::Update()
 	else
 	{
 		double time = Utils::GetCurrTime<std::chrono::microseconds>() / 1000000.0;
+		// Measured start-to-start. Using the time after the render made the counter report
+		// 1 / (frame interval + render time), which read as roughly half the real rate.
+		if (time > lastFrameTime) fps = 1.0 / (time - lastFrameTime);
 		renderer->Render(time - lastFrameTime);
 		UpdateNoteCounterInfo();
 		lastFrameTime = time;
@@ -810,8 +813,6 @@ void MIDIApp::UpdateOverlayRates()
 
 void MIDIApp::UpdateNoteCounterInfo()
 {
-	double time = Utils::GetCurrTime<std::chrono::microseconds>() / 1000000.0;
-	fps = 1.0 / (time - lastFrameTime);
 	audioBuffer = -1.0;
 	auto* prAudio = dynamic_cast<PrerenderedEngine*>(GetMIDIAudio()->GetCurrentEngine());
 	if (prAudio)

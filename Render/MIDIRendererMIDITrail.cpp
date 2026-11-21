@@ -872,10 +872,6 @@ void MIDIRendererMIDITrail::LoadSequence(std::shared_ptr<MIDISequence> sequence)
 	for (auto& id : endRenderIDs)
 		id = 0;
 
-	packedTrackBegin.assign(sequence->trackNotes.size(), 0);
-	packedLastScanTick = -1;
-	packedCursorsValid = false;
-
 	auraData.fill(AuraData{});
 
 	// The sequence can arrive after the saved settings, so make the shader and the separator
@@ -1464,29 +1460,21 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		playbackSeconds + viewRegion * settings.frontRenderCutoff :
 		time + renderView->viewTicks * settings.frontRenderCutoff;
 
-	// A note that started before the cull line can still reach into the visible window. Start the
-	// per-track search one longest-note back so those tails are not skipped.
-	double longestSeconds = isTimeBased ? seq->longestNoteLength * invTimeMultiplier : seq->longestNoteLength;
-	double scanStartTime = std::max(0.0, backCutoffTime - longestSeconds);
-	long scanStartTick = isTimeBased
-		? (long)std::llround(scanStartTime * TIME_BASED_MULTIPLIER)
-		: (long)std::llround(scanStartTime);
+	// The back-cull line is where note bodies stop being drawn. Notes that started before it can
+	// still have a tail inside the window, but only a handful of them do, so they are found through
+	// the seek index's per-span maximum end tick. Scanning one global "longest note" back from the
+	// line made a single long note rescan the whole file on every frame.
+	const long cullTick = std::max(0L, (long)std::llround(backCutoffTime));
 	long frontTick = isTimeBased
 		? (long)std::llround(frontCutoffTime * TIME_BASED_MULTIPLIER)
 		: (long)std::llround(frontCutoffTime);
+	frontTick = std::max(frontTick, cullTick);
 
 	MIDIPlayerConfig* config = app->GetConfig();
 	int keyFirst = config->render.GetKeyFirst();
 	int keyLast = config->render.GetKeyLast();
 
 	const SparseSeekIndex& seekIndex = seq->GetSparseSeekIndex();
-	const bool resetCursors = !packedCursorsValid || packedTrackBegin.size() != seq->trackNotes.size()
-		|| scanStartTick < packedLastScanTick;
-	if (resetCursors)
-	{
-		packedTrackBegin.assign(seq->trackNotes.size(), 0);
-		packedCursorsValid = true;
-	}
 
 	auraStacks.fill(0);
 	auraPulses.fill(0.0f);
@@ -1497,12 +1485,11 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		const NoteSequence& notes = seq->trackNotes[trackIdx];
 		if (notes.Empty()) continue;
 
-		if (!seekIndex.Empty() && !seekIndex.Overlaps(trackIdx, (uint32_t)std::max(0L, scanStartTick), (uint32_t)std::max(0L, frontTick)))
+		if (!seekIndex.Empty() && !seekIndex.Overlaps(trackIdx, (uint32_t)cullTick, (uint32_t)frontTick))
 		{
 			// A track entirely behind the scan window contributes all of its notes to the played
-			// counter. A track that starts beyond the front contributes none. The old unconditional
-			// skip made the counter under-report on large sparse files.
-			if (seekIndex.LastTick(trackIdx) < (uint32_t)std::max(0L, scanStartTick))
+			// counter. A track that starts beyond the front contributes none.
+			if (seekIndex.LastTick(trackIdx) < (uint32_t)cullTick)
 				notesPassed += notes.Size();
 			continue;
 		}
@@ -1511,21 +1498,11 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		if (trackIdx < seq->trackNoteWeights.size())
 			auraWeight = (uint32_t)std::min<uint64_t>((uint64_t)auraWeight * seq->trackNoteWeights[trackIdx], UINT32_MAX);
 
-		size_t noteBegin = packedTrackBegin[trackIdx];
-		if (resetCursors)
-		{
-			noteBegin = seekIndex.Empty()
-				? (size_t)(std::lower_bound(notes.tick.begin(), notes.tick.end(), scanStartTick) - notes.tick.begin())
-				: seekIndex.LowerBound(trackIdx, (uint32_t)std::max(0L, scanStartTick), seq->trackNotes);
-		}
-		else
-		{
-			while (noteBegin < notes.Size() && notes.tick[noteBegin] < scanStartTick)
-				++noteBegin;
-		}
-
-		const size_t noteEnd = std::upper_bound(notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin();
-		packedTrackBegin[trackIdx] = noteBegin;
+		const size_t noteBegin = seekIndex.Empty()
+			? (size_t)(std::lower_bound(notes.tick.begin(), notes.tick.end(), cullTick) - notes.tick.begin())
+			: seekIndex.LowerBound(trackIdx, (uint32_t)cullTick, seq->trackNotes);
+		const size_t noteEnd = (size_t)(std::upper_bound(
+			notes.tick.begin() + noteBegin, notes.tick.end(), frontTick) - notes.tick.begin());
 		notesPassed += noteBegin;
 
 		bool haveLast = false;
@@ -1535,7 +1512,9 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		uint8_t lastChannel = 0;
 		uint16_t lastTrack = 0;
 
-		for (size_t i = noteBegin; i < noteEnd; ++i)
+		// `fromTail` marks a note that started before the cull line. noteBegin already counted it,
+		// so it must not move the played/polyphony counters again.
+		auto emitNote = [&](size_t i, bool fromTail)
 		{
 			uint32_t nTick = notes.tick[i];
 			uint32_t nGate = notes.gate[i];
@@ -1548,15 +1527,13 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 				? (double)(nTick + nGate) * invTimeMultiplier
 				: (double)(nTick + nGate);
 
-			if (noteStart > frontCutoffTime) break;
+			if (noteStart > frontCutoffTime) return;
 
 			if (noteEndTime <= backCutoffTime)
 			{
-				notesPassed++;
-				continue;
+				if (!fromTail) notesPassed++;
+				return;
 			}
-
-			if (noteEndTime <= accTime) notesPassed++;
 
 			bool isNoteActive = noteStart <= accTime && noteEndTime >= accTime;
 			if (isNoteActive)
@@ -1564,7 +1541,7 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 				keyMetas[nNote].MarkPressed(true);
 				keyMetas[nNote].color = colors.GetColor(nTrack, nChannel);
 
-				notesPassed++;
+				if (!fromTail) notesPassed++;
 				polyphony++;
 
 				constexpr double AURA_PULSE_SECONDS = 0.25;
@@ -1583,6 +1560,10 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 					auraMetas[nNote] = keyMetas[nNote].GetMeta();
 				}
 			}
+			else if (!fromTail && noteEndTime <= accTime)
+			{
+				notesPassed++;
+			}
 
 			if (haveLast &&
 				nTick == lastTick &&
@@ -1591,7 +1572,7 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 				nTrack == lastTrack &&
 				nGate == lastGate)
 			{
-				continue;
+				return;
 			}
 
 			haveLast = true;
@@ -1601,7 +1582,7 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 			lastTrack = nTrack;
 			lastGate = nGate;
 
-			if (nNote < keyFirst || nNote > keyLast) continue;
+			if (nNote < keyFirst || nNote > keyLast) return;
 
 			bool isBlack = KEY_IS_BLACK(nNote);
 			renderNotes[noteID++] = RenderNote(
@@ -1625,7 +1606,36 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 			}
 
 			notesToRender++;
+		};
+
+		// Tails: notes behind the cull line that still reach into the window. Only spans whose
+		// maximum end tick crosses the line can hold one, so this is a few span checks per track.
+		if (!seekIndex.Empty() && noteBegin > 0)
+		{
+			const SparseSeekIndex::TrackInfo* trackInfo = seekIndex.Info(trackIdx);
+			if (trackInfo != nullptr && !trackInfo->spanMaxEnd.empty()
+				&& trackInfo->spanPrefixMax.back() > (uint32_t)cullTick)
+			{
+				const size_t lastSpan = std::min(trackInfo->spanMaxEnd.size(),
+					(noteBegin + SparseSeekIndex::SPAN_NOTES - 1) / SparseSeekIndex::SPAN_NOTES);
+				for (size_t span = seekIndex.FirstSpanEndingAfter(trackIdx, (uint32_t)cullTick);
+					span < lastSpan; ++span)
+				{
+					if (trackInfo->spanMaxEnd[span] <= (uint32_t)cullTick) continue;
+
+					const size_t spanBegin = span * SparseSeekIndex::SPAN_NOTES;
+					const size_t spanEnd = std::min(noteBegin, spanBegin + SparseSeekIndex::SPAN_NOTES);
+					for (size_t i = spanBegin; i < spanEnd; ++i)
+					{
+						if (notes.tick[i] + notes.gate[i] <= (uint32_t)cullTick) continue;
+						emitNote(i, true);
+					}
+				}
+			}
 		}
+
+		for (size_t i = noteBegin; i < noteEnd; ++i)
+			emitNote(i, false);
 	}
 
 	CommitAuras(keyFirst, keyLast);
@@ -1663,7 +1673,6 @@ void MIDIRendererMIDITrail::RenderNotesPacked()
 		noteCounterInfo->notesPerSecond = 0;
 	}
 
-	packedLastScanTick = scanStartTick;
 	lastTime = time;
 }
 
