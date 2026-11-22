@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.10b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.10b)
+**v1.11.11b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.11b)
 
 | Asset | Use it for |
 | --- | --- |
@@ -35,6 +35,8 @@ The standalone EXEs are **not complete portable packages**. Keep them beside you
 5. If a bad setting prevents startup, run `Comet.exe --safe-mode` (portable ZIP) or `Comet-Release.exe --safe-mode` (standalone) once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
 
 Supported archive wrappers include `7z`, `xz`, `lzma`, `zip`, `gz`, `bz2`, `zst`, `lz4`, `rar`, `tar`, and compressed tars. Layers can be nested, for example a `.mid.xz` inside a `.7z`. A plain `.mid.xz` can be streamed without being fully decompressed first.
+
+Split sets are opened from any part: `song.7z.001`, `song.part1.rar`, and old-style `song.rar` + `song.r00` sets. The selected MIDI entry is streamed out of 7z, zip, and rar archives instead of being unpacked whole, so the load is bounded by the notes it stores rather than the archive size. An entry with more notes than available memory allows fails with a size message; unnamed entries and nested containers fall back to in-memory extraction.
 
 ## What is different from normal Comet?
 
