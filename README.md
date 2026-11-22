@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.11b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.11b)
+**v1.11.12b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.12b)
 
 | Asset | Use it for |
 | --- | --- |
