@@ -941,7 +941,8 @@ namespace
 					}
 				}
 			}
-			// Old-style RAR sets: song.rar, song.r00, song.r01, ...
+			// Old-style RAR sets: song.rar, song.r00, song.r01, ... From a .rNN part, walk back
+			// to song.rar; from the first .rar, collect the .rNN parts that sit beside it.
 			else if (name.size() >= 4 && name[name.size() - 4] == '.'
 				&& (name[name.size() - 3] == 'r' || name[name.size() - 3] == 'R')
 				&& std::isdigit((unsigned char)name[name.size() - 2])
@@ -952,6 +953,23 @@ namespace
 				{
 					set.files.clear();
 					set.files.push_back(base);
+					for (int i = 0; ; i++)
+					{
+						const std::filesystem::path candidate = directory
+							/ (name.substr(0, name.size() - 4) + ".r" + PaddedNumber(i, 2));
+						if (!exists(candidate)) break;
+						set.files.push_back(candidate);
+					}
+				}
+			}
+			else if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".rar") == 0)
+			{
+				const std::filesystem::path second = directory
+					/ (name.substr(0, name.size() - 4) + ".r00");
+				if (exists(second))
+				{
+					set.files.clear();
+					set.files.push_back(path);
 					for (int i = 0; ; i++)
 					{
 						const std::filesystem::path candidate = directory

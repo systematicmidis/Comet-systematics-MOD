@@ -567,7 +567,8 @@ target_include_directories(CometArchiveRepeatRegression PRIVATE
     ${xz_SOURCE_DIR}/src/liblzma/api
     ${libarchive_SOURCE_DIR}/libarchive
 )
-target_compile_definitions(CometArchiveRepeatRegression PRIVATE LIBARCHIVE_STATIC NOMINMAX)
+target_compile_definitions(CometArchiveRepeatRegression PRIVATE LIBARCHIVE_STATIC NOMINMAX
+    COMET_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Tests/Data")
 target_precompile_headers(CometArchiveRepeatRegression PRIVATE Tests/TestPch.h)
 target_link_libraries(CometArchiveRepeatRegression PRIVATE
     archive_static

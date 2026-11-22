@@ -537,27 +537,29 @@ int main()
 		return 1;
 	}
 
-	// .partN.rar discovery must work from a later part, not only from part 1.
-	TempFile partOne{ std::filesystem::temp_directory_path() / "comet_stream_parts.part1.rar" };
-	TempFile partTwo{ std::filesystem::temp_directory_path() / "comet_stream_parts.part2.rar" };
-	if (!SplitFile(sevenZip.path, partOne.path, partTwo.path)
-		|| !CheckStreamedEntry(partTwo.path, streamedMidi))
+	// Real RAR sets, built once with WinRAR and checked in: a RAR5 .partN set and a genuine
+	// RAR4 .rar/.r00/.r01 set. Streaming must work from every part.
+	const std::filesystem::path rarFixtures = std::filesystem::path(COMET_TEST_DATA_DIR) / "RarVolumes";
+	std::ifstream rarSongFile(rarFixtures / "song.mid", std::ios::binary);
+	const std::vector<uint8_t> rarSong((std::istreambuf_iterator<char>(rarSongFile)),
+		std::istreambuf_iterator<char>());
+	if (rarSong.empty())
 	{
-		std::cerr << "FAIL: .part1.rar volume discovery failed" << std::endl;
+		std::cerr << "FAIL: could not read the RAR fixture MIDI" << std::endl;
 		return 1;
 	}
 
-	// Old-style rar sets use song.rar followed by song.r00, song.r01, ...
-	TempFile oldBase{ std::filesystem::temp_directory_path() / "comet_stream_old.rar" };
-	TempFile oldZero{ std::filesystem::temp_directory_path() / "comet_stream_old.r00" };
-	if (!SplitFile(sevenZip.path, oldBase.path, oldZero.path)
-		|| !ArchiveLoader::IsArchive(oldZero.path)
-		|| !CheckStreamedEntry(oldZero.path, streamedMidi))
+	for (const char* volume : { "split.part1.rar", "split.part2.rar", "split.part3.rar",
+		"old.rar", "old.r00", "old.r01" })
 	{
-		std::cerr << "FAIL: .r00 volume discovery failed" << std::endl;
-		return 1;
+		const std::filesystem::path path = rarFixtures / volume;
+		if (!std::filesystem::exists(path) || !CheckStreamedEntry(path, rarSong))
+		{
+			std::cerr << "FAIL: streaming from the RAR volume " << volume << " failed" << std::endl;
+			return 1;
+		}
 	}
 
-	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip streaming, selected entries, and split volumes" << std::endl;
+	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip/RAR streaming, selected entries, and split volumes" << std::endl;
 	return 0;
 }
