@@ -112,7 +112,7 @@ void MainWindow::OpenMIDIDialog()
 	std::string outPath;
 	// The CJCMCG chart is handled by the Settings MIDI tab. Archives and compressed MIDIs are
 	// accepted too; the loader picks the MIDI inside them.
-	Utils::ChooseFile(outPath, "mid,midi,kar,7z,zip,xz,lzma,gz,bz2,bzip2,zst,zstd,lz4,rar,tar,tgz,tbz,tbz2,txz,cab");
+	Utils::ChooseFile(outPath, "mid,midi,kar,7z,001,zip,xz,lzma,gz,bz2,bzip2,zst,zstd,lz4,rar,r00,tar,tgz,tbz,tbz2,txz,cab");
 	if (outPath.empty()) return;
 	LoadMIDIFile(outPath);
 }
