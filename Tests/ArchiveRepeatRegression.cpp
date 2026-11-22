@@ -21,6 +21,12 @@ namespace
 	constexpr uint64_t HUGE_NOTES = 270'000'000; // 1.08 GB of note-ons, above the old 1 GB stop
 	constexpr uint32_t TAIL_NOTES = 3;
 
+	// Enough tracks to force every parse worker to take several jobs. Half of them are exact
+	// copies, so this also checks streamed dedupe and multiplicity under concurrent parsing.
+	constexpr size_t MANY_TRACKS = 2048;
+	constexpr size_t MANY_UNIQUE_TRACKS = 1024;
+	constexpr size_t MANY_NOTES_PER_TRACK = 2;
+
 	class XzWriter
 	{
 	public:
@@ -238,6 +244,67 @@ namespace
 		};
 		bytes.insert(bytes.end(), chunk, chunk + sizeof(chunk));
 		bytes.insert(bytes.end(), track.begin(), track.end());
+		return bytes;
+	}
+
+	std::vector<uint8_t> BuildManyTrackMidi()
+	{
+		const uint16_t declaredTracks = (uint16_t)(MANY_TRACKS + 1);
+		const uint8_t header[] = {
+			'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1,
+			(uint8_t)(declaredTracks >> 8), (uint8_t)declaredTracks, 0, 0x60
+		};
+		const uint8_t tempo[] = {
+			'M', 'T', 'r', 'k', 0, 0, 0, 11,
+			0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,
+			0x00, 0xFF, 0x2F, 0x00
+		};
+
+		std::vector<uint8_t> bytes(header, header + sizeof(header));
+		bytes.insert(bytes.end(), tempo, tempo + sizeof(tempo));
+
+		auto addTrack = [&](const std::vector<uint8_t>& track)
+		{
+			const uint32_t length = (uint32_t)track.size();
+			const uint8_t chunk[] = {
+				'M', 'T', 'r', 'k',
+				(uint8_t)(length >> 24), (uint8_t)(length >> 16),
+				(uint8_t)(length >> 8), (uint8_t)length
+			};
+			bytes.insert(bytes.end(), chunk, chunk + sizeof(chunk));
+			bytes.insert(bytes.end(), track.begin(), track.end());
+		};
+
+		auto makeTrack = [](size_t index)
+		{
+			const uint8_t key = (uint8_t)(0x30 + index % 60);
+			const std::string name = "Stress " + std::to_string(index);
+			const uint8_t noteOn[] = { 0x00, 0x90, key, 0x64 };
+			const uint8_t noteOff[] = { 0x60, 0x80, key, 0x00 };
+			const uint8_t noteOn2[] = { 0x00, 0x90, (uint8_t)(key + 1), 0x64 };
+			const uint8_t noteOff2[] = { 0x60, 0x80, (uint8_t)(key + 1), 0x00 };
+			const uint8_t nameMeta[] = { 0x00, 0xFF, 0x03 };
+			const uint8_t end[] = { 0x00, 0xFF, 0x2F, 0x00 };
+
+			std::vector<uint8_t> track;
+			track.insert(track.end(), noteOn, noteOn + sizeof(noteOn));
+			track.insert(track.end(), noteOff, noteOff + sizeof(noteOff));
+			track.insert(track.end(), noteOn2, noteOn2 + sizeof(noteOn2));
+			track.insert(track.end(), noteOff2, noteOff2 + sizeof(noteOff2));
+			track.insert(track.end(), nameMeta, nameMeta + sizeof(nameMeta));
+			track.push_back((uint8_t)name.size());
+			track.insert(track.end(), name.begin(), name.end());
+			track.insert(track.end(), end, end + sizeof(end));
+			return track;
+		};
+
+		std::vector<std::vector<uint8_t>> uniqueTracks;
+		uniqueTracks.reserve(MANY_UNIQUE_TRACKS);
+		for (size_t i = 0; i < MANY_UNIQUE_TRACKS; i++)
+			uniqueTracks.push_back(makeTrack(i));
+		for (size_t i = 0; i < MANY_TRACKS; i++)
+			addTrack(uniqueTracks[i % MANY_UNIQUE_TRACKS]);
+
 		return bytes;
 	}
 
@@ -507,6 +574,66 @@ int main()
 		return 1;
 	}
 
+	// Many tracks in one streamed zip: the bounded parser queue must handle more jobs than there
+	// are workers, and exact copies must still be parsed once and counted with their multiplicity.
+	const std::vector<uint8_t> manyTrackMidi = BuildManyTrackMidi();
+	TempFile manyTracksZip{ std::filesystem::temp_directory_path() / "comet_many_tracks_stream.zip" };
+	if (manyTrackMidi.empty()
+		|| !WriteArchiveEntry(manyTracksZip.path, false, "many.mid", manyTrackMidi))
+	{
+		std::cerr << "FAIL: could not build the many-track streamed zip" << std::endl;
+		return 1;
+	}
+
+	MultithreadedMIDILoader manyTracksLoader(manyTracksZip.path.string().c_str());
+	manyTracksLoader.SetArchiveEntry("many.mid");
+	manyTracksLoader.SetLayeredDedupe(true, true);
+	const auto manyTracks = manyTracksLoader.Load();
+	bool manyCopiesOk = manyTracks && manyTracks->trackCopies.size() == MANY_UNIQUE_TRACKS;
+	if (manyCopiesOk)
+	{
+		for (uint16_t copies : manyTracks->trackCopies)
+		{
+			if (copies != MANY_TRACKS / MANY_UNIQUE_TRACKS)
+			{
+				manyCopiesOk = false;
+				break;
+			}
+		}
+	}
+	bool manyStoredIndexOk = manyTracks
+		&& manyTracks->noteTrackStoredIndex.size() == MANY_UNIQUE_TRACKS;
+	for (size_t i = 0; manyStoredIndexOk && i < MANY_UNIQUE_TRACKS; i++)
+	{
+		if (manyTracks->noteTrackStoredIndex[i] != (int)i)
+			manyStoredIndexOk = false;
+	}
+	const uint64_t expectedManyNotes =
+		(uint64_t)MANY_TRACKS * MANY_NOTES_PER_TRACK;
+	if (!manyTracks || manyTracks->notes != (long long)expectedManyNotes
+		|| manyTracks->trackCount != (uint16_t)(MANY_TRACKS + 1)
+		|| manyTracks->noteTrackCount != MANY_UNIQUE_TRACKS
+		|| manyTracks->noteTrackNames.size() != MANY_UNIQUE_TRACKS
+		|| !manyCopiesOk || !manyStoredIndexOk
+		|| manyTracks->noteTrackNames.front() != "Stress 0"
+		|| manyTracks->noteTrackNames.back() != "Stress 1023")
+	{
+		std::cerr << "FAIL: the many-track streamed zip lost tracks, notes, or repeats" << std::endl;
+		if (manyTracks)
+		{
+			std::cerr << "  notes=" << manyTracks->notes
+				<< " tracks=" << manyTracks->trackCount
+				<< " noteTracks=" << manyTracks->noteTrackCount
+				<< " storedIndex=" << manyTracks->noteTrackStoredIndex.size()
+				<< " names=" << manyTracks->noteTrackNames.size()
+				<< " copies=" << manyTracks->trackCopies.size()
+				<< " first=\"" << (manyTracks->noteTrackNames.empty() ? "" : manyTracks->noteTrackNames.front())
+				<< "\" last=\"" << (manyTracks->noteTrackNames.empty() ? "" : manyTracks->noteTrackNames.back())
+				<< "\"" << std::endl;
+		}
+		return 1;
+	}
+
 	// A .mid.xz entry is unwrapped by the same stream.
 	const std::vector<uint8_t> compressedMidi = CompressXz(streamedMidi);
 	TempFile nestedZip{ std::filesystem::temp_directory_path() / "comet_stream_nested.zip" };
@@ -560,6 +687,6 @@ int main()
 		}
 	}
 
-	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip/RAR streaming, selected entries, and split volumes" << std::endl;
+	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip/RAR streaming, selected entries, split volumes, and 2048-track zip stress" << std::endl;
 	return 0;
 }

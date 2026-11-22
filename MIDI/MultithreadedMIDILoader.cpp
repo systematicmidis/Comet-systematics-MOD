@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <condition_variable>
+#include <deque>
+#include <exception>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <cstdio>
@@ -64,6 +68,14 @@ namespace
 	std::filesystem::path Utf8Path(const std::string& utf8)
 	{
 		return std::filesystem::path(reinterpret_cast<const char8_t*>(utf8.c_str()));
+	}
+
+	// Destroying a joinable std::thread calls std::terminate, so every partial worker set must be
+	// joined before an exception leaves the scope that owns it.
+	void JoinWorkers(std::vector<std::thread>& workers)
+	{
+		for (std::thread& worker : workers)
+			if (worker.joinable()) worker.join();
 	}
 }
 
@@ -407,33 +419,41 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		std::vector<std::thread> workers;
 		workers.reserve(numThreads);
 
-		for (size_t workerIdx = 0; workerIdx < numThreads; workerIdx++)
+		try
 		{
-			workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, &parsedOrigin, trackCount]()
-				{
-					// Large tracks differ wildly in size. Take one at a time so a worker that gets a
-					// huge track cannot strand a whole block behind it; tiny-track files keep batching.
-					const size_t BLOCK = trackCount > 2048 ? 32 : 1;
-					size_t start;
-					while ((start = nextTrack.fetch_add(BLOCK, std::memory_order_relaxed)) < trackCount)
+			for (size_t workerIdx = 0; workerIdx < numThreads; workerIdx++)
+			{
+				workers.emplace_back([this, &rawChunks, &parsedTrackResults, &nextTrack, &parsedOrigin, trackCount]()
 					{
-						const size_t end = std::min(trackCount, start + BLOCK);
-						for (size_t idx = start; idx < end; idx++)
+						// Large tracks differ wildly in size. Take one at a time so a worker that gets a
+						// huge track cannot strand a whole block behind it; tiny-track files keep batching.
+						const size_t BLOCK = trackCount > 2048 ? 32 : 1;
+						size_t start;
+						while ((start = nextTrack.fetch_add(BLOCK, std::memory_order_relaxed)) < trackCount)
 						{
-							if (!running) break;
-							// A repeat is filled in from its origin once every original has been parsed.
-							if (parsedOrigin[idx] != idx) continue;
-							parsedTrackResults[idx] = ParseTrackData(rawChunks[idx]);
-							tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+							const size_t end = std::min(trackCount, start + BLOCK);
+							for (size_t idx = start; idx < end; idx++)
+							{
+								if (!running) break;
+								// A repeat is filled in from its origin once every original has been parsed.
+								if (parsedOrigin[idx] != idx) continue;
+								parsedTrackResults[idx] = ParseTrackData(rawChunks[idx]);
+								tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+							}
 						}
-					}
-				});
+					});
+			}
+		}
+		catch (...)
+		{
+			// A worker could not be created. Stop the ones that did start and join them before
+			// reporting the failure; otherwise their destructors would terminate the process.
+			running = false;
+			JoinWorkers(workers);
+			throw;
 		}
 
-		for (auto& worker : workers)
-		{
-			if (worker.joinable()) worker.join();
-		}
+		JoinWorkers(workers);
 
 		// Origins always sit before their repeats, so one ascending pass fills every copy.
 		for (size_t i = 0; i < trackCount; i++)
@@ -693,11 +713,19 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 
 	std::vector<std::thread> blockThreads;
 	blockThreads.reserve(blockWorkers > 1 ? blockWorkers : 0);
-	for (size_t i = 1; i < blockWorkers; i++)
-		blockThreads.emplace_back(buildKeyBlocks);
+	try
+	{
+		for (size_t i = 1; i < blockWorkers; i++)
+			blockThreads.emplace_back(buildKeyBlocks);
+	}
+	catch (...)
+	{
+		// If a worker cannot be created, join the ones that did start. The caller then does the
+		// remaining keys itself, so a thread shortage cannot fail an otherwise valid load.
+		JoinWorkers(blockThreads);
+	}
 	buildKeyBlocks();
-	for (auto& thread : blockThreads)
-		if (thread.joinable()) thread.join();
+	JoinWorkers(blockThreads);
 
 	seq->noteBlocks = std::move(noteBlockArray);
 	}
@@ -782,8 +810,6 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	constexpr uint64_t NOTE_BYTES = 3 * sizeof(uint32_t);
 	const uint64_t memoryBudget = ArchiveLoader::MemoryBudget();
 	const uint64_t noteBudget = memoryBudget / NOTE_BYTES;
-	uint64_t storedNotes = 0;
-
 	struct SeenTrack
 	{
 		uint64_t hash = 0;
@@ -793,93 +819,252 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	};
 
 	std::vector<SeenTrack> seen;
-	std::vector<ParsedTrack> parsed;
+	seen.reserve(declaredTracks);
+	std::vector<ParsedTrack> parsed(declaredTracks);
 	std::vector<uint8_t> chunk;
 
 	uint64_t repeatedTracks = 0;
+	size_t uniqueTracks = 0;
 
-	size_t index = 0;
-	for (; index < declaredTracks && running; index++)
+	std::atomic<uint64_t> storedNotes{ 0 };
+	std::atomic<uint64_t> inFlightPossible{ 0 };
+	std::atomic<bool> budgetExceeded{ false };
+	std::atomic<uint64_t> budgetNotes{ 0 };
+	std::exception_ptr workerError;
+
+	struct ParseJob
 	{
-		uint32_t window = 0;
-		bool found = false;
-		uint8_t byte = 0;
-		while (readExact(&byte, 1) == 1)
+		std::vector<uint8_t> chunk;
+		size_t parsedIndex = 0;
+		uint64_t possibleNotes = 0;
+		bool collapse = false;
+	};
+
+	std::mutex queueMutex;
+	std::condition_variable queueReady;
+	std::condition_variable queueSpace;
+	std::deque<ParseJob> queue;
+	uint64_t queuedBytes = 0;
+	bool readingDone = false;
+	constexpr uint64_t MAX_QUEUED_BYTES = 64ull << 20;
+
+	unsigned hardwareThreads = std::thread::hardware_concurrency();
+	if (hardwareThreads == 0) hardwareThreads = 8;
+#ifdef _DEBUG
+	// The debug CRT serializes heap allocations; worker parsing made this slower than one thread.
+	hardwareThreads = 1;
+#endif
+	const size_t workerCount = std::max<size_t>(1,
+		std::min<size_t>(hardwareThreads, declaredTracks ? declaredTracks : 1));
+
+	auto parseWorker = [&]()
+	{
+		for (;;)
 		{
-			window = (window << 8) | byte;
-			if (window == 0x4D54726Bu)
+			ParseJob job;
 			{
-				found = true;
+				std::unique_lock<std::mutex> lock(queueMutex);
+				queueReady.wait(lock, [&]() { return !queue.empty() || readingDone || !running; });
+				if (queue.empty())
+				{
+					if (readingDone || !running) return;
+					continue;
+				}
+				job = std::move(queue.front());
+				queue.pop_front();
+				queuedBytes -= job.chunk.size();
+				queueSpace.notify_one();
+			}
+
+			if (!running) return;
+
+			try
+			{
+				ParsedTrack track = ParseTrackData(
+					{ job.chunk.data(), job.chunk.size(), job.parsedIndex },
+					16u << 20, job.collapse);
+				const uint64_t actualNotes = track.notes.Size();
+				storedNotes.fetch_add(actualNotes, std::memory_order_relaxed);
+				inFlightPossible.fetch_sub(job.possibleNotes, std::memory_order_relaxed);
+				const uint64_t totalNotes = storedNotes.load(std::memory_order_relaxed);
+				if (totalNotes > noteBudget)
+				{
+					budgetNotes.store(totalNotes, std::memory_order_relaxed);
+					budgetExceeded.store(true, std::memory_order_relaxed);
+					running = false;
+					queueReady.notify_all();
+					queueSpace.notify_all();
+					return;
+				}
+				parsed[job.parsedIndex] = std::move(track);
+				tracksProcessed.fetch_add(1, std::memory_order_relaxed);
+			}
+			catch (...)
+			{
+				{
+					std::lock_guard<std::mutex> lock(queueMutex);
+					if (!workerError) workerError = std::current_exception();
+				}
+				running = false;
+				queueReady.notify_all();
+				queueSpace.notify_all();
+				return;
+			}
+		}
+	};
+
+	std::vector<std::thread> parseWorkers;
+	parseWorkers.reserve(workerCount);
+	try
+	{
+		for (size_t worker = 0; worker < workerCount; worker++)
+			parseWorkers.emplace_back(parseWorker);
+	}
+	catch (...)
+	{
+		// Wake and join any workers that did start before reporting the startup failure.
+		{
+			std::lock_guard<std::mutex> lock(queueMutex);
+			readingDone = true;
+		}
+		running = false;
+		queueReady.notify_all();
+		queueSpace.notify_all();
+		JoinWorkers(parseWorkers);
+		throw;
+	}
+
+	auto enqueue = [&](ParseJob&& job) -> bool
+	{
+		const size_t bytes = job.chunk.size();
+		std::unique_lock<std::mutex> lock(queueMutex);
+		queueSpace.wait(lock, [&]()
+			{
+				return !running || queue.empty() || queuedBytes + bytes <= MAX_QUEUED_BYTES;
+			});
+		if (!running) return false;
+		queuedBytes += bytes;
+		queue.push_back(std::move(job));
+		queueReady.notify_one();
+		return true;
+	};
+
+	std::exception_ptr readError;
+	try
+	{
+		size_t index = 0;
+		for (; index < declaredTracks && running; index++)
+		{
+			uint32_t window = 0;
+			bool found = false;
+			uint8_t byte = 0;
+			while (readExact(&byte, 1) == 1)
+			{
+				window = (window << 8) | byte;
+				if (window == 0x4D54726Bu)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found) break;
+
+			uint8_t lengthBytes[4]{};
+			if (readExact(lengthBytes, 4) != 4) break;
+			const uint64_t length = ToInt(lengthBytes);
+
+			// One track is held at a time, but it still has to fit in the space the platform can give.
+			if (length > memoryBudget)
+				throw std::runtime_error("A track inside this archive is larger than Comet can buffer in memory on this machine.");
+
+			// Note-ons and note-offs take at least six bytes together, so this bounds what the track
+			// can contribute before any of it is read. Include tracks already queued for parsing.
+			const uint64_t possibleNotes = length / 6 + 1;
+			const uint64_t plannedNotes = storedNotes.load(std::memory_order_relaxed)
+				+ inFlightPossible.load(std::memory_order_relaxed) + possibleNotes;
+			if (plannedNotes > noteBudget)
+			{
+				budgetNotes.store(plannedNotes, std::memory_order_relaxed);
+				budgetExceeded.store(true, std::memory_order_relaxed);
+				running = false;
 				break;
 			}
-		}
-		if (!found) break;
 
-		uint8_t lengthBytes[4]{};
-		if (readExact(lengthBytes, 4) != 4) break;
-		const uint64_t length = ToInt(lengthBytes);
+			chunk.assign((size_t)length, 0);
+			const size_t got = readExact(chunk.data(), chunk.size());
+			chunk.resize(got);
 
-		// One track is held at a time, but it still has to fit in the space the platform can give.
-		if (length > memoryBudget)
-			throw std::runtime_error("A track inside this archive is larger than Comet can buffer in memory on this machine.");
-
-		// Note-ons and note-offs take at least six bytes together, so this bounds what the track
-		// can contribute before any of it is read.
-		const uint64_t possibleNotes = length / 6 + 1;
-		if (storedNotes + possibleNotes > noteBudget)
-			throw std::runtime_error(StreamedNoteLimit(storedNotes + possibleNotes, noteBudget));
-
-		chunk.assign((size_t)length, 0);
-		const size_t got = readExact(chunk.data(), chunk.size());
-		chunk.resize(got);
-
-		// Word-at-a-time FNV. Byte-at-a-time took long enough to notice on a multi-gigabyte
-		// repeated track.
-		uint64_t hash = 1469598103934665603ull ^ (uint64_t)got;
-		{
-			size_t at = 0;
-			for (; at + 8 <= chunk.size(); at += 8)
+			// Word-at-a-time FNV. Byte-at-a-time took long enough to notice on a multi-gigabyte
+			// repeated track.
+			uint64_t hash = 1469598103934665603ull ^ (uint64_t)got;
 			{
-				uint64_t word = 0;
-				std::memcpy(&word, chunk.data() + at, 8);
-				hash = (hash ^ word) * 1099511628211ull;
+				size_t at = 0;
+				for (; at + 8 <= chunk.size(); at += 8)
+				{
+					uint64_t word = 0;
+					std::memcpy(&word, chunk.data() + at, 8);
+					hash = (hash ^ word) * 1099511628211ull;
+				}
+				for (; at < chunk.size(); at++)
+					hash = (hash ^ chunk[at]) * 1099511628211ull;
 			}
-			for (; at < chunk.size(); at++)
-				hash = (hash ^ chunk[at]) * 1099511628211ull;
-		}
 
-		auto match = std::find_if(seen.begin(), seen.end(), [hash, got](const SeenTrack& entry)
+			auto match = std::find_if(seen.begin(), seen.end(), [hash, got](const SeenTrack& entry)
+				{
+					return entry.hash == hash && entry.length == got;
+				});
+
+			if (match != seen.end())
 			{
-				return entry.hash == hash && entry.length == got;
-			});
+				// Every copy is read and counted. Stopping early would silently drop any track that
+				// comes after the repeats, so the whole archive is always walked to the end.
+				match->multiplicity++;
+				repeatedTracks++;
 
-		if (match != seen.end())
-		{
-			// Every copy is read and counted. Stopping early would silently drop any track that
-			// comes after the repeats, so the whole archive is always walked to the end.
-			match->multiplicity++;
-			repeatedTracks++;
+				chunk.clear();
+				continue;
+			}
 
-			chunk.clear();
-			continue;
+			// Only a single pathological track (hundreds of MB of the same note) needs the collapse;
+			// normal files keep every note-on so their on/off pairs stay exact.
+			const bool hugeTrack = chunk.size() > (256ull << 20);
+			const size_t parsedIndex = uniqueTracks++;
+			inFlightPossible.fetch_add(possibleNotes, std::memory_order_relaxed);
+
+			ParseJob job;
+			job.chunk = std::move(chunk);
+			job.parsedIndex = parsedIndex;
+			job.possibleNotes = possibleNotes;
+			job.collapse = hugeTrack;
+			if (!enqueue(std::move(job))) break;
+
+			seen.push_back({ hash, got, parsedIndex, 1 });
 		}
-
-		// Only a single pathological track (hundreds of MB of the same note) needs the collapse;
-		// normal files keep every note-on so their on/off pairs stay exact.
-		const bool hugeTrack = chunk.size() > (256ull << 20);
-		ParsedTrack track = ParseTrackData({ chunk.data(), chunk.size(), parsed.size() }, 16u << 20, hugeTrack);
-		seen.push_back({ hash, got, parsed.size(), 1 });
-		storedNotes += track.notes.Size();
-		parsed.push_back(std::move(track));
-		if (storedNotes > noteBudget)
-			throw std::runtime_error(StreamedNoteLimit(storedNotes, noteBudget));
-		tracksProcessed.fetch_add(1, std::memory_order_relaxed);
-
-		chunk.clear();
-		chunk.shrink_to_fit();
-
-		if (!running) break;
 	}
+	catch (...)
+	{
+		readError = std::current_exception();
+		running = false;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(queueMutex);
+		readingDone = true;
+	}
+	queueReady.notify_all();
+	queueSpace.notify_all();
+	for (auto& worker : parseWorkers)
+		if (worker.joinable()) worker.join();
+
+	if (readError) std::rethrow_exception(readError);
+	if (budgetExceeded.load(std::memory_order_relaxed))
+		throw std::runtime_error(StreamedNoteLimit(budgetNotes.load(std::memory_order_relaxed), noteBudget));
+	if (workerError) std::rethrow_exception(workerError);
+	if (storedNotes.load(std::memory_order_relaxed) > noteBudget)
+		throw std::runtime_error(StreamedNoteLimit(storedNotes.load(std::memory_order_relaxed), noteBudget));
+
+	parsed.resize(uniqueTracks);
+
 
 	ClearBars();
 	if (!running) return seq;
@@ -896,6 +1081,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	int noteTrackIdx = 0;
 	int trackIdx = 0;
 	std::vector<int> noteTrackStoredIndex;
+	// Repeated tracks share one parsed slot, and the owner below moves its notes out. Assemble
+	// each slot only once; later entries carry the repeat count for that same slot.
+	std::vector<bool> assembled(uniqueTracks, false);
 
 	std::vector<std::vector<MIDIMessageEvent>> eventsToMerge;
 	eventsToMerge.reserve(seen.size());
@@ -909,37 +1097,43 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		if (trackRes.multiChannel)
 			illegalTracks.push_back(trackIdx);
 
-		if (!trackRes.notes.Empty() || trackRes.repeatedNotes > 0)
+		const bool firstOccurrence = !assembled[entry.parsedIndex];
+		if (firstOccurrence)
 		{
-			// Count every copy the file contains, but keep one copy of the notes.
-			seq->notes += (size_t)((uint64_t)(trackRes.notes.Size() + trackRes.repeatedNotes) * entry.multiplicity);
+			assembled[entry.parsedIndex] = true;
 
-			const uint32_t trackMask = NOTE_TRACK_MASK << NOTE_TRACK_BIT_IDX;
-			for (uint32_t& packed : trackRes.notes.packed)
-				packed = (packed & ~trackMask)
-				| ((noteTrackIdx & NOTE_TRACK_MASK) << NOTE_TRACK_BIT_IDX);
+			if (!trackRes.notes.Empty() || trackRes.repeatedNotes > 0)
+			{
+				// Count every copy the file contains, but keep one copy of the notes.
+				seq->notes += (size_t)((uint64_t)(trackRes.notes.Size() + trackRes.repeatedNotes) * entry.multiplicity);
 
-			seq->noteTrackNames.push_back(trackRes.name);
-			noteTrackIdx++;
-			const uint64_t storedNotes = trackRes.notes.Size();
-			const uint64_t noteWeight = storedNotes == 0 ? 1
-				: 1 + trackRes.repeatedNotes / storedNotes;
-			noteTrackStoredIndex.push_back((int)seq->trackNotes.size());
-			seq->trackNotes.push_back(std::move(trackRes.notes));
-			seq->trackCopies.push_back((uint16_t)std::min<uint64_t>(entry.multiplicity, UINT16_MAX));
-			seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
+				const uint32_t trackMask = NOTE_TRACK_MASK << NOTE_TRACK_BIT_IDX;
+				for (uint32_t& packed : trackRes.notes.packed)
+					packed = (packed & ~trackMask)
+					| ((noteTrackIdx & NOTE_TRACK_MASK) << NOTE_TRACK_BIT_IDX);
+
+				seq->noteTrackNames.push_back(trackRes.name);
+				noteTrackIdx++;
+				const uint64_t storedNotes = trackRes.notes.Size();
+				const uint64_t noteWeight = storedNotes == 0 ? 1
+					: 1 + trackRes.repeatedNotes / storedNotes;
+				noteTrackStoredIndex.push_back((int)seq->trackNotes.size());
+				seq->trackNotes.push_back(std::move(trackRes.notes));
+				seq->trackCopies.push_back((uint16_t)std::min<uint64_t>(entry.multiplicity, UINT16_MAX));
+				seq->trackNoteWeights.push_back((uint16_t)std::min<uint64_t>(noteWeight, UINT16_MAX));
+			}
+
+			if (!trackRes.messages.empty())
+				eventsToMerge.push_back(std::move(trackRes.messages));
+
+			if (!trackRes.tempos.empty())
+				seq->tempos.insert(seq->tempos.end(), trackRes.tempos.begin(), trackRes.tempos.end());
+
+			if (!trackRes.timeSignatures.empty())
+				seq->timeSignatures.insert(seq->timeSignatures.end(), trackRes.timeSignatures.begin(), trackRes.timeSignatures.end());
+			else
+				seq->timeSignatures.emplace_back(0, 4, 4);
 		}
-
-		if (!trackRes.messages.empty())
-			eventsToMerge.push_back(std::move(trackRes.messages));
-
-		if (!trackRes.tempos.empty())
-			seq->tempos.insert(seq->tempos.end(), trackRes.tempos.begin(), trackRes.tempos.end());
-
-		if (!trackRes.timeSignatures.empty())
-			seq->timeSignatures.insert(seq->timeSignatures.end(), trackRes.timeSignatures.begin(), trackRes.timeSignatures.end());
-		else
-			seq->timeSignatures.emplace_back(0, 4, 4);
 
 		trackIdx++;
 	}
@@ -1064,11 +1258,19 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 
 	std::vector<std::thread> blockThreads;
 	blockThreads.reserve(blockWorkers > 1 ? blockWorkers : 0);
-	for (size_t i = 1; i < blockWorkers; i++)
-		blockThreads.emplace_back(buildKeyBlocks);
+	try
+	{
+		for (size_t i = 1; i < blockWorkers; i++)
+			blockThreads.emplace_back(buildKeyBlocks);
+	}
+	catch (...)
+	{
+		// If a worker cannot be created, join the ones that did start. The caller then does the
+		// remaining keys itself, so a thread shortage cannot fail an otherwise valid load.
+		JoinWorkers(blockThreads);
+	}
 	buildKeyBlocks();
-	for (auto& thread : blockThreads)
-		if (thread.joinable()) thread.join();
+	JoinWorkers(blockThreads);
 
 	seq->noteBlocks = std::move(noteBlockArray);
 	}
