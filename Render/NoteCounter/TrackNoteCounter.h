@@ -76,7 +76,13 @@ public:
 					// Remembered while the note plays, so polyphony never has to look at notes that
 					// started long ago again. A single long note used to pin the first 1,024-note block
 					// and make every frame re-walk millions of already-finished notes.
-					soundingEnds[key].push_back(notes.tick[cursor] + notes.gate[cursor]);
+					//
+					// Only notes that are still sounding are recorded. A forward seek advances the cursor
+					// past everything it skipped, and those notes have already ended, so recording them
+					// would build a list as long as the jump only to prune it on the same frame.
+					const uint32_t noteEnd = notes.tick[cursor] + notes.gate[cursor];
+					if ((double)noteEnd > threshold)
+						soundingEnds[key].push_back(noteEnd);
 				}
 
 				++cursor;
