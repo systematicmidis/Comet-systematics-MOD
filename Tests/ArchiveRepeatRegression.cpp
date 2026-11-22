@@ -216,24 +216,39 @@ namespace
 		return (bool)file;
 	}
 
-	std::vector<uint8_t> BuildStreamedMidi()
+	std::vector<uint8_t> BuildStreamedMidi(uint8_t key = 0x3C, size_t noteCount = 1)
 	{
 		const uint8_t header[] = { 'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 0x60 };
-		const uint8_t track[] = {
-			0x00, 0x90, 0x3C, 0x64,
-			0x60, 0x80, 0x3C, 0x00,
-			0x00, 0xFF, 0x2F, 0x00
-		};
+		const uint8_t end[] = { 0x00, 0xFF, 0x2F, 0x00 };
 
+		std::vector<uint8_t> track;
+		for (size_t i = 0; i < noteCount; i++)
+		{
+			const uint8_t note[] = { 0x00, 0x90, key, 0x64, 0x60, 0x80, key, 0x00 };
+			track.insert(track.end(), note, note + sizeof(note));
+		}
+		track.insert(track.end(), end, end + sizeof(end));
+
+		const uint32_t length = (uint32_t)track.size();
 		std::vector<uint8_t> bytes(header, header + sizeof(header));
-		const uint8_t chunk[] = { 'M', 'T', 'r', 'k', 0, 0, 0, (uint8_t)sizeof(track) };
+		const uint8_t chunk[] = {
+			'M', 'T', 'r', 'k',
+			(uint8_t)(length >> 24), (uint8_t)(length >> 16),
+			(uint8_t)(length >> 8), (uint8_t)length
+		};
 		bytes.insert(bytes.end(), chunk, chunk + sizeof(chunk));
-		bytes.insert(bytes.end(), track, track + sizeof(track));
+		bytes.insert(bytes.end(), track.begin(), track.end());
 		return bytes;
 	}
 
-	bool WriteArchiveEntry(const std::filesystem::path& path, bool sevenZip, const char* name,
-		const std::vector<uint8_t>& bytes)
+	struct ArchiveTestEntry
+	{
+		std::string name;
+		std::vector<uint8_t> bytes;
+	};
+
+	bool WriteArchiveEntries(const std::filesystem::path& path, bool sevenZip,
+		const std::vector<ArchiveTestEntry>& entries)
 	{
 		archive* a = archive_write_new();
 		if (a == nullptr) return false;
@@ -242,22 +257,29 @@ namespace
 			: archive_write_set_format_zip(a) == ARCHIVE_OK;
 		ok = ok && archive_write_open_filename(a, path.string().c_str()) == ARCHIVE_OK;
 
-		if (ok)
+		for (size_t i = 0; ok && i < entries.size(); i++)
 		{
 			archive_entry* entry = archive_entry_new();
-			archive_entry_set_pathname(entry, name);
+			archive_entry_set_pathname(entry, entries[i].name.c_str());
 			archive_entry_set_filetype(entry, AE_IFREG);
 			archive_entry_set_perm(entry, 0644);
-			archive_entry_set_size(entry, (la_int64_t)bytes.size());
+			archive_entry_set_size(entry, (la_int64_t)entries[i].bytes.size());
 			ok = archive_write_header(a, entry) == ARCHIVE_OK;
-			if (ok && !bytes.empty())
-				ok = archive_write_data(a, bytes.data(), bytes.size()) == (la_ssize_t)bytes.size();
+			if (ok && !entries[i].bytes.empty())
+				ok = archive_write_data(a, entries[i].bytes.data(), entries[i].bytes.size())
+					== (la_ssize_t)entries[i].bytes.size();
 			archive_entry_free(entry);
 		}
 
 		archive_write_close(a);
 		archive_write_free(a);
 		return ok;
+	}
+
+	bool WriteArchiveEntry(const std::filesystem::path& path, bool sevenZip, const char* name,
+		const std::vector<uint8_t>& bytes)
+	{
+		return WriteArchiveEntries(path, sevenZip, { { name, bytes } });
 	}
 
 	std::vector<uint8_t> CompressXz(const std::vector<uint8_t>& bytes)
@@ -404,6 +426,71 @@ int main()
 		return 1;
 	}
 
+	// Several MIDIs in one 7z: the selected entry, not the first or largest, must load.
+	const std::vector<uint8_t> otherMidi = BuildStreamedMidi(0x40, 3);
+	TempFile multiEntry{ std::filesystem::temp_directory_path() / "comet_stream_multi.7z" };
+	if (!WriteArchiveEntries(multiEntry.path, true,
+		{ { "first.mid", streamedMidi }, { "second.mid", otherMidi } }))
+	{
+		std::cerr << "FAIL: could not build the multi-entry 7z" << std::endl;
+		return 1;
+	}
+
+	const auto listed = ArchiveLoader::ListMidiEntries(multiEntry.path);
+	if (listed.size() != 2)
+	{
+		std::cerr << "FAIL: expected two MIDI entries, got " << listed.size() << std::endl;
+		return 1;
+	}
+
+	std::string chosenError;
+	auto chosenStream = ArchiveLoader::OpenStream(multiEntry.path, chosenError, "second.mid");
+	std::vector<uint8_t> chosenBytes;
+	if (chosenStream)
+	{
+		uint8_t buffer[8192];
+		for (;;)
+		{
+			const size_t read = chosenStream->Read(buffer, sizeof(buffer));
+			if (read == 0) break;
+			chosenBytes.insert(chosenBytes.end(), buffer, buffer + read);
+		}
+	}
+	if (!chosenStream || !chosenStream->Ok() || chosenBytes != otherMidi)
+	{
+		std::cerr << "FAIL: the requested 7z entry was not streamed" << std::endl;
+		return 1;
+	}
+
+	MultithreadedMIDILoader selectedLoader(multiEntry.path.string().c_str());
+	selectedLoader.SetArchiveEntry("second.mid");
+	const auto selected = selectedLoader.Load();
+	const NoteSequence* selectedNotes = nullptr;
+	if (selected)
+	{
+		for (const NoteSequence& notes : selected->mergedNotes)
+		{
+			if (!notes.Empty())
+			{
+				selectedNotes = &notes;
+				break;
+			}
+		}
+	}
+	if (!selected || selected->notes != 3 || selectedNotes == nullptr
+		|| selectedNotes->GetKey(0) != 0x40 || selectedNotes->Size() != 3)
+	{
+		std::cerr << "FAIL: the loader did not parse the selected 7z entry" << std::endl;
+		return 1;
+	}
+
+	// With no selection the larger MIDI wins; the second one has three notes.
+	if (!CheckStreamedEntry(multiEntry.path, otherMidi))
+	{
+		std::cerr << "FAIL: automatic 7z entry selection did not take the largest" << std::endl;
+		return 1;
+	}
+
 	TempFile streamedZip{ std::filesystem::temp_directory_path() / "comet_stream_regression.zip" };
 	if (!WriteArchiveEntry(streamedZip.path, false, "song.mid", streamedMidi)
 		|| !CheckStreamedEntry(streamedZip.path, streamedMidi))
@@ -450,6 +537,27 @@ int main()
 		return 1;
 	}
 
-	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip streaming, and split volumes" << std::endl;
+	// .partN.rar discovery must work from a later part, not only from part 1.
+	TempFile partOne{ std::filesystem::temp_directory_path() / "comet_stream_parts.part1.rar" };
+	TempFile partTwo{ std::filesystem::temp_directory_path() / "comet_stream_parts.part2.rar" };
+	if (!SplitFile(sevenZip.path, partOne.path, partTwo.path)
+		|| !CheckStreamedEntry(partTwo.path, streamedMidi))
+	{
+		std::cerr << "FAIL: .part1.rar volume discovery failed" << std::endl;
+		return 1;
+	}
+
+	// Old-style rar sets use song.rar followed by song.r00, song.r01, ...
+	TempFile oldBase{ std::filesystem::temp_directory_path() / "comet_stream_old.rar" };
+	TempFile oldZero{ std::filesystem::temp_directory_path() / "comet_stream_old.r00" };
+	if (!SplitFile(sevenZip.path, oldBase.path, oldZero.path)
+		|| !ArchiveLoader::IsArchive(oldZero.path)
+		|| !CheckStreamedEntry(oldZero.path, streamedMidi))
+	{
+		std::cerr << "FAIL: .r00 volume discovery failed" << std::endl;
+		return 1;
+	}
+
+	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip streaming, selected entries, and split volumes" << std::endl;
 	return 0;
 }
