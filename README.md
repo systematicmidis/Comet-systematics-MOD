@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.12b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.12b)
+**v1.11.13b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.13b)
 
 | Asset | Use it for |
 | --- | --- |
@@ -68,6 +68,7 @@ This table compares this MOD with the upstream [MrCHB1/Comet](https://github.com
 
 Representative development-machine results, not guarantees:
 
+- A 3,631,355,706-byte MIDI inside a 45 MB ZIP: **16.50 s** on the pre-fix Release build, **5.12 s** with the parallel streamed parser (452,646,702 notes, 31,483 unique tracks, 4,599 repeated tracks; 12 hardware threads). A rerun while other CPU-heavy applications were active measured 7.6–8.5 s, so use the quiet-machine figure for comparisons.
 - 100,000,000-note test MIDI: **628 ms** to load in the current Release build, with the full 100,000,000 count. The same 763 MB file takes Ziggy **918.563 ms** to parse on the same machine, so Comet's packed load is faster on this workload.
 - 4,101,001-note packed test: about 134 ms raw and 168 ms from `.xz`.
 - Four-layer 35-trillion-note archive: about 11.4–11.9 seconds to prove and load, with the full repeated count preserved.
@@ -111,7 +112,7 @@ cmake --build --preset x64-release --parallel 2 --target CometMergeEquivalence C
 ctest --test-dir out/build/x64-release -R "merge_equivalence|archive_repeat_regression" --output-on-failure
 ```
 
-The archive regression test builds its own synthetic archive and a small raw MIDI with repeated tracks, so it does not need the large test files from the development folder.
+The archive regression test builds its own synthetic archives, including a many-track streamed ZIP with exact duplicate tracks, so it does not need the large test files from the development folder.
 
 ## Troubleshooting
 
