@@ -64,6 +64,10 @@ public:
 		std::atomic<uint64_t>* total = nullptr,
 		const std::string& preferredEntry = {});
 
+	// Bytes of decompressed data the in-memory extractor will accept on this machine. Streamed
+	// entries use it as the note-store ceiling too, since notes are what they still keep.
+	static uint64_t MemoryBudget();
+
 	// Risky fast dedup: stop decoding a layer once its first tile has repeated and the rest of the
 	// layer divides exactly by that tile's size. Wrong on a layer made of different tiles that
 	// happen to fit, which is why it is off unless the user turns it on for a session.

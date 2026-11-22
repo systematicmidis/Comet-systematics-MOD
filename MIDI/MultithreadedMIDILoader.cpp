@@ -6,6 +6,7 @@
 #include <iterator>
 #include <thread>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 #include "Sequence/SequenceFuncs.h"
@@ -14,6 +15,19 @@
 
 namespace
 {
+	std::string StreamedNoteLimit(uint64_t notes, uint64_t budgetNotes)
+	{
+		constexpr double GIB = 1024.0 * 1024.0 * 1024.0;
+		constexpr double NOTE_BYTES = 3.0 * sizeof(uint32_t);
+		char message[320];
+		std::snprintf(message, sizeof(message),
+			"This streamed MIDI needs about %.1f GB just for its notes, more than Comet can hold "
+			"in memory on this machine (%.1f GB available). Close other applications or use a "
+			"machine with more memory.", (double)notes * NOTE_BYTES / GIB,
+			(double)budgetNotes * NOTE_BYTES / GIB);
+		return message;
+	}
+
 	// A bounds-checked cursor over one track's bytes. Reads past the end are clamped, so a damaged
 	// chunk can never run off into the next track's data.
 	struct ByteCursor
@@ -762,6 +776,14 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	seq->resolution = ToShort(headerCur);
 	(void)format;
 
+	// Streaming removes the archive byte ceiling, but the note store still has to fit. Three
+	// uint32 arrays per note are the dominant allocation, so refuse a file that cannot hold its
+	// notes instead of growing until the process runs out of memory.
+	constexpr uint64_t NOTE_BYTES = 3 * sizeof(uint32_t);
+	const uint64_t memoryBudget = ArchiveLoader::MemoryBudget();
+	const uint64_t noteBudget = memoryBudget / NOTE_BYTES;
+	uint64_t storedNotes = 0;
+
 	struct SeenTrack
 	{
 		uint64_t hash = 0;
@@ -797,9 +819,15 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		if (readExact(lengthBytes, 4) != 4) break;
 		const uint64_t length = ToInt(lengthBytes);
 
-		// A single track still has to fit, but only one is held at a time.
-		if (length > (8ull << 30))
-			throw std::runtime_error("A track inside this archive is larger than Comet can hold in memory.");
+		// One track is held at a time, but it still has to fit in the space the platform can give.
+		if (length > memoryBudget)
+			throw std::runtime_error("A track inside this archive is larger than Comet can buffer in memory on this machine.");
+
+		// Note-ons and note-offs take at least six bytes together, so this bounds what the track
+		// can contribute before any of it is read.
+		const uint64_t possibleNotes = length / 6 + 1;
+		if (storedNotes + possibleNotes > noteBudget)
+			throw std::runtime_error(StreamedNoteLimit(storedNotes + possibleNotes, noteBudget));
 
 		chunk.assign((size_t)length, 0);
 		const size_t got = readExact(chunk.data(), chunk.size());
@@ -841,7 +869,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		const bool hugeTrack = chunk.size() > (256ull << 20);
 		ParsedTrack track = ParseTrackData({ chunk.data(), chunk.size(), parsed.size() }, 16u << 20, hugeTrack);
 		seen.push_back({ hash, got, parsed.size(), 1 });
+		storedNotes += track.notes.Size();
 		parsed.push_back(std::move(track));
+		if (storedNotes > noteBudget)
+			throw std::runtime_error(StreamedNoteLimit(storedNotes, noteBudget));
 		tracksProcessed.fetch_add(1, std::memory_order_relaxed);
 
 		chunk.clear();

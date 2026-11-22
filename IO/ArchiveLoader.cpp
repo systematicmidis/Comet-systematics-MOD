@@ -249,23 +249,6 @@ namespace
 		bool finished = false;
 	};
 
-	// Nested archives are decompressed layer by layer in memory, so the ceiling is whatever this
-	// machine can actually hold. A fixed limit either refuses files that would have fit or invites an
-	// out-of-memory kill; the headroom keeps the app and the finished MIDI alive too.
-	uint64_t MemoryBudget()
-	{
-#ifdef _WIN32
-		MEMORYSTATUSEX status{};
-		status.dwLength = sizeof(status);
-		if (GlobalMemoryStatusEx(&status))
-		{
-			const uint64_t usable = (uint64_t)status.ullAvailPhys / 4ull * 3ull;
-			return std::clamp<uint64_t>(usable, 1ull << 30, 32ull << 30);
-		}
-#endif
-		return 8ull * 1024ull * 1024ull * 1024ull;
-	}
-
 	std::string HumanBytes(uint64_t bytes)
 	{
 		char buffer[64];
@@ -332,41 +315,6 @@ namespace
 			|| StartsWith(data, size, SIG_LZ4, sizeof(SIG_LZ4))
 			|| StartsWith(data, size, SIG_RAR, sizeof(SIG_RAR))
 			|| StartsWith(data, size, SIG_LZMA, sizeof(SIG_LZMA));
-	}
-
-	// Opens a file as an archive with every format and codec this build carries. Listing, extraction
-	// and streaming all go through here so they configure libarchive the same way.
-	archive* OpenArchiveFile(const std::filesystem::path& path, std::string* error)
-	{
-		archive* a = archive_read_new();
-		if (a == nullptr)
-		{
-			if (error) *error = "Could not initialize the archive reader.";
-			return nullptr;
-		}
-
-		archive_read_support_filter_all(a);
-		archive_read_support_format_all(a);
-		archive_read_support_format_raw(a);
-
-#ifdef _WIN32
-		const int openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
-#else
-		const int openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
-#endif
-
-		if (openResult != ARCHIVE_OK)
-		{
-			if (error)
-			{
-				const char* message = archive_error_string(a);
-				*error = message != nullptr ? message : "Could not open the archive.";
-			}
-			archive_read_free(a);
-			return nullptr;
-		}
-
-		return a;
 	}
 
 	// Turns a base byte stream into the MIDI it carries. A pure xz layer is unwrapped and the result
@@ -630,7 +578,7 @@ namespace
 	{
 		constexpr size_t RISKY_WINDOW = 2u << 20;
 
-		const uint64_t budget = MemoryBudget();
+		const uint64_t budget = ArchiveLoader::MemoryBudget();
 
 		// A MIDI entry is never a layer to skip through, and without a declared size there is no
 		// "rest of the layer" to fill.
@@ -743,10 +691,10 @@ namespace
 
 			// Refuse a layer that cannot fit before decompressing a single byte of it: a nested file
 			// that big would take minutes to produce the same refusal.
-			if (declaredSize > 0 && (uint64_t)declaredSize > MemoryBudget())
+			if (declaredSize > 0 && (uint64_t)declaredSize > ArchiveLoader::MemoryBudget())
 			{
 				error = "This file expands to " + HumanBytes((uint64_t)declaredSize) + ", more than Comet "
-					"can hold in memory on this machine (" + HumanBytes(MemoryBudget()) + " available; "
+					"can hold in memory on this machine (" + HumanBytes(ArchiveLoader::MemoryBudget()) + " available; "
 					"archives are unpacked in memory, layer by layer).";
 				return false;
 			}
@@ -903,6 +851,192 @@ namespace
 		return result;
 	}
 
+	struct VolumeSet
+	{
+		std::vector<std::filesystem::path> files;
+		uint64_t totalSize = 0;
+	};
+
+	bool AllDigits(const std::string& text)
+	{
+		return !text.empty() && std::all_of(text.begin(), text.end(),
+			[](unsigned char c) { return std::isdigit(c) != 0; });
+	}
+
+	std::string PaddedNumber(int value, size_t width)
+	{
+		char buffer[32];
+		std::snprintf(buffer, sizeof(buffer), "%0*d", (int)width, value);
+		return buffer;
+	}
+
+	// Finds the other files of a split archive: song.7z.001, song.part1.rar, or song.rar plus
+	// song.r00... The user may have picked any volume, so the scan walks back to the first one.
+	VolumeSet FindVolumeSet(const std::filesystem::path& path)
+	{
+		VolumeSet set;
+		set.files.push_back(path);
+
+		const std::filesystem::path directory = path.parent_path();
+		const std::string name = path.filename().string();
+		std::string lower = name;
+		for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+
+		auto exists = [](const std::filesystem::path& candidate)
+		{
+			std::error_code error;
+			return std::filesystem::exists(candidate, error) && !error;
+		};
+
+		auto collect = [&](auto&& make, int start)
+		{
+			int first = start;
+			while (first > 1 && exists(make(first - 1))) first--;
+			set.files.clear();
+			for (int i = first; ; i++)
+			{
+				const std::filesystem::path candidate = make(i);
+				if (!exists(candidate)) break;
+				set.files.push_back(candidate);
+			}
+		};
+
+		const size_t dot = name.rfind('.');
+		const std::string suffix = dot != std::string::npos ? name.substr(dot + 1) : std::string();
+		const std::string stem = dot != std::string::npos ? name.substr(0, dot) : name;
+
+		// song.7z.001: the stem must already be an archive name, so backup.2024.7z is not mistaken
+		// for the second volume of a set.
+		if (suffix.size() >= 3 && AllDigits(suffix) && IsArchiveExtension(stem))
+		{
+			int start = 0;
+			try { start = std::stoi(suffix); } catch (...) { start = 0; }
+			if (start > 0)
+			{
+				const size_t width = suffix.size();
+				collect([&](int i) { return directory / (stem + "." + PaddedNumber(i, width)); }, start);
+			}
+		}
+		else
+		{
+			// song.part1.rar / song.part01.rar
+			const size_t part = lower.rfind(".part");
+			if (part != std::string::npos)
+			{
+				const size_t numberStart = part + 5;
+				size_t numberEnd = numberStart;
+				while (numberEnd < lower.size() && std::isdigit((unsigned char)lower[numberEnd])) numberEnd++;
+
+				if (numberEnd > numberStart && lower.compare(numberEnd, std::string::npos, ".rar") == 0)
+				{
+					const size_t width = numberEnd - numberStart;
+					const std::string tail = name.substr(numberEnd);
+					int start = 0;
+					try { start = std::stoi(name.substr(numberStart, width)); } catch (...) { start = 0; }
+					if (start > 0)
+					{
+						collect([&](int i) {
+							return directory / (name.substr(0, part) + ".part" + PaddedNumber(i, width) + tail);
+						}, start);
+					}
+				}
+			}
+			// Old-style RAR sets: song.rar, song.r00, song.r01, ...
+			else if (name.size() >= 4 && name[name.size() - 4] == '.'
+				&& (name[name.size() - 3] == 'r' || name[name.size() - 3] == 'R')
+				&& std::isdigit((unsigned char)name[name.size() - 2])
+				&& std::isdigit((unsigned char)name[name.size() - 1]))
+			{
+				const std::filesystem::path base = directory / (name.substr(0, name.size() - 4) + ".rar");
+				if (exists(base))
+				{
+					set.files.clear();
+					set.files.push_back(base);
+					for (int i = 0; ; i++)
+					{
+						const std::filesystem::path candidate = directory
+							/ (name.substr(0, name.size() - 4) + ".r" + PaddedNumber(i, 2));
+						if (!exists(candidate)) break;
+						set.files.push_back(candidate);
+					}
+				}
+			}
+		}
+
+		for (const std::filesystem::path& file : set.files)
+		{
+			std::error_code error;
+			const uintmax_t size = std::filesystem::file_size(file, error);
+			if (!error) set.totalSize += size;
+		}
+
+		return set;
+	}
+
+	// Opens a file as an archive with every format and codec this build carries. Listing, extraction
+	// and streaming all go through here so they configure libarchive the same way; a split archive
+	// opens as one continuous stream.
+	archive* OpenArchiveFile(const std::filesystem::path& path, std::string* error)
+	{
+		archive* a = archive_read_new();
+		if (a == nullptr)
+		{
+			if (error) *error = "Could not initialize the archive reader.";
+			return nullptr;
+		}
+
+		archive_read_support_filter_all(a);
+		archive_read_support_format_all(a);
+		archive_read_support_format_raw(a);
+
+		const VolumeSet volumes = FindVolumeSet(path);
+		int openResult = ARCHIVE_FATAL;
+
+		if (volumes.files.size() > 1)
+		{
+#ifdef _WIN32
+			std::vector<std::wstring> storage;
+			std::vector<const wchar_t*> names;
+			storage.reserve(volumes.files.size());
+			names.reserve(volumes.files.size() + 1);
+			for (const std::filesystem::path& file : volumes.files) storage.push_back(file.wstring());
+			for (const std::wstring& file : storage) names.push_back(file.c_str());
+			names.push_back(nullptr);
+			openResult = archive_read_open_filenames_w(a, names.data(), 1 << 20);
+#else
+			std::vector<std::string> storage;
+			std::vector<const char*> names;
+			storage.reserve(volumes.files.size());
+			names.reserve(volumes.files.size() + 1);
+			for (const std::filesystem::path& file : volumes.files) storage.push_back(file.string());
+			for (const std::string& file : storage) names.push_back(file.c_str());
+			names.push_back(nullptr);
+			openResult = archive_read_open_filenames(a, names.data(), 1 << 20);
+#endif
+		}
+		else
+		{
+#ifdef _WIN32
+			openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
+#else
+			openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
+#endif
+		}
+
+		if (openResult != ARCHIVE_OK)
+		{
+			if (error)
+			{
+				const char* message = archive_error_string(a);
+				*error = message != nullptr ? message : "Could not open the archive.";
+			}
+			archive_read_free(a);
+			return nullptr;
+		}
+
+		return a;
+	}
+
 	// Streams the chosen MIDI entry directly out of a container (7z, zip, rar, tar, ...) instead of
 	// decompressing it into one buffer. Returns nullptr when the archive has no named MIDI entry or
 	// the entry wraps another container; Extract() then keeps handling those as before.
@@ -924,8 +1058,7 @@ namespace
 			target = entries[best].name;
 		}
 
-		std::error_code sizeError;
-		const uint64_t fileSize = std::filesystem::file_size(path, sizeError);
+		const uint64_t fileSize = FindVolumeSet(path).totalSize;
 
 		archive* a = OpenArchiveFile(path, &error);
 		if (a == nullptr) return nullptr;
@@ -961,7 +1094,7 @@ namespace
 
 			// The entry stream owns the archive handle from here, including when OpenLayers()
 			// rejects its contents.
-			auto stream = std::make_unique<ArchiveEntryStream>(a, sizeError ? 0 : fileSize);
+			auto stream = std::make_unique<ArchiveEntryStream>(a, fileSize);
 			return OpenLayers(std::move(stream), error);
 		}
 
@@ -969,6 +1102,23 @@ namespace
 		error = "The archive entry could not be found.";
 		return nullptr;
 	}
+}
+
+uint64_t ArchiveLoader::MemoryBudget()
+{
+	// The ceiling is whatever this machine can actually hold. A fixed limit either refuses files
+	// that would have fit or invites an out-of-memory kill; the headroom keeps the app and the
+	// finished MIDI alive too.
+#ifdef _WIN32
+	MEMORYSTATUSEX status{};
+	status.dwLength = sizeof(status);
+	if (GlobalMemoryStatusEx(&status))
+	{
+		const uint64_t usable = (uint64_t)status.ullAvailPhys / 4ull * 3ull;
+		return std::clamp<uint64_t>(usable, 1ull << 30, 32ull << 30);
+	}
+#endif
+	return 8ull * 1024ull * 1024ull * 1024ull;
 }
 
 std::unique_ptr<ArchiveStream> ArchiveLoader::OpenStream(const std::filesystem::path& path,
@@ -1147,8 +1297,12 @@ bool ArchiveLoader::IsArchive(const std::filesystem::path& path)
 	const std::string name = path.filename().string();
 	if (IsArchiveExtension(name)) return true;
 
+	// A later volume of a split archive has no signature of its own, so probe the first file.
+	const VolumeSet volumes = FindVolumeSet(path);
+	const std::filesystem::path probe = volumes.files.size() > 1 ? volumes.files.front() : path;
+
 	// Extensionless downloads are common; let the first bytes decide.
-	std::ifstream stream(path, std::ios::binary);
+	std::ifstream stream(probe, std::ios::binary);
 	if (!stream.is_open()) return false;
 
 	uint8_t header[16] = {};
@@ -1213,9 +1367,8 @@ ArchiveLoader::Result ArchiveLoader::Extract(const std::filesystem::path& path,
 {
 	Result result;
 
-	std::error_code sizeError;
-	const uint64_t fileSize = std::filesystem::file_size(path, sizeError);
-	if (total != nullptr) total->store(sizeError ? 0 : fileSize, std::memory_order_relaxed);
+	const uint64_t fileSize = FindVolumeSet(path).totalSize;
+	if (total != nullptr) total->store(fileSize, std::memory_order_relaxed);
 
 	archive* a = OpenArchiveFile(path, &result.error);
 	if (a == nullptr) return result;

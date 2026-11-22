@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,28 @@ namespace
 		return stream->Ok() && got == expected;
 	}
 
+	bool SplitFile(const std::filesystem::path& source, const std::filesystem::path& first,
+		const std::filesystem::path& second)
+	{
+		std::ifstream input(source, std::ios::binary);
+		if (!input) return false;
+
+		const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+			std::istreambuf_iterator<char>());
+		const size_t split = bytes.size() / 2;
+		if (split == 0) return false;
+
+		auto write = [](const std::filesystem::path& path, const uint8_t* data, size_t size)
+		{
+			std::ofstream output(path, std::ios::binary);
+			output.write((const char*)data, (std::streamsize)size);
+			return (bool)output;
+		};
+
+		return write(first, bytes.data(), split)
+			&& write(second, bytes.data() + split, bytes.size() - split);
+	}
+
 	bool CheckLegacyMapping(const std::shared_ptr<MIDISequence>& sequence)
 	{
 		if (!sequence || sequence->noteTrackCount != 5) return false;
@@ -408,6 +431,25 @@ int main()
 		return 1;
 	}
 
-	std::cout << "PASS: two huge repeats counted, tail kept, legacy weights mapped, and 7z/zip entries streamed" << std::endl;
+	// A split archive must open from whichever volume the user picked.
+	TempFile firstVolume{ std::filesystem::temp_directory_path() / "comet_stream_volumes.7z.001" };
+	TempFile secondVolume{ std::filesystem::temp_directory_path() / "comet_stream_volumes.7z.002" };
+	if (!SplitFile(sevenZip.path, firstVolume.path, secondVolume.path)
+		|| !ArchiveLoader::IsArchive(secondVolume.path)
+		|| !CheckStreamedEntry(firstVolume.path, streamedMidi)
+		|| !CheckStreamedEntry(secondVolume.path, streamedMidi))
+	{
+		std::cerr << "FAIL: a split 7z did not load from its volume set" << std::endl;
+		return 1;
+	}
+
+	const ArchiveLoader::Result volumeExtract = ArchiveLoader::Extract(firstVolume.path, nullptr);
+	if (!volumeExtract.ok || volumeExtract.data != streamedMidi)
+	{
+		std::cerr << "FAIL: the in-memory extractor did not read the split 7z" << std::endl;
+		return 1;
+	}
+
+	std::cout << "PASS: repeats, tail, legacy weights, 7z/zip streaming, and split volumes" << std::endl;
 	return 0;
 }
