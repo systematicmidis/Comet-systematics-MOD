@@ -10,6 +10,9 @@
 
 #include <lzma.h>
 
+#include <archive.h>
+#include <archive_entry.h>
+
 #include "MIDI/MultithreadedMIDILoader.h"
 
 namespace
@@ -212,6 +215,84 @@ namespace
 		return (bool)file;
 	}
 
+	std::vector<uint8_t> BuildStreamedMidi()
+	{
+		const uint8_t header[] = { 'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 0x60 };
+		const uint8_t track[] = {
+			0x00, 0x90, 0x3C, 0x64,
+			0x60, 0x80, 0x3C, 0x00,
+			0x00, 0xFF, 0x2F, 0x00
+		};
+
+		std::vector<uint8_t> bytes(header, header + sizeof(header));
+		const uint8_t chunk[] = { 'M', 'T', 'r', 'k', 0, 0, 0, (uint8_t)sizeof(track) };
+		bytes.insert(bytes.end(), chunk, chunk + sizeof(chunk));
+		bytes.insert(bytes.end(), track, track + sizeof(track));
+		return bytes;
+	}
+
+	bool WriteArchiveEntry(const std::filesystem::path& path, bool sevenZip, const char* name,
+		const std::vector<uint8_t>& bytes)
+	{
+		archive* a = archive_write_new();
+		if (a == nullptr) return false;
+
+		bool ok = sevenZip ? archive_write_set_format_7zip(a) == ARCHIVE_OK
+			: archive_write_set_format_zip(a) == ARCHIVE_OK;
+		ok = ok && archive_write_open_filename(a, path.string().c_str()) == ARCHIVE_OK;
+
+		if (ok)
+		{
+			archive_entry* entry = archive_entry_new();
+			archive_entry_set_pathname(entry, name);
+			archive_entry_set_filetype(entry, AE_IFREG);
+			archive_entry_set_perm(entry, 0644);
+			archive_entry_set_size(entry, (la_int64_t)bytes.size());
+			ok = archive_write_header(a, entry) == ARCHIVE_OK;
+			if (ok && !bytes.empty())
+				ok = archive_write_data(a, bytes.data(), bytes.size()) == (la_ssize_t)bytes.size();
+			archive_entry_free(entry);
+		}
+
+		archive_write_close(a);
+		archive_write_free(a);
+		return ok;
+	}
+
+	std::vector<uint8_t> CompressXz(const std::vector<uint8_t>& bytes)
+	{
+		std::vector<uint8_t> compressed(lzma_stream_buffer_bound(bytes.size()));
+		size_t written = 0;
+		if (lzma_easy_buffer_encode(0, LZMA_CHECK_CRC32, nullptr, bytes.data(), bytes.size(),
+			compressed.data(), &written, compressed.size()) != LZMA_OK)
+		{
+			return {};
+		}
+		compressed.resize(written);
+		return compressed;
+	}
+
+	bool CheckStreamedEntry(const std::filesystem::path& path, const std::vector<uint8_t>& expected)
+	{
+		std::string error;
+		auto stream = ArchiveLoader::OpenStream(path, error);
+		if (!stream)
+		{
+			std::cerr << "  could not stream " << path.filename().string() << ": " << error << std::endl;
+			return false;
+		}
+
+		std::vector<uint8_t> got;
+		uint8_t buffer[8192];
+		for (;;)
+		{
+			const size_t read = stream->Read(buffer, sizeof(buffer));
+			if (read == 0) break;
+			got.insert(got.end(), buffer, buffer + read);
+		}
+		return stream->Ok() && got == expected;
+	}
+
 	bool CheckLegacyMapping(const std::shared_ptr<MIDISequence>& sequence)
 	{
 		if (!sequence || sequence->noteTrackCount != 5) return false;
@@ -281,6 +362,52 @@ int main()
 		return 1;
 	}
 
-	std::cout << "PASS: two huge repeats counted, tail kept, and legacy repeat weights mapped" << std::endl;
+	// A container entry must reach the streaming parser without being unpacked whole.
+	const std::vector<uint8_t> streamedMidi = BuildStreamedMidi();
+
+	TempFile sevenZip{ std::filesystem::temp_directory_path() / "comet_stream_regression.7z" };
+	if (!WriteArchiveEntry(sevenZip.path, true, "song.mid", streamedMidi)
+		|| !CheckStreamedEntry(sevenZip.path, streamedMidi))
+	{
+		std::cerr << "FAIL: a MIDI entry inside a 7z did not stream" << std::endl;
+		return 1;
+	}
+
+	MultithreadedMIDILoader streamedLoader(sevenZip.path.string().c_str());
+	const auto streamedSequence = streamedLoader.Load();
+	if (!streamedSequence || streamedSequence->notes != 1 || streamedSequence->trackCount != 1)
+	{
+		std::cerr << "FAIL: the loader did not parse the streamed 7z entry" << std::endl;
+		return 1;
+	}
+
+	TempFile streamedZip{ std::filesystem::temp_directory_path() / "comet_stream_regression.zip" };
+	if (!WriteArchiveEntry(streamedZip.path, false, "song.mid", streamedMidi)
+		|| !CheckStreamedEntry(streamedZip.path, streamedMidi))
+	{
+		std::cerr << "FAIL: a MIDI entry inside a zip did not stream" << std::endl;
+		return 1;
+	}
+
+	// The in-memory extractor stays as the fallback for callers that still need whole bytes.
+	const ArchiveLoader::Result extracted = ArchiveLoader::Extract(streamedZip.path, nullptr);
+	if (!extracted.ok || extracted.data != streamedMidi)
+	{
+		std::cerr << "FAIL: the in-memory Extract fallback no longer reads a zip" << std::endl;
+		return 1;
+	}
+
+	// A .mid.xz entry is unwrapped by the same stream.
+	const std::vector<uint8_t> compressedMidi = CompressXz(streamedMidi);
+	TempFile nestedZip{ std::filesystem::temp_directory_path() / "comet_stream_nested.zip" };
+	if (compressedMidi.empty()
+		|| !WriteArchiveEntry(nestedZip.path, false, "song.mid.xz", compressedMidi)
+		|| !CheckStreamedEntry(nestedZip.path, streamedMidi))
+	{
+		std::cerr << "FAIL: an xz entry inside a zip did not stream" << std::endl;
+		return 1;
+	}
+
+	std::cout << "PASS: two huge repeats counted, tail kept, legacy weights mapped, and 7z/zip entries streamed" << std::endl;
 	return 0;
 }

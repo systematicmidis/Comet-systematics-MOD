@@ -140,11 +140,13 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 				}
 			}
 
-			// A nested .xz can expand to far more than this machine has RAM, so it is parsed as it
-			// streams instead of being decompressed into one buffer. Other archives fall back below.
+			// A MIDI can expand to far more than this machine has RAM, so a streamable xz chain or
+			// archive entry is parsed as it is produced instead of being decompressed into one
+			// buffer. Nested containers and unnamed entries still fall back below.
 			{
 				std::string streamError;
-				std::unique_ptr<ArchiveStream> stream = ArchiveLoader::OpenStream(path, streamError);
+				std::unique_ptr<ArchiveStream> stream = ArchiveLoader::OpenStream(path, streamError,
+					preferredArchiveEntry);
 				if (stream) return LoadStreamed(std::move(stream), timeBasedLoading);
 			}
 

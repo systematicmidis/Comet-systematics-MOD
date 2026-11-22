@@ -186,6 +186,8 @@ namespace
 			return copied + in->Read(out + copied, max - copied);
 		}
 
+		bool Ok() const override { return in == nullptr || in->Ok(); }
+
 		uint64_t CompressedRead() const override { return in ? in->CompressedRead() : 0; }
 		uint64_t CompressedTotal() const override { return in ? in->CompressedTotal() : 0; }
 
@@ -193,6 +195,58 @@ namespace
 		std::unique_ptr<ArchiveStream> in;
 		std::vector<uint8_t> prefix;
 		size_t pos = 0;
+	};
+
+	// One libarchive entry as a byte stream. The archive stays open and is decoded on demand, so an
+	// entry larger than the machine's RAM never has to exist as a single buffer.
+	class ArchiveEntryStream final : public ArchiveStream
+	{
+	public:
+		ArchiveEntryStream(archive* handle, uint64_t compressedTotal)
+			: entry(handle), total(compressedTotal)
+		{
+		}
+
+		~ArchiveEntryStream() override
+		{
+			if (entry != nullptr) archive_read_free(entry);
+		}
+
+		bool Ok() const override { return entry != nullptr && ok; }
+
+		size_t Read(uint8_t* out, size_t max) override
+		{
+			if (entry == nullptr || finished || max == 0) return 0;
+
+			const la_ssize_t got = archive_read_data(entry, out, max);
+			if (got < 0)
+			{
+				ok = false;
+				finished = true;
+				return 0;
+			}
+			if (got == 0)
+			{
+				finished = true;
+				return 0;
+			}
+			return (size_t)got;
+		}
+
+		uint64_t CompressedRead() const override
+		{
+			if (entry == nullptr) return 0;
+			const la_int64_t consumed = archive_filter_bytes(entry, -1);
+			return consumed > 0 ? (uint64_t)consumed : 0;
+		}
+
+		uint64_t CompressedTotal() const override { return total; }
+
+	private:
+		archive* entry = nullptr;
+		uint64_t total = 0;
+		bool ok = true;
+		bool finished = false;
 	};
 
 	// Nested archives are decompressed layer by layer in memory, so the ceiling is whatever this
@@ -278,6 +332,80 @@ namespace
 			|| StartsWith(data, size, SIG_LZ4, sizeof(SIG_LZ4))
 			|| StartsWith(data, size, SIG_RAR, sizeof(SIG_RAR))
 			|| StartsWith(data, size, SIG_LZMA, sizeof(SIG_LZMA));
+	}
+
+	// Opens a file as an archive with every format and codec this build carries. Listing, extraction
+	// and streaming all go through here so they configure libarchive the same way.
+	archive* OpenArchiveFile(const std::filesystem::path& path, std::string* error)
+	{
+		archive* a = archive_read_new();
+		if (a == nullptr)
+		{
+			if (error) *error = "Could not initialize the archive reader.";
+			return nullptr;
+		}
+
+		archive_read_support_filter_all(a);
+		archive_read_support_format_all(a);
+		archive_read_support_format_raw(a);
+
+#ifdef _WIN32
+		const int openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
+#else
+		const int openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
+#endif
+
+		if (openResult != ARCHIVE_OK)
+		{
+			if (error)
+			{
+				const char* message = archive_error_string(a);
+				*error = message != nullptr ? message : "Could not open the archive.";
+			}
+			archive_read_free(a);
+			return nullptr;
+		}
+
+		return a;
+	}
+
+	// Turns a base byte stream into the MIDI it carries. A pure xz layer is unwrapped and the result
+	// inspected again; anything else is accepted only when it already starts with MThd.
+	std::unique_ptr<ArchiveStream> OpenLayers(std::unique_ptr<ArchiveStream> current, std::string& error)
+	{
+		for (int depth = 0; depth < MAX_NESTING; depth++)
+		{
+			uint8_t head[16]{};
+			size_t headSize = 0;
+			while (headSize < sizeof(head))
+			{
+				const size_t got = current->Read(head + headSize, sizeof(head) - headSize);
+				if (got == 0) break;
+				headSize += got;
+			}
+
+			if (!current->Ok() && headSize == 0)
+			{
+				error = "The compressed stream ended unexpectedly.";
+				return nullptr;
+			}
+
+			auto peeked = std::make_unique<PrefixedStream>(std::move(current), head, headSize);
+			if (headSize >= 4 && std::memcmp(head, "MThd", 4) == 0)
+				return peeked;
+
+			const bool xz = headSize >= sizeof(SIG_XZ) && std::memcmp(head, SIG_XZ, sizeof(SIG_XZ)) == 0;
+			if (!xz)
+			{
+				error = "The next layer is not xz.";
+				return nullptr;
+			}
+
+			current = std::make_unique<XzStream>(std::move(peeked));
+		}
+
+		error = "The file is nested too deeply.";
+		return nullptr;
 	}
 
 	bool ReadAll(ArchiveStream& stream, std::vector<uint8_t>& out, size_t limit, std::string& error)
@@ -768,63 +896,102 @@ namespace
 			}
 
 			best.data = std::move(next.data);
-			best.name = next.entryName;
+		best.name = next.entryName;
 		}
 
 		result.error = "No MIDI file was found inside this archive.";
 		return result;
 	}
-}
 
-std::unique_ptr<ArchiveStream> ArchiveLoader::OpenStream(const std::filesystem::path& path, std::string& error)
-{
-	auto file = std::make_unique<FileStream>(path);
-	if (!file->Ok())
+	// Streams the chosen MIDI entry directly out of a container (7z, zip, rar, tar, ...) instead of
+	// decompressing it into one buffer. Returns nullptr when the archive has no named MIDI entry or
+	// the entry wraps another container; Extract() then keeps handling those as before.
+	std::unique_ptr<ArchiveStream> OpenArchiveEntryStream(const std::filesystem::path& path,
+		const std::string& preferredEntry, std::string& error)
 	{
-		error = "Could not open the file.";
+		std::string target = preferredEntry;
+		if (target.empty())
+		{
+			std::string listError;
+			const std::vector<ArchiveLoader::EntryInfo> entries = ArchiveLoader::ListMidiEntries(path, &listError);
+			if (entries.empty()) return nullptr;
+
+			size_t best = 0;
+			for (size_t i = 1; i < entries.size(); i++)
+			{
+				if (entries[i].size > entries[best].size) best = i;
+			}
+			target = entries[best].name;
+		}
+
+		std::error_code sizeError;
+		const uint64_t fileSize = std::filesystem::file_size(path, sizeError);
+
+		archive* a = OpenArchiveFile(path, &error);
+		if (a == nullptr) return nullptr;
+
+		archive_entry* entry = nullptr;
+		for (;;)
+		{
+			const int headerResult = archive_read_next_header(a, &entry);
+			if (headerResult == ARCHIVE_EOF) break;
+			if (headerResult < ARCHIVE_WARN)
+			{
+				const char* message = archive_error_string(a);
+				error = message != nullptr ? message : "Could not read the archive.";
+				archive_read_free(a);
+				return nullptr;
+			}
+
+			if (archive_entry_filetype(entry) == AE_IFDIR)
+			{
+				archive_read_data_skip(a);
+				continue;
+			}
+
+			const char* rawName = archive_entry_pathname_utf8(entry);
+			if (rawName == nullptr) rawName = archive_entry_pathname(entry);
+			const std::string name = rawName != nullptr ? rawName : std::string();
+
+			if (name != target)
+			{
+				archive_read_data_skip(a);
+				continue;
+			}
+
+			// The entry stream owns the archive handle from here, including when OpenLayers()
+			// rejects its contents.
+			auto stream = std::make_unique<ArchiveEntryStream>(a, sizeError ? 0 : fileSize);
+			return OpenLayers(std::move(stream), error);
+		}
+
+		archive_read_free(a);
+		error = "The archive entry could not be found.";
 		return nullptr;
 	}
+}
 
-	std::unique_ptr<ArchiveStream> current = std::move(file);
-
-	for (int depth = 0; depth < MAX_NESTING; depth++)
+std::unique_ptr<ArchiveStream> ArchiveLoader::OpenStream(const std::filesystem::path& path,
+	std::string& error, const std::string& preferredEntry)
+{
+	// A pure xz chain is decoded directly; this is the streaming case that existed before
+	// container entries were supported.
 	{
-		auto layer = std::make_unique<XzStream>(std::move(current));
-
-		uint8_t head[16]{};
-		size_t headSize = 0;
-		while (headSize < sizeof(head))
+		auto file = std::make_unique<FileStream>(path);
+		if (!file->Ok())
 		{
-			const size_t got = layer->Read(head + headSize, sizeof(head) - headSize);
-			if (got == 0) break;
-			headSize += got;
-		}
-
-		if (!layer->Ok() && headSize == 0)
-		{
-			error = "This is not an xz stream.";
+			error = "Could not open the file.";
 			return nullptr;
 		}
 
-		auto peeked = std::make_unique<PrefixedStream>(std::move(layer), head, headSize);
-
-		if (headSize >= 4 && std::memcmp(head, "MThd", 4) == 0)
-			return peeked;
-
-		// Only pure xz chains are streamed; anything else uses the in-memory extractor.
-		const bool xz = headSize >= 6 && head[0] == 0xFD && head[1] == '7' && head[2] == 'z'
-			&& head[3] == 'X' && head[4] == 'Z' && head[5] == 0x00;
-		if (!xz)
-		{
-			error = "The next layer is not xz.";
-			return nullptr;
-		}
-
-		current = std::move(peeked);
+		std::string layerError;
+		if (auto stream = OpenLayers(std::move(file), layerError)) return stream;
 	}
 
-	error = "The file is nested too deeply.";
-	return nullptr;
+	// Containers (7z, zip, rar, tar, ...) are streamed entry by entry. A nested container or an
+	// unnamed entry returns nullptr here, so the caller still uses the in-memory extractor.
+	error.clear();
+	return OpenArchiveEntryStream(path, preferredEntry, error);
 }
 
 std::unique_ptr<ArchiveStream> ArchiveLoader::OpenMemoryStream(const uint8_t* data, size_t size)
@@ -998,28 +1165,11 @@ std::vector<ArchiveLoader::EntryInfo> ArchiveLoader::ListMidiEntries(
 	std::vector<EntryInfo> entries;
 	if (!IsArchive(path)) return entries;
 
-	archive* a = archive_read_new();
+	std::string openError;
+	archive* a = OpenArchiveFile(path, &openError);
 	if (a == nullptr)
 	{
-		if (error) *error = "Could not initialize the archive reader.";
-		return entries;
-	}
-
-	archive_read_support_filter_all(a);
-	archive_read_support_format_all(a);
-	archive_read_support_format_raw(a);
-
-#ifdef _WIN32
-	const int openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
-#else
-	const int openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
-#endif
-
-	if (openResult != ARCHIVE_OK)
-	{
-		if (error) *error = archive_error_string(a) != nullptr ? archive_error_string(a)
-			: "Could not open the archive.";
-		archive_read_free(a);
+		if (error) *error = openError;
 		return entries;
 	}
 
@@ -1067,30 +1217,8 @@ ArchiveLoader::Result ArchiveLoader::Extract(const std::filesystem::path& path,
 	const uint64_t fileSize = std::filesystem::file_size(path, sizeError);
 	if (total != nullptr) total->store(sizeError ? 0 : fileSize, std::memory_order_relaxed);
 
-	archive* a = archive_read_new();
-	if (a == nullptr)
-	{
-		result.error = "Could not initialize the archive reader.";
-		return result;
-	}
-
-	archive_read_support_filter_all(a);
-	archive_read_support_format_all(a);
-	archive_read_support_format_raw(a);
-
-#ifdef _WIN32
-	const int openResult = archive_read_open_filename_w(a, path.wstring().c_str(), 1 << 20);
-#else
-	const int openResult = archive_read_open_filename(a, path.string().c_str(), 1 << 20);
-#endif
-
-	if (openResult != ARCHIVE_OK)
-	{
-		const char* message = archive_error_string(a);
-		result.error = message != nullptr ? message : "Could not open the file as an archive.";
-		archive_read_free(a);
-		return result;
-	}
+	archive* a = OpenArchiveFile(path, &result.error);
+	if (a == nullptr) return result;
 
 	result = ExtractFromArchive(a, cancel, done, preferredEntry);
 

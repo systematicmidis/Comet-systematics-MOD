@@ -26,8 +26,9 @@ public:
 };
 
 // Reads the MIDI out of a compressed file or archive (7z, xz, lzma, zip, gz, bz2, zst, lz4, rar,
-// tar, and compressed tars), including nested layers such as a .mid.xz inside a .7z. Everything is
-// decompressed into memory; nothing is written to disk.
+// tar, and compressed tars), including nested layers such as a .mid.xz inside a .7z. Container
+// entries are streamed when possible; anything nested or unnamed is decompressed into memory.
+// Nothing is written to disk.
 class ArchiveLoader
 {
 public:
@@ -68,10 +69,13 @@ public:
 	// happen to fit, which is why it is off unless the user turns it on for a session.
 	static void SetRiskyFastDedupe(bool on);
 
-	// Opens a nested .xz/.lzma chain as a stream, so a file that expands to hundreds of gigabytes
-	// can be parsed without ever holding it. Returns nullptr and sets `error` when the file is not
-	// a pure xz chain; callers then fall back to Extract(). Nothing is ever written to disk.
-	static std::unique_ptr<ArchiveStream> OpenStream(const std::filesystem::path& path, std::string& error);
+	// Opens a compressed file as a stream, so a MIDI that expands to more than this machine can
+	// hold is parsed as it is produced. Pure xz chains are decoded directly; for 7z, zip, rar, tar
+	// and similar containers the selected MIDI entry is streamed out of libarchive. Returns
+	// nullptr when the file is not streamable (a nested container or an unnamed entry), and
+	// callers then fall back to Extract(). Nothing is ever written to disk.
+	static std::unique_ptr<ArchiveStream> OpenStream(const std::filesystem::path& path,
+		std::string& error, const std::string& preferredEntry = {});
 
 	// A "header + N identical compressed cycles" archive can be loaded without decoding all N
 	// cycles: this proves every byte of the repeated region matches the first cycle, then returns
