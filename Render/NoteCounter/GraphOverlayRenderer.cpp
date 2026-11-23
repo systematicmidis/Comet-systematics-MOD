@@ -159,15 +159,7 @@ void GraphOverlayRenderer::Render(float heightOffset)
 	const float panelY = heightOffset;
 
 	// The numbers use the same font as the note counter, as requested.
-	ImFont* fontToUse = nullptr;
-	for (const auto& f : app->GetFontList()->GetFonts())
-	{
-		if (f.path == config->overlayInfo.selectedFontPath)
-		{
-			fontToUse = f.font;
-			break;
-		}
-	}
+	ImFont* fontToUse = app->GetFontList()->GetFontForPath(config->overlayInfo.selectedFontPath);
 
 	const float textScale = std::max(0.05f, config->overlayInfo.scale);
 

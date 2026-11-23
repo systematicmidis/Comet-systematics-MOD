@@ -33,15 +33,7 @@ void NoteCounterRenderer::Render(float heightOffset)
 	NoteCounterStyle counterStyle = config->overlayInfo.overlayStyle;
 
 	// font magic
-	ImFont* fontToUse = nullptr;
-	for (const auto& f : app->GetFontList()->GetFonts())
-	{
-		if (f.path == config->overlayInfo.selectedFontPath)
-		{
-			fontToUse = f.font;
-			break;
-		}
-	}
+	ImFont* fontToUse = app->GetFontList()->GetFontForPath(config->overlayInfo.selectedFontPath);
 
 	lastCounterYOffset = heightOffset;
 

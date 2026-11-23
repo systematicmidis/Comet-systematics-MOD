@@ -38,6 +38,8 @@ enum class NoteCounterAlignment
 static const NoteCounterStyle DEFAULT_NOTE_COUNTER_STYLE = NoteCounterStyle::UMP;
 static const NoteCounterAlignment DEFAULT_NOTE_COUNTER_ALIGNMENT = NoteCounterAlignment::TopRight;
 static const int DEFAULT_NOTE_COUNTER_WIDTH = 200;
+static constexpr float MIN_SYNTHESIA_BANNER_SCALE = 0.5f;
+static constexpr float MAX_SYNTHESIA_BANNER_SCALE = 2.0f;
 
 inline const std::string ToString(RendererType type)
 {
@@ -113,6 +115,19 @@ struct MIDIPlayerConfig
 		float zoomOutMaxSeconds = 3.0f;
 
 		NoteCounterAlignment alignment = NoteCounterAlignment::TopLeft;
+	};
+
+	// The opening banner baked into a video render, in the style of the selected visual: the
+	// white UMP-style title card, or a recreation of Synthesia's title bar.
+	struct ConfigBanner
+	{
+		bool enabled = true;
+		// Also show the opening card in the interactive preview. The UMP card's first line reads
+		// "Now playing" there instead of the render credit.
+		bool showInPreview = false;
+		// Scales Synthesia's title bar and title around the bar's centre. 1.0 matches the reference.
+		// The bar stays full-width, as it is in Synthesia.
+		float synthesiaScale = 1.0f;
 	};
 
 	struct ConfigMIDI
@@ -358,6 +373,7 @@ struct MIDIPlayerConfig
 	ConfigRender render{};
 	ConfigOverlayInfo overlayInfo{};
 	ConfigGraph graph{};
+	ConfigBanner banner{};
 	ConfigMultiplier multiplier{};
 	ConfigLayeredDeDupe layeredDedupe{};
 	ConfigCrashReports crashReports{};

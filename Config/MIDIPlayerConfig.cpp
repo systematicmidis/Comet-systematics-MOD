@@ -101,6 +101,17 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			this->graph = graph;
 		}
 
+		std::optional<ConfigSection> bannerSec = config->GetSection("banner");
+		if (bannerSec)
+		{
+			ConfigBanner banner;
+			banner.enabled = bannerSec->GetBoolean("enabled", true);
+			banner.showInPreview = bannerSec->GetBoolean("showInPreview", false);
+			banner.synthesiaScale = std::clamp(bannerSec->GetFloat("synthesiaScale", 1.0f),
+				MIN_SYNTHESIA_BANNER_SCALE, MAX_SYNTHESIA_BANNER_SCALE);
+			this->banner = banner;
+		}
+
 		std::optional<ConfigSection> midiSec = config->GetSection("midi");
 		if (midiSec)
 		{
@@ -277,6 +288,10 @@ void MIDIPlayerConfig::SaveConfig()
 	config["graph"]["alignment"] = static_cast<int>(graph.alignment);
 	config["graph"]["npsColor"] = Utils::EncodeColor(graph.npsColor);
 	config["graph"]["polyColor"] = Utils::EncodeColor(graph.polyColor);
+
+	config["banner"]["enabled"] = banner.enabled;
+	config["banner"]["showInPreview"] = banner.showInPreview;
+	config["banner"]["synthesiaScale"] = banner.synthesiaScale;
 
 	config["midi"]["multithreaded"] = midi.multithreadedLoading;
 	config["midi"]["timeBased"] = midi.timeBasedLoading;

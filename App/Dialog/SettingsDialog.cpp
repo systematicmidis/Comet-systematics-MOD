@@ -870,16 +870,13 @@ void SettingsDialog::DrawVisualTab()
 
 					SECTION_ENTRY(SECTION_LABEL("Font"),
 						{
-							std::string currentFontName = "Default";
-
-							for (const auto& f : fonts)
-							{
-								if (f.path == config->overlayInfo.selectedFontPath)
-								{
-									currentFontName = f.name;
-									break;
-								}
-							}
+							const FontEntry* selectedFont =
+								fontList->FindFont(config->overlayInfo.selectedFontPath);
+							const bool fontSelected = !config->overlayInfo.selectedFontPath.empty();
+							const bool fontLoadFailed = selectedFont == nullptr || selectedFont->font == nullptr;
+							std::string currentFontName = !fontSelected
+								? "Default"
+								: (fontLoadFailed ? "Unavailable" : selectedFont->name);
 
 							if (ImGui::BeginCombo(
 								"##counterFontCombo",
@@ -895,7 +892,7 @@ void SettingsDialog::DrawVisualTab()
 								for (const auto& f : fonts)
 								{
 									const bool isSelected =
-										config->overlayInfo.selectedFontPath == f.path;
+										FontPathsMatch(config->overlayInfo.selectedFontPath, f.path);
 
 									if (ImGui::Selectable(
 										f.name.c_str(),
@@ -910,6 +907,17 @@ void SettingsDialog::DrawVisualTab()
 
 								ImGui::EndCombo();
 							}
+
+							if (fontSelected && fontLoadFailed)
+							{
+								ImGui::PushStyleColor(ImGuiCol_Text, WARNING_COLOR);
+								ImGui::TextWrapped(
+									"Selected font could not be loaded. Using the default font.");
+								ImGui::PopStyleColor();
+								ImGui::SetItemTooltip(
+									"Check that the file still exists in the font folder and is a valid .ttf or "
+									".otf, then reopen Settings.");
+							}
 						});
 
 					SECTION_ENTRY(SECTION_LABEL("Font directory"),
@@ -923,6 +931,37 @@ void SettingsDialog::DrawVisualTab()
 					END_SECTION;
 				}
 
+
+				SECTION_HEADER("Opening banner");
+
+				BEGIN_SECTION("##nc_banner")
+				{
+					SETUP_SECTION;
+
+					SECTION_ENTRY(
+						TABLE_LABEL_TOOLTIP(
+							"Show banner",
+							"Draws the song title over the first few seconds of a video render. Every visual "
+							"uses UMP's white title card; the Synthesia visual switches to a recreation of "
+							"Synthesia's title bar."
+						),
+						ImGui::Checkbox("##showBanner", &config->banner.enabled);
+					);
+
+					SECTION_ENTRY(
+						TABLE_LABEL_TOOLTIP(
+							"Show in preview",
+							"Also shows the banner without rendering a video. In the preview the UMP card's "
+							"first line reads \"Now playing\" instead of the render credit. It appears when a "
+							"song is loaded and fades out as the MIDI begins."
+						),
+						ImGui::Checkbox("##showBannerPreview", &config->banner.showInPreview);
+					);
+
+					END_SECTION;
+				}
+
+				ImGui::TextDisabled("In the preview the UMP card reads \"Now playing\" instead of the render credit.");
 
 				SECTION_HEADER("Style");
 

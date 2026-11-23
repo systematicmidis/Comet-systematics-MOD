@@ -1978,6 +1978,14 @@ void MIDIRendererSynthesia::RenderSettings()
 						}
 					});
 
+				SECTION_ENTRY(
+					TABLE_LABEL_TOOLTIP("Banner scale",
+						"Scales the opening Synthesia title bar and title. The bar stays full-width; "
+						"1.00x matches the reference."),
+					ImGui::SliderFloat("##synthBannerScale", &config->banner.synthesiaScale,
+						MIN_SYNTHESIA_BANNER_SCALE, MAX_SYNTHESIA_BANNER_SCALE, "%.2fx");
+				);
+
 				SECTION_ENTRY(TABLE_LABEL_TOOLTIP("Native note colors", "Uses built-in synthesia colors instead of the color palette shared between renderers."),
 					{
 						if (ImGui::Checkbox("##nativeCols", &renderSettings.useNativeNoteColors))

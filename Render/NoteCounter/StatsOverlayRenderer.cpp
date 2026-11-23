@@ -21,15 +21,7 @@ void StatsOverlayRenderer::Render(float heightOffset)
 	NoteCounterAlignment counterAlignment = config->overlayInfo.overlayAlignment;
 	NoteCounterStyle counterStyle = config->overlayInfo.overlayStyle;
 
-	ImFont* fontToUse = nullptr;
-	for (const auto& f : app->GetFontList()->GetFonts())
-	{
-		if (f.path == config->overlayInfo.selectedFontPath)
-		{
-			fontToUse = f.font;
-			break;
-		}
-	}
+	ImFont* fontToUse = app->GetFontList()->GetFontForPath(config->overlayInfo.selectedFontPath);
 
 	lastStatsYOffset = heightOffset;
 	switch (counterAlignment)

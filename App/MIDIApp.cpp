@@ -11,6 +11,7 @@
 #include "Render/NoteCounter/AbstractOverlayRenderer.h"
 #include <thread>
 #include <memory>
+#include <cmath>
 #include "imgui.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "FFmpeg/FFmpegCommandBuilder.h"
@@ -35,6 +36,7 @@
 #include "App/UI/NavigationBar.h"
 #include "../Render/RenderView.h"
 #include "Render/NoteCounter/NoteCounterRenderer.h"
+#include "Render/NoteCounter/BannerRenderer.h"
 #include "Render/NoteCounter/StatsOverlayRenderer.h"
 #include "Render/NoteCounter/GraphOverlayRenderer.h"
 #include "Render/NoteCounter/TrackNoteCounter.h"
@@ -53,6 +55,17 @@
 
 namespace
 {
+	// The Synthesia reference shows its intro bar at 0.72 s and the first note at 6.13 s, so the
+	// MIDI needs 5.4 s of lead-in once the render starts at the bar. UMP's card ends exactly when
+	// its MIDI starts, so UMP keeps the default 3.0 s delay.
+	constexpr double SYNTHESIA_MIDI_START_DELAY_SECONDS = 5.4;
+
+	// Reference: Synthesia's first note enters the top of the falling area at 3.617 s and its key
+	// is pressed at 6.20 s, a 2.58 s fall. The bar appears at 0.80 s, so relative to the bar the
+	// note appears at 2.82 s. Comet's banner starts at 0 and its MIDI starts at 5.4 s, so the
+	// same fall lead puts the first note at 2.82 s while keeping the hit at 5.4 s.
+	constexpr double SYNTHESIA_NOTE_FALL_LEAD_SECONDS = 2.58;
+
 	// A compact view of the settings, so a report says how the app was configured without needing
 	// the whole config.yml. The webhook URL is deliberately left out; the reporter strips it too.
 	std::string BuildSettingsSnapshot(MIDIPlayerConfig& cfg)
@@ -135,6 +148,7 @@ MIDIApp::MIDIApp(MainWindow* mainWindow)
 	// initialize overlays
 	overlays.emplace_back(std::make_unique<NoteCounterRenderer>(noteCounterInfo, this));
 	overlays.emplace_back(std::make_unique<StatsOverlayRenderer>(this));
+	bannerRenderer = std::make_unique<BannerRenderer>(this);
 	overlays.emplace_back(std::make_unique<GraphOverlayRenderer>(this));
 	Models::LoadModels();
 
@@ -253,7 +267,7 @@ void MIDIApp::LoadMIDI(const char* path, std::string archiveEntry)
 	std::shared_ptr<AbstractMIDILoader> loader = CreateLoader(path, archiveEntry);
 	prog = loader;
 
-	std::thread([this, loader, pathStr = std::string(path)]() {
+	std::thread([this, loader, pathStr = std::string(path), archiveEntry = std::move(archiveEntry)]() {
 		std::shared_ptr<MIDISequence> seq;
 		try
 		{
@@ -288,6 +302,7 @@ void MIDIApp::LoadMIDI(const char* path, std::string archiveEntry)
 		if (!hasStopped && seq)
 		{
 			this->pendingTitle = std::filesystem::path(pathStr).filename().string();
+			this->pendingArchiveEntry = archiveEntry;
 			this->pendingPath = pathStr;
 			this->pendingSeq = seq;
 			this->hasPendingSeq.store(true);
@@ -362,6 +377,7 @@ void MIDIApp::UnloadMIDI()
 {
 	pendingRenderer.reset();
 	pendingRendererSequence.reset();
+	pendingArchiveEntry.clear();
 	if (!hasSequence) return;
 	SaveFilePreset(currentMidiPath);
 	timer->Pause();
@@ -381,16 +397,6 @@ void MIDIApp::UpdatePendingSequence()
 
 	std::shared_ptr<MIDISequence> seq = pendingSeq;
 	pendingSeq.reset();
-
-	// A packed sequence only has the tick-ordered track store. A per-key renderer would have to
-	// materialize hundreds of megabytes before the first frame; MIDITrail can draw the packed
-	// store directly, so use it unless the user later switches and accepts the background build.
-	if (seq->packed && renderer && renderer->UsesMergedNotes())
-	{
-		std::cout << "Packed file: switching to MIDITrail for the fast path." << std::endl;
-		config.render.SetCurrentRenderer(RendererType::MIDITrail);
-		SetRenderer<MIDIRendererMIDITrail>();
-	}
 
 	currentMidiPath = pendingPath;
 	ApplyFilePreset(currentMidiPath);
@@ -722,6 +728,10 @@ void MIDIApp::Update()
 		overlay->Render(heightOffset);
 	}
 
+	// The opening banner draws after the overlays. It uses ImGui's background list, so menus and
+	// dialogs still render above it.
+	bannerRenderer->Render();
+
 	renderFramebuffer->Unbind();
 
 	// render what was in the framebuffer
@@ -994,19 +1004,50 @@ void MIDIApp::CaptureFrame()
 	if (currentFrame % 10 == 0) std::cout << "Rendered frame " << currentFrame << std::endl;
 }
 
+void MIDIApp::ApplySynthesiaRenderView()
+{
+	if (!renderView || hasSavedViewTicks) return;
+
+	savedViewTicks = renderView->viewTicks;
+	hasSavedViewTicks = true;
+
+	// viewTicks is a tick window, so convert the reference's seconds to ticks at the song's
+	// starting tempo. Time-based sequences store milliseconds * 100 in the same field.
+	double ticksPerSecond = 1000.0;
+	MIDISequence* seq = GetRendererSequence();
+	if (seq != nullptr && !seq->timeBased)
+	{
+		double bpm = 120.0;
+		if (TempoMap* tempoMap = seq->GetTempoMap())
+			bpm = tempoMap->GetBPMAtTick(0);
+
+		ticksPerSecond = (double)seq->resolution * bpm / 60.0;
+	}
+
+	const long ticks = (long)std::lround(SYNTHESIA_NOTE_FALL_LEAD_SECONDS * ticksPerSecond);
+	renderView->viewTicks = std::clamp(ticks, 48L, 7680L);
+}
+
 // Will render to a video until cancelled
 void MIDIApp::RenderMIDIVideo(const RenderSettings& renderSettings)
 {
+	RenderSettings settings = renderSettings;
+	if (config.render.GetCurrentRenderer() == RendererType::Synthesia)
+	{
+		settings.midiStartDelay = SYNTHESIA_MIDI_START_DELAY_SECONDS;
+		ApplySynthesiaRenderView();
+	}
+
 	this->lastSavedTimeSecs = this->timer->Elapsed();
-	this->currentRenderSettings = renderSettings;
+	this->currentRenderSettings = settings;
 
 	this->PrepareRendering();
 	this->currentFrame = -1; // -1 to account for renderers that might need an extra frame to fully settle
 
-	this->exportPixels.resize(renderSettings.width * renderSettings.height * 4);
+	this->exportPixels.resize(settings.width * settings.height * 4);
 
 	// setup FFmpeg
-	std::string cmd = FFmpegCommandBuilder::BuildFFmpegCommand(renderSettings);
+	std::string cmd = FFmpegCommandBuilder::BuildFFmpegCommand(settings);
 	std::cout << "Running FFmpeg command: " << cmd << std::endl;
 	ffmpegPipe = std::make_unique<FFmpegPipe>();
 	if (!ffmpegPipe->Open(cmd))
@@ -1033,6 +1074,7 @@ void MIDIApp::PrepareRendering()
 		overlay->OnResize(currentRenderSettings.width, currentRenderSettings.height);
 	}
 	renderFramebuffer->Resize(currentRenderSettings.width, currentRenderSettings.height);
+	bannerRenderer->Reset();
 
 	lastRenderStartTimeMs = (double)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 	if (!timer->IsPaused()) timer->Pause();
@@ -1044,6 +1086,12 @@ void MIDIApp::FinalizeRendering()
 {
 	std::lock_guard<std::mutex> lock(renderMtx);
 	this->rendering = false;
+
+	if (hasSavedViewTicks && renderView)
+	{
+		renderView->viewTicks = savedViewTicks;
+		hasSavedViewTicks = false;
+	}
 
 	int winW, winH;
 	GLFWwindow* window = mainWindow->GetInternalWindow();

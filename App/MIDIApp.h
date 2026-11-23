@@ -19,6 +19,7 @@ class AbstractOverlayRenderer;
 class NavigationBar;
 class NoteCounterInfo;
 class NoteCounterRenderer;
+class BannerRenderer;
 class TrackNoteCounter;
 class BlurredQuadRenderer;
 class ResourcePackList;
@@ -81,6 +82,10 @@ public:
 	const std::string& GetCounterSourcePath() const { return counterSourcePath; }
 	// Display name of the MIDI loaded last (empty when none).
 	const std::string& GetLoadedMIDIPath() const { return pendingPath; }
+	// Song name for the opening render banner: the entry selected inside an archive when there was
+	// one, otherwise the loaded file name. Keeping it separate from pendingTitle leaves the window
+	// title showing the archive file that was opened.
+	const std::string& GetLoadedMIDITitle() const { return pendingArchiveEntry.empty() ? pendingTitle : pendingArchiveEntry; }
 	// Loads a .CJCMCG chart as the counter/graph source. Returns false and logs on failure.
 	bool LoadCounterSource(const char* path);
 	void ClearCounterSource();
@@ -105,6 +110,9 @@ public:
 	NavigationBar* GetNavigationBar() { return navigationBar.get(); }
 
 	const RenderSettings& GetCurrentRenderSettings() const { return currentRenderSettings; }
+	// Index of the render frame currently being drawn. Banner timing is derived from it so the
+	// exported frames and the banner cannot drift apart.
+	int GetCurrentFrame() const { return currentFrame; }
 	
 	const double GetFPS() const
 	{
@@ -155,6 +163,7 @@ private:
 	std::unique_ptr<AbstractMIDIRenderer> pendingRenderer;
 	std::shared_ptr<MIDISequence> pendingRendererSequence;
 	std::vector<std::unique_ptr<AbstractOverlayRenderer>> overlays;
+	std::unique_ptr<BannerRenderer> bannerRenderer;
 	std::unique_ptr<NavigationBar> navigationBar;
 	std::shared_ptr<NoteCounterInfo> noteCounterInfo;
 	// Owns the per-track cursors behind GetPlain*(); updated once per frame by UpdateOverlayRates().
@@ -194,6 +203,12 @@ private:
 	std::unique_ptr<Quad> fullscreenQuad;
 #pragma endregion
 
+	// Synthesia renders use the reference's note-fall lead-in, which temporarily overrides the
+	// preview's note-size window. The original value is restored when the render finishes.
+	long savedViewTicks = 0;
+	bool hasSavedViewTicks = false;
+	void ApplySynthesiaRenderView();
+
 	std::mutex appMutex;
 	std::mutex thisMtx;
 	std::mutex renderMtx;
@@ -209,6 +224,9 @@ private:
 	// staging variables for thread-safe loading
 	std::shared_ptr<MIDISequence> pendingSeq = nullptr;
 	std::string pendingTitle = "";
+	// Entry chosen inside an archive, if the last load came from one. Used by the render banner so
+	// it shows the song's name rather than the archive's file name.
+	std::string pendingArchiveEntry = "";
 	// Full path of the MIDI currently being loaded, kept for crash reports.
 	std::string pendingPath = "";
 	std::string currentMidiPath = "";

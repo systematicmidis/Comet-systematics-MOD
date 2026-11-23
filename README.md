@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.13b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.13b)
+**v1.11.14b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.14b)
 
 | Asset | Use it for |
 | --- | --- |
@@ -30,7 +30,7 @@ The standalone EXEs are **not complete portable packages**. Keep them beside you
 
 1. Put `Comet-Release.exe` in the same folder as your existing Comet installation.
 2. Start it and open a `.mid`, `.midi`, or a supported compressed archive.
-3. Packed files open in MIDITrail automatically. Selecting a per-key renderer such as Piano From Above builds its data on a worker; the window stays usable and shows preparation progress.
+3. Packed files open in the renderer you selected. A per-key renderer such as Piano From Above materializes the per-key note lists when the file loads; on a very large file that preparation can take a while and use several GB of RAM.
 4. Settings are saved to `config.yml`; the previous good copy is kept as `config.yml.bak`, and a malformed file is moved aside as `config.yml.broken` instead of blocking every launch.
 5. If a bad setting prevents startup, run `Comet.exe --safe-mode` (portable ZIP) or `Comet-Release.exe --safe-mode` (standalone) once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
 

@@ -1,7 +1,31 @@
 #include "FontList.h"
 #include "Utils.h"
 #include "imgui.h"
+#include <algorithm>
+#include <cctype>
 #include <iostream>
+
+bool FontPathsMatch(const std::string& a, const std::string& b)
+{
+	if (a == b) return true;
+	if (a.empty() || b.empty()) return false;
+
+	auto normalize = [](const std::string& value)
+	{
+		std::error_code absoluteError;
+		std::filesystem::path path = std::filesystem::absolute(value, absoluteError);
+		if (absoluteError) path = value;
+
+		std::string text = path.lexically_normal().generic_string();
+#ifdef _WIN32
+		std::transform(text.begin(), text.end(), text.begin(),
+			[](unsigned char c) { return (char)std::tolower(c); });
+#endif
+		return text;
+	};
+
+	return normalize(a) == normalize(b);
+}
 
 FontList::FontList()
 {
@@ -10,6 +34,7 @@ FontList::FontList()
 
 void FontList::ReloadList()
 {
+	cachedFontValid = false;
 	ValidateFontList();
 	fonts.clear();
 
@@ -53,6 +78,7 @@ void FontList::RegisterFontsIntoAtlas(ImFontAtlas* atlas, float defaultFontSize)
 {
 	if (!atlas) return;
 
+	cachedFontValid = false;
 	for (auto& entry : fonts)
 	{
 		if (!entry.path.empty())

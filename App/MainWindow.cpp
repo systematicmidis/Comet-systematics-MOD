@@ -119,27 +119,35 @@ void MainWindow::OpenMIDIDialog()
 
 void MainWindow::LoadMIDIFile(const std::string& path)
 {
-	if (path.empty() || !midiApp) return;
-
-	// A container with several named songs would otherwise load whichever one happened to be
-	// largest. Ask once, before the loading dialog, so the picker cannot race a load.
-	std::string archiveError;
-	auto entries = ArchiveLoader::ListMidiEntries(path, &archiveError);
-	if (entries.size() > 1)
-	{
-		if (auto* picker = this->dialogManager.GetDialog<ArchiveEntryDialog>())
-		{
-			picker->Open(path, entries);
-			return;
-		}
-	}
-
 	LoadMIDIFile(path, std::string());
 }
 
 void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiveEntry, bool preflight)
 {
 	if (path.empty() || !midiApp) return;
+
+	// Resolve the song's entry before the large-file check. A container with several named songs
+	// would otherwise load whichever happened to be largest, so ask once before the loading dialog
+	// and before a load can race the picker. A single-song archive has no picker, but its entry
+	// still names the song better than the archive's own file name does.
+	std::string entry = archiveEntry;
+	if (entry.empty())
+	{
+		std::string archiveError;
+		auto entries = ArchiveLoader::ListMidiEntries(path, &archiveError);
+		if (entries.size() > 1)
+		{
+			if (auto* picker = this->dialogManager.GetDialog<ArchiveEntryDialog>())
+			{
+				picker->Open(path, entries);
+				return;
+			}
+		}
+		else if (entries.size() == 1)
+		{
+			entry = entries.front().name;
+		}
+	}
 
 	// Preflight before a multi-hundred-megabyte load. This is deliberately a confirmation, not
 	// an automatic refusal: the packed loader can handle files that would exhaust other players.
@@ -150,17 +158,17 @@ void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiv
 	{
 		std::ostringstream message;
 		message << "This file is " << (bytes / (1024.0 * 1024.0)) << " MB.\n\n"
-			<< "Large files use the packed track store. MIDITrail can draw it immediately; selecting "
-			<< "a per-key renderer builds that data in the background and may use several GB of RAM.\n\n"
+			<< "Large files use the packed track store. MIDITrail can draw it immediately; a per-key "
+			<< "renderer must build the per-key note lists first and may use several GB of RAM.\n\n"
 			<< "Continue loading?";
 
 		if (auto* messageDialog = dialogManager.GetDialog<MessageDialog>())
 		{
 			messageDialog->Open("Large MIDI file", message.str(), MessageDialog::ButtonType::YesNo,
-				[this, path, archiveEntry](MessageDialog::Result result)
+				[this, path, entry](MessageDialog::Result result)
 				{
 					if (result != MessageDialog::Result::Yes) return;
-					this->midiApp->LoadMIDI(path.c_str(), archiveEntry);
+					this->midiApp->LoadMIDI(path.c_str(), entry);
 					if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
 						loading->Open();
 				});
@@ -168,7 +176,7 @@ void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiv
 		}
 	}
 
-	this->midiApp->LoadMIDI(path.c_str(), archiveEntry);
+	this->midiApp->LoadMIDI(path.c_str(), entry);
 	if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
 		loading->Open();
 }
