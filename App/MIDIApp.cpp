@@ -398,6 +398,16 @@ void MIDIApp::UpdatePendingSequence()
 	std::shared_ptr<MIDISequence> seq = pendingSeq;
 	pendingSeq.reset();
 
+	// A packed sequence only has the tick-ordered track store. A per-key renderer would have to
+	// materialize hundreds of megabytes before the first frame; MIDITrail can draw the packed
+	// store directly, so use it unless the user later switches and accepts the background build.
+	if (seq->packed && renderer && renderer->UsesMergedNotes())
+	{
+		std::cout << "Packed file: switching to MIDITrail for the fast path." << std::endl;
+		config.render.SetCurrentRenderer(RendererType::MIDITrail);
+		SetRenderer<MIDIRendererMIDITrail>();
+	}
+
 	currentMidiPath = pendingPath;
 	ApplyFilePreset(currentMidiPath);
 	renderer->LoadSequence(seq);
