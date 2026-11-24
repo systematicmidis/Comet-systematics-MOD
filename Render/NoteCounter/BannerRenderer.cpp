@@ -43,17 +43,19 @@ namespace
 	// measured ink positions into the line-box origins ImGui's AddText expects.
 	constexpr float TEXT_INK_OFFSET_FRACTION = 0.242f;
 
-	// Synthesia's title bar in the recording: the app content is 2030 x 1425. The full-width bar
-	// spans y = 376..759, with a 10 px bright edge, a 10 px dark inner shadow, and the title's white
-	// ink 84 px high at 1425p. Those measurements are converted to frame fractions here.
-	constexpr float SYNTHESIA_BAR_TOP_FRACTION = 376.0f / 1425.0f;
-	constexpr float SYNTHESIA_BAR_HEIGHT_FRACTION = 384.0f / 1425.0f;
-	constexpr float SYNTHESIA_TOP_INSET_FRACTION = 26.0f / 1425.0f;
-	constexpr float SYNTHESIA_BOTTOM_INSET_FRACTION = 28.0f / 1425.0f;
-	constexpr float SYNTHESIA_BORDER_FRACTION = 10.0f / 1425.0f;
-	constexpr float SYNTHESIA_TITLE_SIZE_FRACTION = 82.0f / 1080.0f;
-	constexpr float SYNTHESIA_TITLE_INK_TOP_FRACTION = 531.0f / 1425.0f;
-	constexpr float SYNTHESIA_TITLE_OUTLINE_FRACTION = 3.0f / 1425.0f;
+	// Synthesia's song title band, measured from "INSANE 88 KEY POLYRHYTHM" in a 1920 x 1080
+	// window: the full-width bar spans y = 368..555, a 6 px bright edge plus a 6 px dark inner
+	// shadow sit inside both ends, and the white title ink is 31 px high at y = 444. Those
+	// measurements are converted to frame fractions here so the band keeps the same placement
+	// at every render resolution.
+	constexpr float SYNTHESIA_BAR_TOP_FRACTION = 368.0f / 1080.0f;
+	constexpr float SYNTHESIA_BAR_HEIGHT_FRACTION = 188.0f / 1080.0f;
+	constexpr float SYNTHESIA_TOP_INSET_FRACTION = 13.0f / 1080.0f;
+	constexpr float SYNTHESIA_BOTTOM_INSET_FRACTION = 12.0f / 1080.0f;
+	constexpr float SYNTHESIA_BORDER_FRACTION = 6.0f / 1080.0f;
+	constexpr float SYNTHESIA_TITLE_SIZE_FRACTION = 52.0f / 1080.0f;
+	constexpr float SYNTHESIA_TITLE_INK_TOP_FRACTION = 446.0f / 1080.0f;
+	constexpr float SYNTHESIA_TITLE_OUTLINE_FRACTION = 2.0f / 1080.0f;
 	constexpr float SYNTHESIA_TEXT_INK_OFFSET_FRACTION = 0.206f;
 
 	struct SynthBarColors
@@ -125,32 +127,41 @@ namespace
 		return (color & ~IM_COL32_A_MASK) | ((ImU32)a << IM_COL32_A_SHIFT);
 	}
 
-	// The Synthesia bar is part of the app's chrome, so tint it with the theme accent the user has
-	// selected. The bright outer edge and dark inner shadow are shades of that same accent.
+	// Synthesia's title band has a light and a dark colour scheme. Comet's light theme uses the
+	// Crystal Blue band from the reference recording; a dark theme uses the Synthesia Classic band
+	// sampled from the 1080p "INSANE 88 KEY POLYRHYTHM" screenshot. Following the theme's
+	// background instead of its accent keeps custom themes on the variant that matches their chrome.
+	bool IsDarkTheme(const AppTheme* theme)
+	{
+		const ImVec4& background = theme->colors.background;
+		const float luminance = background.x * 0.2126f + background.y * 0.7152f + background.z * 0.0722f;
+		return luminance < 0.5f;
+	}
+
 	SynthBarColors GetSynthBarColors(MIDIApp* app)
 	{
-		ImVec4 base(16.0f / 255.0f, 122.0f / 255.0f, 175.0f / 255.0f, 1.0f);
+		bool dark = false;
 		if (ThemesList* themes = app->GetThemeList())
 		{
 			if (AppTheme* theme = themes->GetCurrentTheme())
-				base = ImVec4(theme->colors.accent.x, theme->colors.accent.y, theme->colors.accent.z, 1.0f);
+				dark = IsDarkTheme(theme);
 		}
 
-		const float maxChannel = std::max({ base.x, base.y, base.z });
-		ImVec4 border = base;
-		if (maxChannel > 0.0f)
-			border = ImVec4(base.x / maxChannel, base.y / maxChannel, 1.0f, 1.0f);
+		if (dark)
+		{
+			// Synthesia Classic: fill #3F4654, bright edge #9CA4B8, inner shadow #24282E.
+			return {
+				IM_COL32(63, 70, 84, 255),
+				IM_COL32(156, 164, 184, 255),
+				IM_COL32(36, 40, 46, 255)
+			};
+		}
 
-		// The bar surface is a darker shade of the theme accent, with the accent itself driving
-		// the bright outer edge. These ratios reproduce the reference's dark fill (#107AAF),
-		// bright edge (#00A8FF) and inner shadow (#094669) when the theme accent is that blue.
-		const ImVec4 fill(base.x * 0.70f, base.y * 0.70f, base.z * 0.70f, 1.0f);
-		const ImVec4 shadow(fill.x * 0.59f, fill.y * 0.59f, fill.z * 0.59f, 1.0f);
-
+		// Crystal Blue: fill #107AAF, bright edge #00A8FF, inner shadow #094669.
 		return {
-			ImGui::ColorConvertFloat4ToU32(fill),
-			ImGui::ColorConvertFloat4ToU32(border),
-			ImGui::ColorConvertFloat4ToU32(shadow)
+			IM_COL32(16, 122, 175, 255),
+			IM_COL32(0, 168, 255, 255),
+			IM_COL32(9, 70, 105, 255)
 		};
 	}
 
