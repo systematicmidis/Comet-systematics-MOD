@@ -328,6 +328,7 @@ add_executable(Comet
     "Comet.cpp"
     App/MainWindow.cpp
     App/MIDIApp.cpp
+    App/Localization/Localization.cpp
     MIDI/SavedInputStream.cpp
     MIDI/ProgressInputStream.cpp
     Inter.hpp

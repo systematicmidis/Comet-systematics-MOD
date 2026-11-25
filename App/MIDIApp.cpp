@@ -52,6 +52,7 @@
 #include "Telemetry/CrashReporter.h"
 #include <nlohmann/json.hpp>
 #include "FontList.h"
+#include "Localization/Localization.h"
 
 namespace
 {
@@ -137,10 +138,15 @@ MIDIApp::MIDIApp(MainWindow* mainWindow)
 	config = MIDIPlayerConfig{};
 	config.LoadConfigOrDefault();
 
+	localization = std::make_unique<Localization>();
+	localization->PreloadLanguages();
+	SetLanguage(config.app.language);
+
 	UpdateCrashContext();
 
 	renderView = std::make_shared<RenderView>();
 	timer = std::make_shared<MIDITimer>();
+	timer->ChangeSpeed(config.midi.playSpeed);
 	navigationBar = std::make_unique<NavigationBar>(this, renderView.get());
 
 	noteCounterInfo = std::make_shared<NoteCounterInfo>();
@@ -163,6 +169,20 @@ MIDIApp::~MIDIApp()
 {
 	SaveSettings();
 	Models::UnloadModels();
+}
+
+void MIDIApp::SetLanguage(const std::string& id)
+{
+	const std::string requested = id.empty() ? "en-US" : id;
+	if (!localization)
+		localization = std::make_unique<Localization>();
+
+	if (!localization->LoadLanguage(requested))
+		localization->LoadLanguage("en-US");
+
+	const Localization::LanguageKey* current = localization->GetCurrentLanguage();
+	config.app.language = current ? current->id : "en-US";
+	localizationDirty = true;
 }
 
 void MIDIApp::ApplyFilePreset(const std::string& path)

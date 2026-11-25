@@ -1,4 +1,5 @@
 #include "MIDITimer.h"
+#include <algorithm>
 #include <chrono>
 
 void MIDITimer::Start(double startTime)
@@ -55,12 +56,27 @@ void MIDITimer::NavigateTo(double timeSeconds)
 	hasNavigated = true;
 }
 
+void MIDITimer::ChangeSpeed(double newSpeed)
+{
+	newSpeed = std::clamp(newSpeed, 0.1, 3.0);
+
+	// Re-anchor the current segment so changing speed never makes the playhead jump.
+	if (running && !paused)
+	{
+		baseTime = Elapsed();
+		startPoint = clock::now();
+		lastTime = baseTime;
+	}
+
+	speed = newSpeed;
+}
+
 double MIDITimer::Elapsed() const
 {
 	if (!running || paused) return baseTime;
 
 	auto now = clock::now();
-	return baseTime + std::chrono::duration<double>(now - startPoint).count();
+	return baseTime + std::chrono::duration<double>(now - startPoint).count() * speed;
 }
 
 double MIDITimer::GetDeltaTime()

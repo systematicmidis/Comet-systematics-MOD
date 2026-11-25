@@ -63,6 +63,7 @@ struct MIDIPlayerConfig
 	struct ConfigApp
 	{
 		size_t currThemeID = 0;
+		std::string language = "en-US";
 	};
 
 	struct ConfigOverlayInfo
@@ -134,6 +135,7 @@ struct MIDIPlayerConfig
 	{
 		bool multithreadedLoading = true;
 		bool timeBasedLoading = false;
+		float playSpeed = 1.0f;
 		bool loadNotesOnly = false;
 		bool usePlayThread = true;
 		// Path to an optional .CJCMCG chart used as the note counter/graph source. Empty means the

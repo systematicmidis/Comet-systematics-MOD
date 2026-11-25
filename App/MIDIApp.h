@@ -10,6 +10,7 @@
 #include <vector>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 class MainWindow;
 class ThemesList;
@@ -33,6 +34,7 @@ class Quad;
 class FFmpegPipe;
 class AbstractMIDILoader;
 class MIDISequence;
+class Localization;
 
 // Matches Dear ImGui's `enum ImGuiKey : int { ... };` declaration exactly
 // (name, underlying type, non-class enum) so we can use it here without
@@ -63,6 +65,14 @@ public:
 	void UpdatePendingSequence();
 	void RenderMIDIVideo(const RenderSettings& renderSettings);
 	void RegisterInput(InputState& inputState);
+
+	Localization* GetLocalization() { return localization.get(); }
+	void SetLanguage(const std::string& id);
+	// True once after a language change, so the menu bar and window title can be rebuilt.
+	[[nodiscard]] bool WasLocalizationDirty()
+	{
+		return std::exchange(localizationDirty, false);
+	}
 
 	// Pushes everything a crash report should know about the current session (crash-report
 	// settings, a snapshot of the config, loaded MIDI details) into the crash reporter. Call it
@@ -153,6 +163,9 @@ public:
 private:
 	MainWindow* mainWindow;
 	MIDIPlayerConfig config;
+
+	std::unique_ptr<Localization> localization;
+	bool localizationDirty = false;
 
 	std::unique_ptr<ThemesList> themesList;
 	std::unique_ptr<FontList> fontList;

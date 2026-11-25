@@ -11,6 +11,7 @@
 #include "Render/NoteCounter/NoteCounterRenderer.h"
 #include "DialogMacros.h"
 #include "App/UI/Themes/Themes.h"
+#include "App/Localization/Localization.h"
 #include "ColorPalette/ColorPaletteList.h"
 #include "ResourcePack/ResourcePackList.h"
 #include "App/FontList.h"
@@ -126,6 +127,7 @@ namespace
 
 void SettingsDialog::DrawContent()
 {
+	Localization* localization = app->GetLocalization();
 	const float footerHeight =
 		ImGui::GetFrameHeightWithSpacing() + 2.0f * ImGui::GetStyle().ItemSpacing.y;
 
@@ -133,31 +135,31 @@ void SettingsDialog::DrawContent()
 	{
 		if (ImGui::BeginTabBar("MainTabs"))
 		{
-			if (ImGui::BeginTabItem("App"))
+			if (ImGui::BeginTabItem(TRANSLATE("dialog.settings.app").c_str()))
 			{
 				DrawAppTab();
 
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Visual"))
+			if (ImGui::BeginTabItem(TRANSLATE("dialog.settings.visual").c_str()))
 			{
 				DrawVisualTab();
 
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Audio"))
+			if (ImGui::BeginTabItem(TRANSLATE("dialog.settings.audio").c_str()))
 			{
 				DrawAudioTab();
 
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("MIDI"))
+			if (ImGui::BeginTabItem(TRANSLATE("dialog.settings.midi").c_str()))
 			{
 				DrawMIDITab();
 
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Mod"))
+			if (ImGui::BeginTabItem(localization->Get("dialog.settings.mod", "Mod").c_str()))
 			{
 				DrawModTab();
 
@@ -169,7 +171,7 @@ void SettingsDialog::DrawContent()
 
 	ImGui::EndChild();
 	ImGui::Separator();
-	if (ImGui::Button("Apply & Close"))
+	if (ImGui::Button(TRANSLATE("dialog.applyclose").c_str()))
 	{
 		// "Apply" really does write the settings out: without this the file was only written on a
 		// clean exit, so a kill or a crash lost every change made in the dialog.
@@ -182,6 +184,7 @@ void SettingsDialog::DrawAppTab()
 {
 	auto config = app->GetConfig();
 	ThemesList* themesList = app->GetThemeList();
+	Localization* localization = app->GetLocalization();
 
 	enum AppSubTab
 	{
@@ -193,18 +196,40 @@ void SettingsDialog::DrawAppTab()
 
 	static AppSubTab appSubTab = General;
 
-	DrawSubTabs("AppSettings", "APP SETTINGS",
+	DrawSubTabs("AppSettings", localization->Get("dialog.settings.app.header", "APP SETTINGS").c_str(),
 		appSubTab, 200.0f, {
-			{ "General", General },
-			{ "Theme", Theme },
-			{ "Navigation", Navigation },
-			{ "Crash Reports", CrashReports }
+			{ TRANSLATE("dialog.settings.app.general").c_str(), General },
+			{ TRANSLATE("dialog.settings.app.theme").c_str(), Theme },
+			{ TRANSLATE("dialog.settings.app.nav").c_str(), Navigation },
+			{ localization->Get("dialog.settings.app.crash", "Crash Reports").c_str(), CrashReports }
 		},
 		[&] {
 			switch (appSubTab)
 			{
 			case General:
 			{
+				SECTION_HEADER(TRANSLATE("dialog.settings.app.general.language").c_str());
+
+				BEGIN_SECTION("##languageSec")
+				{
+					SETUP_SECTION;
+					SECTION_ENTRY(
+						SECTION_LABEL(TRANSLATE("dialog.settings.app.general.language").c_str()),
+						{
+							auto* current = localization->GetCurrentLanguage();
+							if (ImGui::BeginCombo("##languageCombo", current ? current->label.c_str() : ""))
+							{
+								for (const auto& lang : localization->GetLanguageList())
+								{
+									if (ImGui::Selectable(lang.label.c_str(), current && lang.id == current->id))
+										app->SetLanguage(lang.id);
+								}
+								ImGui::EndCombo();
+							}
+						});
+				}
+				END_SECTION;
+
 				SECTION_HEADER("Rendering");
 
 				BEGIN_SECTION("##renderSec")
@@ -733,8 +758,9 @@ void SettingsDialog::DrawThemeEditor()
 void SettingsDialog::DrawVisualTab()
 {
 	auto config = app->GetConfig();
+	Localization* localization = app->GetLocalization();
 
-	ImGui::Text("These settings will also apply when rendering videos!");
+	ImGui::TextUnformatted(TRANSLATE("dialog.settings.visual.disclaimer").c_str());
 	ImGui::Separator();
 
 	enum VisualSubTab
@@ -746,11 +772,11 @@ void SettingsDialog::DrawVisualTab()
 
 	static VisualSubTab visualSubTab = Renderer;
 
-	DrawSubTabs("VisualSettings", "VISUAL SETTINGS",
+	DrawSubTabs("VisualSettings", TRANSLATE("dialog.settings.visual.header").c_str(),
 		visualSubTab, 160.0f, {
-			{ "Renderer", Renderer },
-			{ "Note Colors", NoteColors },
-			{ "Counter & Stats", CounterAndStats }
+			{ TRANSLATE("dialog.settings.visual.renderer").c_str(), Renderer },
+			{ TRANSLATE("dialog.settings.visual.colors").c_str(), NoteColors },
+			{ TRANSLATE("dialog.settings.visual.counter").c_str(), CounterAndStats }
 		},
 		[&] {
 			switch (visualSubTab)

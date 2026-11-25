@@ -1,4 +1,5 @@
 #include "MIDIPlayerConfig.h"
+#include <algorithm>
 #include <yaml-cpp/yaml.h>
 #include "ConfigSection.h"
 #include <optional>
@@ -48,6 +49,7 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		{
 			ConfigApp app;
 			app.currThemeID = appSec->GetInt("themeID", 0);
+			app.language = appSec->GetString("language", "en-US");
 			this->app = app;
 		}
 
@@ -117,6 +119,7 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		{
 			ConfigMIDI midi;
 			midi.multithreadedLoading = midiSec->GetBoolean("multithreaded", true);
+			midi.playSpeed = std::clamp(midiSec->GetFloat("playSpeed", 1.0f), 0.1f, 3.0f);
 			midi.timeBasedLoading = midiSec->GetBoolean("timeBased", false);
 			midi.cjcmcgPath = midiSec->GetString("cjcmcgPath", "");
 
@@ -269,6 +272,7 @@ void MIDIPlayerConfig::SaveConfig()
 	config["version"] = 2;
 
 	config["app"]["themeID"] = app.currThemeID;
+	config["app"]["language"] = app.language;
 
 	config["overlay"]["scale"] = overlayInfo.scale;
 	config["overlay"]["blurBehind"] = overlayInfo.blurBehind;
@@ -294,6 +298,7 @@ void MIDIPlayerConfig::SaveConfig()
 	config["banner"]["synthesiaScale"] = banner.synthesiaScale;
 
 	config["midi"]["multithreaded"] = midi.multithreadedLoading;
+	config["midi"]["playSpeed"] = midi.playSpeed;
 	config["midi"]["timeBased"] = midi.timeBasedLoading;
 	config["midi"]["cjcmcgPath"] = midi.cjcmcgPath;
 

@@ -5,6 +5,7 @@
 #include "App/MIDIApp.h"
 #include "MIDI/Timer/MIDITimer.h"
 #include "App/UI/Widgets/ThinSlider.h"
+#include "App/Localization/Localization.h"
 
 #define NAVIGATION_ROWS 2
 #define MIN_MIDI_TIME_SECS -3.0f
@@ -96,6 +97,8 @@ void NavigationBar::Draw()
 	{
 		float imageSize = frameHeight - framePadding * 2.0f;
 		MIDITimer* timer = app->GetTimer().get();
+		Localization* localization = app->GetLocalization();
+		MIDIPlayerConfig* config = app->GetConfig();
 		// top bar
 		{
 			{
@@ -182,7 +185,21 @@ void NavigationBar::Draw()
 
 			if (ImGui::IsItemHovered())
 			{
-				ImGui::SetTooltip("Note size (in ticks)");
+				ImGui::SetTooltip("%s", TRANSLATE("nav.notesize").c_str());
+			}
+
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(120);
+			float playbackSpeed = config->midi.playSpeed;
+			if (ThinSlider::Draw<float>("##navPlaybackSpeed", &playbackSpeed, 0.25f, 3.0f, "%.2fx"))
+			{
+				config->midi.playSpeed = std::clamp(playbackSpeed, 0.25f, 3.0f);
+				timer->ChangeSpeed(config->midi.playSpeed);
+			}
+
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", localization->Get("nav.playspeed", "Playback speed").c_str());
 			}
 		}
 

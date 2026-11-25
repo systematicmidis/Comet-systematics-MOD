@@ -8,7 +8,7 @@
 
 ## Current release
 
-**v1.11.16b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.16b)
+**v1.11.17b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.17b)
 
 | Asset | Use it for |
 | --- | --- |
@@ -44,6 +44,8 @@ This table compares this MOD with the upstream [MrCHB1/Comet](https://github.com
 
 | Area | Normal Comet (upstream) | Comet Systematics MOD |
 | --- | --- | --- |
+| **Interface and playback** | English UI at a fixed tempo. | 17 interface languages from the upstream beta, selectable in **Settings → App → General**, with system-font fallbacks for non-Latin scripts. The navigation bar adds a **0.25x–3.00x playback speed** slider that also drives the audio engines and is saved with the configuration. |
+| **Startup compatibility** | Requires an OpenGL 4.3 context. | Tries OpenGL 4.3, 4.2, 4.1, 4.0 and then 3.3, so the app also opens on older integrated GPUs. |
 | **Very large MIDI loading** | Builds the per-key render store while loading. Large files can be slow and memory-heavy. | Files above roughly 4 million unique notes use a packed per-track store. MIDITrail and audio walk that store directly; legacy per-key data is built lazily on a background worker only when another renderer needs it. A confirmation appears before files of 512 MB or more are opened from the UI. |
 | **Note totals** | Large files can be limited by the loader's storage and count path. | Keeps the complete non-deduplicated note count, including repeated tracks and repeated note-ons. Tested with a 100,000,000-note file and a 35-trillion-note archive. |
 | **Compressed files and archives** | Plain MIDI files are the normal input path. | Nested archive support, streaming `.xz` chains, repeated-cycle proof, and a picker when an archive contains more than one named MIDI. |
@@ -92,7 +94,7 @@ The Ziggy comparison is a parse-vs-load comparison on the 100M file. On an 8,000
 
 ## Portable package
 
-The release ZIP contains `Comet.exe`, `assets/` (including the soundfont), `bass.dll`, `bassmidi.dll`, the Visual C++ runtime DLLs, `README.md`, and `LICENSE.txt`. `SHA256SUMS.txt` is published beside the ZIP. Extract it to a new folder; do not copy only the EXE over an existing installation.
+The release ZIP contains `Comet.exe`, `assets/` (including the soundfont and the locale files), `bass.dll`, `bassmidi.dll`, the Visual C++ runtime DLLs, `README.md`, and `LICENSE.txt`. `SHA256SUMS.txt` is published beside the ZIP. Extract it to a new folder; do not copy only the EXE over an existing installation.
 
 ## Build from source
 

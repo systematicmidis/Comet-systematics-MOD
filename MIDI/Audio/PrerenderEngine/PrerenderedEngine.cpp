@@ -99,9 +99,10 @@ void PrerenderedEngine::Destroy()
 void PrerenderedEngine::SyncPlayer(double time)
 {
     std::lock_guard<std::mutex> lock(bufferMutex);
-    double t = startTime + bufferReadPos / (double)SAMPLE_RATE;
+    const double speed = std::max(lastSpeed.load(), 0.01);
+    double t = startTime + (bufferReadPos / (double)SAMPLE_RATE) * speed;
     double offset = time - t;
-    int newPos = bufferReadPos + (int)(offset * SAMPLE_RATE);
+    int newPos = bufferReadPos + (int)(offset * SAMPLE_RATE / speed);
     if (newPos < 0) newPos = 0;
     if (std::abs(bufferReadPos - newPos) / (double)SAMPLE_RATE > 0.03) bufferReadPos = newPos;
 }
@@ -117,6 +118,7 @@ void PrerenderedEngine::Start(std::shared_ptr<MIDISequence> seq, std::shared_ptr
         this->seq = seq;
         this->timer = timer;
         startTime = timer->Elapsed();
+        lastSpeed.store(std::max(timer->GetSpeed(), 0.01));
     }
     
     isPlaying = true;
@@ -271,6 +273,7 @@ void PrerenderedEngine::RenderLoop(double initialStartTime)
 
     bassMidi = std::make_unique<BASSMIDI>(maxVoices, noFx);
     auto* tempoMap = seq->GetTempoMap();
+    const double renderSpeed = std::max(lastSpeed.load(), 0.01);
 
     {
         std::shared_ptr<MIDITimer> currentTimer;
@@ -313,7 +316,7 @@ void PrerenderedEngine::RenderLoop(double initialStartTime)
             bufferWritePos = bufferReadPos;
         }
 
-        double offset = evTime - startTime;
+        double offset = (evTime - startTime) / renderSpeed;
         int targetSamplePos = (int)((double)SAMPLE_RATE * offset);
 
         int samples;
@@ -417,6 +420,14 @@ void PrerenderedEngine::TimerLoop()
             {
                 const bool seekBack = currTime < currentTimer->GetPauseTime();
                 StartPrerender(seekBack, currTime);
+                lastTimerTime = currTime;
+            }
+
+            const double currSpeed = std::max(currentTimer->GetSpeed(), 0.01);
+            if (!paused && std::abs(currSpeed - lastSpeed.load()) > 1e-4)
+            {
+                lastSpeed.store(currSpeed);
+                StartPrerender(true, currTime);
                 lastTimerTime = currTime;
             }
 

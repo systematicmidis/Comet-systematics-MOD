@@ -15,6 +15,9 @@ public:
 	void TogglePause();
 
 	void NavigateTo(double timeSeconds);
+	void ChangeSpeed(double newSpeed);
+
+	[[nodiscard]] double GetSpeed() const { return speed; }
 	
 	bool HasNavigatedRecently()
 	{
@@ -49,6 +52,7 @@ private:
 		= clock::now();
 	double baseTime = 0.0; // accumulated time before the current run segment
 	double lastTime = 0.0; // last value returned by Elapsed/GetDeltaTime
+	double speed = 1.0;    // playback speed multiplier
 
 	bool running = false;
 	bool paused = true;
