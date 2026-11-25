@@ -12,6 +12,9 @@ namespace CometDefaultThemes
 {
     extern std::shared_ptr<AppTheme> DefaultLightMode;
     extern std::shared_ptr<AppTheme> DefaultDarkMode;
+    // Built-in recreation of Synthesia's dark UI. Like the two Comet themes it lives in the binary
+    // and is never written to the themes folder; that folder only holds themes the user creates.
+    extern std::shared_ptr<AppTheme> SynthesiaRemastered;
     extern std::vector<std::shared_ptr<AppTheme>> DefaultThemesList;
     void InitializeDefaultThemes();
 }
@@ -38,6 +41,27 @@ struct ThemeColors
     ImVec4 separator =     ImVec4(0.75f, 0.75f, 0.75f, 1.00f);
 };
 
+// Shape and spacing of the UI, so a theme can change how controls look and not only their
+// colours. The defaults match Comet's original layout. Custom theme files can override any of
+// these in a "style" section (see Themes.cpp).
+struct ThemeStyle
+{
+    float windowRounding = 6.0f;
+    float childRounding = 4.0f;
+    float frameRounding = 4.0f;
+    float popupRounding = 4.0f;
+    float scrollbarRounding = 6.0f;
+    float grabRounding = 4.0f;
+
+    float windowBorderSize = 1.0f;
+    float frameBorderSize = 1.0f;
+    float popupBorderSize = 1.0f;
+
+    ImVec2 itemSpacing = ImVec2(8.0f, 6.0f);
+    ImVec2 windowPadding = ImVec2(10.0f, 10.0f);
+    ImVec2 framePadding = ImVec2(4.0f, 3.0f);
+};
+
 struct ThemeInfo
 {
     std::string name = "Unnamed theme";
@@ -45,16 +69,6 @@ struct ThemeInfo
     std::string description = "No description set.";
     int version = 0;
 };
-
-// Palettes the custom-theme editor starts from. Synthesia REMASTERED follows the app's light or
-// dark appearance the same way the Synthesia opening banner does: Crystal Blue on a light Comet
-// theme, Synthesia Classic on a dark one.
-namespace ThemePresets
-{
-    bool IsDark(const ThemeColors& colors);
-    ThemeColors CometDefault(bool dark);
-    ThemeColors SynthesiaRemastered(bool dark);
-}
 
 class AppTheme
 {
@@ -65,6 +79,7 @@ public:
     void ApplyTheme();
 
     ThemeColors colors;
+    ThemeStyle style;
     ThemeInfo info;
 };
 
@@ -88,7 +103,8 @@ public:
     {
         if (availableThemes.size() == 0) return;
 
-        if (themeIdx > availableThemes.size())
+        // A theme file may have been removed since this index was stored in the config.
+        if (themeIdx >= availableThemes.size())
         {
             SetThemeAndApply(availableThemes.size() - 1);
             return;
@@ -98,10 +114,6 @@ public:
     }
     void ReloadThemesList();
     void OpenThemeListFolder() const;
-
-    // Writes the theme to <themes folder>/<name>.yml, reloads the list and selects the saved
-    // theme. Returns false with an explanation in error when the file cannot be written.
-    bool SaveTheme(const AppTheme& theme, std::string& error);
 private:
     std::shared_ptr<AppTheme> ParseTheme(std::string path);
     ImVec4 ParseColor(const YAML::Node& node, const ImVec4& defaultColor);

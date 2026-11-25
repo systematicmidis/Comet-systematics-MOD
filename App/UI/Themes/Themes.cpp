@@ -3,85 +3,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <cctype>
 #include <cstdlib>
 #include "Utils.h"
 
 std::shared_ptr<AppTheme> CometDefaultThemes::DefaultLightMode = nullptr;
 std::shared_ptr<AppTheme> CometDefaultThemes::DefaultDarkMode = nullptr;
+std::shared_ptr<AppTheme> CometDefaultThemes::SynthesiaRemastered = nullptr;
 std::vector<std::shared_ptr<AppTheme>> CometDefaultThemes::DefaultThemesList;
-
-namespace ThemePresets
-{
-	bool IsDark(const ThemeColors& colors)
-	{
-		const ImVec4& background = colors.background;
-		const float luminance =
-			background.x * 0.2126f + background.y * 0.7152f + background.z * 0.0722f;
-		return luminance < 0.5f;
-	}
-
-	ThemeColors CometDefault(bool dark)
-	{
-		ThemeColors colors;
-		if (!dark) return colors;
-
-		colors.text = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);
-		colors.textDisabled = ImVec4(0.85f, 0.85f, 0.85f, 0.50f);
-		colors.background = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-		colors.backgroundAlt = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-		colors.headerBg = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-		colors.controlBase = ImVec4(0.35f, 0.35f, 0.35f, 1.00f);
-		colors.controlHover = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-		colors.controlActive = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
-		colors.inputBg = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-		colors.accent = ImVec4(0.18f, 0.43f, 0.71f, 1.00f);
-		colors.accentActive = ImVec4(0.22f, 0.50f, 0.82f, 1.00f);
-		colors.border = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-		colors.separator = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-		return colors;
-	}
-
-	// Sampled from Synthesia 10's chrome. Crystal Blue is the light blue variant used on a light
-	// Comet theme; Synthesia Classic is its charcoal variant. The accent colours are the same ones
-	// the opening banner's Synthesia title bar uses, so the chrome and the banner agree.
-	ThemeColors SynthesiaRemastered(bool dark)
-	{
-		ThemeColors colors;
-		if (dark)
-		{
-			colors.text = ImVec4(0.90f, 0.92f, 0.96f, 1.00f);
-			colors.textDisabled = ImVec4(0.90f, 0.92f, 0.96f, 0.45f);
-			colors.background = ImVec4(0.14f, 0.16f, 0.18f, 1.00f); // #24282E
-			colors.backgroundAlt = ImVec4(0.10f, 0.11f, 0.13f, 1.00f); // #1A1C21
-			colors.headerBg = ImVec4(0.07f, 0.08f, 0.09f, 1.00f); // #121417
-			colors.controlBase = ImVec4(0.25f, 0.27f, 0.33f, 1.00f); // #3F4654
-			colors.controlHover = ImVec4(0.30f, 0.33f, 0.40f, 1.00f);
-			colors.controlActive = ImVec4(0.36f, 0.39f, 0.47f, 1.00f);
-			colors.inputBg = ImVec4(0.09f, 0.10f, 0.11f, 1.00f);
-			colors.accent = ImVec4(0.30f, 0.58f, 0.88f, 1.00f); // #4C94E0
-			colors.accentActive = ImVec4(0.00f, 0.66f, 1.00f, 1.00f); // #00A8FF
-			colors.border = ImVec4(0.05f, 0.05f, 0.06f, 1.00f);
-			colors.separator = ImVec4(0.22f, 0.24f, 0.28f, 1.00f);
-			return colors;
-		}
-
-		colors.text = ImVec4(0.05f, 0.12f, 0.18f, 1.00f);
-		colors.textDisabled = ImVec4(0.05f, 0.12f, 0.18f, 0.45f);
-		colors.background = ImVec4(0.90f, 0.95f, 0.99f, 1.00f); // #E6F2FC
-		colors.backgroundAlt = ImVec4(0.96f, 0.98f, 1.00f, 1.00f); // #F5FAFF
-		colors.headerBg = ImVec4(0.84f, 0.91f, 0.97f, 1.00f); // #D6E8F7
-		colors.controlBase = ImVec4(0.80f, 0.87f, 0.94f, 1.00f);
-		colors.controlHover = ImVec4(0.73f, 0.83f, 0.92f, 1.00f);
-		colors.controlActive = ImVec4(0.66f, 0.78f, 0.90f, 1.00f);
-		colors.inputBg = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-		colors.accent = ImVec4(0.063f, 0.478f, 0.686f, 1.00f); // #107AAF (Crystal Blue)
-		colors.accentActive = ImVec4(0.00f, 0.659f, 1.00f, 1.00f); // #00A8FF
-		colors.border = ImVec4(0.60f, 0.72f, 0.82f, 1.00f);
-		colors.separator = ImVec4(0.68f, 0.78f, 0.87f, 1.00f);
-		return colors;
-	}
-}
 
 void CometDefaultThemes::InitializeDefaultThemes()
 {
@@ -122,8 +50,44 @@ void CometDefaultThemes::InitializeDefaultThemes()
 	dmColors.border = ImVec4(0.10f, 0.10f, 0.10f, 1.00f); // Dark, crisp borders
 	dmColors.separator = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
 
+	// Built-in Synthesia visual theme: Synthesia's dark chrome with flat, square controls and its
+	// blue accent. The shape values are what make it read as Synthesia rather than a recolour.
+	SynthesiaRemastered = std::make_shared<AppTheme>();
+	auto& srInfo = SynthesiaRemastered->info;
+	srInfo.name = "Synthesia REMASTERED";
+	srInfo.author = "Systematics";
+	srInfo.description = "Synthesia's dark UI: flat square controls, charcoal panels and its blue accent.";
+	srInfo.version = 1;
+
+	auto& srColors = SynthesiaRemastered->colors;
+	srColors.text = ImVec4(0.90f, 0.92f, 0.96f, 1.00f);
+	srColors.textDisabled = ImVec4(0.90f, 0.92f, 0.96f, 0.45f);
+	srColors.background = ImVec4(0.14f, 0.16f, 0.18f, 1.00f); // #24282E
+	srColors.backgroundAlt = ImVec4(0.10f, 0.11f, 0.13f, 1.00f); // #1A1C21
+	srColors.headerBg = ImVec4(0.07f, 0.08f, 0.09f, 1.00f); // #121417
+	srColors.controlBase = ImVec4(0.25f, 0.27f, 0.33f, 1.00f); // #3F4654
+	srColors.controlHover = ImVec4(0.30f, 0.33f, 0.40f, 1.00f);
+	srColors.controlActive = ImVec4(0.36f, 0.39f, 0.47f, 1.00f);
+	srColors.inputBg = ImVec4(0.09f, 0.10f, 0.11f, 1.00f);
+	srColors.accent = ImVec4(0.30f, 0.58f, 0.88f, 1.00f); // #4C94E0
+	srColors.accentActive = ImVec4(0.00f, 0.66f, 1.00f, 1.00f); // #00A8FF
+	srColors.border = ImVec4(0.05f, 0.05f, 0.06f, 1.00f);
+	srColors.separator = ImVec4(0.22f, 0.24f, 0.28f, 1.00f);
+
+	auto& srStyle = SynthesiaRemastered->style;
+	srStyle.windowRounding = 0.0f;
+	srStyle.childRounding = 0.0f;
+	srStyle.frameRounding = 0.0f;
+	srStyle.popupRounding = 0.0f;
+	srStyle.scrollbarRounding = 0.0f;
+	srStyle.grabRounding = 0.0f;
+	srStyle.itemSpacing = ImVec2(7.0f, 5.0f);
+	srStyle.windowPadding = ImVec2(9.0f, 8.0f);
+	srStyle.framePadding = ImVec2(8.0f, 5.0f);
+
     DefaultThemesList.push_back(DefaultLightMode);
     DefaultThemesList.push_back(DefaultDarkMode);
+    DefaultThemesList.push_back(SynthesiaRemastered);
 }
 
 void AppTheme::ApplyTheme()
@@ -133,19 +97,20 @@ void AppTheme::ApplyTheme()
     // -----------------------
     // Layout / feel
     // -----------------------
-    style.WindowRounding = 6.0f;
-    style.ChildRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.GrabRounding = 4.0f;
+    style.WindowRounding = this->style.windowRounding;
+    style.ChildRounding = this->style.childRounding;
+    style.FrameRounding = this->style.frameRounding;
+    style.PopupRounding = this->style.popupRounding;
+    style.ScrollbarRounding = this->style.scrollbarRounding;
+    style.GrabRounding = this->style.grabRounding;
 
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 1.0f;
-    style.PopupBorderSize = 1.0f;
+    style.WindowBorderSize = this->style.windowBorderSize;
+    style.FrameBorderSize = this->style.frameBorderSize;
+    style.PopupBorderSize = this->style.popupBorderSize;
 
-    style.ItemSpacing = ImVec2(8, 6);
-    style.WindowPadding = ImVec2(10, 10);
+    style.ItemSpacing = this->style.itemSpacing;
+    style.WindowPadding = this->style.windowPadding;
+    style.FramePadding = this->style.framePadding;
     style.WindowMenuButtonPosition = ImGuiDir_None;
     style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
 
@@ -235,6 +200,14 @@ ThemesList::ThemesList(const std::string& themesFolder)
 
 #define LOAD_THEME_COLOR(field, yamlLabel) themeColors.field = ParseColor(themeSec[yamlLabel], themeColors.field)
 
+static ImVec2 ParseThemeVec2(const YAML::Node& node, const ImVec2& defaultVec)
+{
+    if (node && node.IsSequence() && node.size() >= 2)
+        return ImVec2(node[0].as<float>(), node[1].as<float>());
+
+    return defaultVec;
+}
+
 std::shared_ptr<AppTheme> ThemesList::ParseTheme(std::string path)
 {
     std::optional<ConfigSection> theme;
@@ -288,6 +261,31 @@ std::shared_ptr<AppTheme> ThemesList::ParseTheme(std::string path)
 
             parsedTheme->colors = std::move(themeColors);
         }
+
+        // Optional UI shape. Older theme files simply leave every value at Comet's defaults.
+        std::optional<ConfigSection> styleSec = theme->GetSection("style");
+        if (styleSec)
+        {
+            YAML::Node styleNode = themeYml["style"];
+            ThemeStyle themeStyle;
+
+            themeStyle.windowRounding = styleSec->GetFloat("windowRounding", themeStyle.windowRounding);
+            themeStyle.childRounding = styleSec->GetFloat("childRounding", themeStyle.childRounding);
+            themeStyle.frameRounding = styleSec->GetFloat("frameRounding", themeStyle.frameRounding);
+            themeStyle.popupRounding = styleSec->GetFloat("popupRounding", themeStyle.popupRounding);
+            themeStyle.scrollbarRounding = styleSec->GetFloat("scrollbarRounding", themeStyle.scrollbarRounding);
+            themeStyle.grabRounding = styleSec->GetFloat("grabRounding", themeStyle.grabRounding);
+
+            themeStyle.windowBorderSize = styleSec->GetFloat("windowBorderSize", themeStyle.windowBorderSize);
+            themeStyle.frameBorderSize = styleSec->GetFloat("frameBorderSize", themeStyle.frameBorderSize);
+            themeStyle.popupBorderSize = styleSec->GetFloat("popupBorderSize", themeStyle.popupBorderSize);
+
+            themeStyle.itemSpacing = ParseThemeVec2(styleNode["itemSpacing"], themeStyle.itemSpacing);
+            themeStyle.windowPadding = ParseThemeVec2(styleNode["windowPadding"], themeStyle.windowPadding);
+            themeStyle.framePadding = ParseThemeVec2(styleNode["framePadding"], themeStyle.framePadding);
+
+            parsedTheme->style = themeStyle;
+        }
     }
     catch (...)
     {
@@ -307,6 +305,10 @@ void ThemesList::ReloadThemesList()
         std::shared_ptr<AppTheme> parsedTheme = ParseTheme(file.path().string());
         availableThemes.push_back(parsedTheme);
     }
+
+    // The selected custom theme may have been deleted or renamed on disk.
+    if (currentTheme >= availableThemes.size())
+        currentTheme = availableThemes.empty() ? 0 : availableThemes.size() - 1;
 }
 
 
@@ -326,95 +328,4 @@ ImVec4 ThemesList::ParseColor(const YAML::Node& node, const ImVec4& defaultColor
 void ThemesList::OpenThemeListFolder() const
 {
 	Utils::OpenFolder(themesPath);
-}
-
-namespace
-{
-	// A name becomes a filename, so keep it to characters every platform accepts.
-	std::string ThemeFileStem(const std::string& name)
-	{
-		std::string stem;
-		for (const char c : name)
-		{
-			const unsigned char u = (unsigned char)c;
-			if (std::isalnum(u) || c == '-' || c == '_')
-				stem.push_back(c);
-			else if (c == ' ')
-				stem.push_back('-');
-		}
-
-		if (stem.empty()) stem = "custom-theme";
-		return stem;
-	}
-
-	YAML::Node ColorToYaml(const ImVec4& color)
-	{
-		YAML::Node node(YAML::NodeType::Sequence);
-		node.push_back(color.x);
-		node.push_back(color.y);
-		node.push_back(color.z);
-		node.push_back(color.w);
-		return node;
-	}
-}
-
-bool ThemesList::SaveTheme(const AppTheme& theme, std::string& error)
-{
-	std::error_code ec;
-	std::filesystem::create_directories(themesPath, ec);
-
-	const std::filesystem::path path =
-		std::filesystem::path(themesPath) / (ThemeFileStem(theme.info.name) + ".yml");
-
-	YAML::Node root;
-	root["information"]["name"] = theme.info.name;
-	root["information"]["author"] = theme.info.author;
-	root["information"]["description"] = theme.info.description;
-	root["information"]["version"] = theme.info.version;
-
-	root["theme"]["text"] = ColorToYaml(theme.colors.text);
-	root["theme"]["textDisabled"] = ColorToYaml(theme.colors.textDisabled);
-	root["theme"]["background"] = ColorToYaml(theme.colors.background);
-	root["theme"]["backgroundAlt"] = ColorToYaml(theme.colors.backgroundAlt);
-	root["theme"]["headerBackground"] = ColorToYaml(theme.colors.headerBg);
-	root["theme"]["controlBase"] = ColorToYaml(theme.colors.controlBase);
-	root["theme"]["controlHover"] = ColorToYaml(theme.colors.controlHover);
-	root["theme"]["controlActive"] = ColorToYaml(theme.colors.controlActive);
-	root["theme"]["inputBackground"] = ColorToYaml(theme.colors.inputBg);
-	root["theme"]["accent"] = ColorToYaml(theme.colors.accent);
-	root["theme"]["accentActive"] = ColorToYaml(theme.colors.accentActive);
-	root["theme"]["borderColor"] = ColorToYaml(theme.colors.border);
-	root["theme"]["separatorColor"] = ColorToYaml(theme.colors.separator);
-
-	std::ofstream out(path, std::ios::out | std::ios::trunc);
-	if (!out.is_open())
-	{
-		error = "Could not open " + path.string() + " for writing.";
-		return false;
-	}
-
-	out << YAML::Dump(root);
-	out.close();
-	if (!out)
-	{
-		error = "Could not write " + path.string() + ".";
-		return false;
-	}
-
-	ReloadThemesList();
-
-	// Select the file that was just written. Searching from the end means a re-saved theme wins
-	// over an older parse of the same name.
-	for (size_t i = availableThemes.size(); i-- > 0;)
-	{
-		if (availableThemes[i]->info.name == theme.info.name)
-		{
-			currentTheme = i;
-			availableThemes[i]->ApplyTheme();
-			return true;
-		}
-	}
-
-	error = "The theme was written but could not be found after reloading the list.";
-	return false;
 }
