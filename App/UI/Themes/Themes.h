@@ -1,8 +1,10 @@
 #pragma once
 #include <yaml-cpp/yaml.h>
 #include <imgui.h>
+#include <cstddef>
 #include <string>
 #include <memory>
+#include <vector>
 
 class AppTheme;
 
@@ -44,6 +46,16 @@ struct ThemeInfo
     int version = 0;
 };
 
+// Palettes the custom-theme editor starts from. Synthesia REMASTERED follows the app's light or
+// dark appearance the same way the Synthesia opening banner does: Crystal Blue on a light Comet
+// theme, Synthesia Classic on a dark one.
+namespace ThemePresets
+{
+    bool IsDark(const ThemeColors& colors);
+    ThemeColors CometDefault(bool dark);
+    ThemeColors SynthesiaRemastered(bool dark);
+}
+
 class AppTheme
 {
 public:
@@ -68,6 +80,10 @@ public:
     {
         return availableThemes[currentTheme].get();
     }
+    size_t GetCurrentThemeIndex() const
+    {
+        return currentTheme;
+    }
     void SetThemeAndApply(size_t themeIdx)
     {
         if (availableThemes.size() == 0) return;
@@ -82,6 +98,10 @@ public:
     }
     void ReloadThemesList();
     void OpenThemeListFolder() const;
+
+    // Writes the theme to <themes folder>/<name>.yml, reloads the list and selects the saved
+    // theme. Returns false with an explanation in error when the file cannot be written.
+    bool SaveTheme(const AppTheme& theme, std::string& error);
 private:
     std::shared_ptr<AppTheme> ParseTheme(std::string path);
     ImVec4 ParseColor(const YAML::Node& node, const ImVec4& defaultColor);

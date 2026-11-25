@@ -195,16 +195,13 @@ std::string BannerRenderer::GetTitle() const
 ImFont* BannerRenderer::GetUMPFont() const
 {
 	// A font chosen for the counter and graph also sets the card's typeface. With no choice made,
-	// use UMP's own Comic Sans card face so the default matches the reference.
+	// use the app's default font so the UMP card and the Synthesia banner share one typeface.
 	FontList* fontList = app->GetFontList();
 	if (fontList != nullptr)
 	{
 		if (ImFont* selectedFont = fontList->GetFontForPath(app->GetConfig()->overlayInfo.selectedFontPath))
 			return selectedFont;
 	}
-
-	if (Fonts::UMPCardFont != nullptr)
-		return Fonts::UMPCardFont;
 
 	return Fonts::DefaultFont;
 }

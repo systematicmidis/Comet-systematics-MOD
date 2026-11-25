@@ -235,6 +235,11 @@ private:
 	// Cheap per-frame half of UpdateCrashContext: just the flags that change as playback runs.
 	void UpdateCrashRuntimeFlags();
 	void FinishPendingRenderer();
+	// Builds the selected renderer for a packed sequence without blocking: the per-key store is
+	// prepared on a worker and installed by FinishPendingRenderer. Unlike a renderer switch this
+	// keeps the user's renderer instead of forcing MIDITrail.
+	void DeferPendingSequenceRenderer(std::shared_ptr<MIDISequence> sequence);
+	bool pendingRendererStartsPlayback = false;
 	// Per-file presets are applied on the render thread after the sequence is safely staged.
 	void ApplyFilePreset(const std::string& path);
 	void SaveFilePreset(const std::string& path);

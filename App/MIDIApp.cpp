@@ -377,6 +377,7 @@ void MIDIApp::UnloadMIDI()
 {
 	pendingRenderer.reset();
 	pendingRendererSequence.reset();
+	pendingRendererStartsPlayback = false;
 	pendingArchiveEntry.clear();
 	if (!hasSequence) return;
 	SaveFilePreset(currentMidiPath);
@@ -398,28 +399,36 @@ void MIDIApp::UpdatePendingSequence()
 	std::shared_ptr<MIDISequence> seq = pendingSeq;
 	pendingSeq.reset();
 
-	// A packed sequence only has the tick-ordered track store. A per-key renderer would have to
-	// materialize hundreds of megabytes before the first frame; MIDITrail can draw the packed
-	// store directly, so use it unless the user later switches and accepts the background build.
-	if (seq->packed && renderer && renderer->UsesMergedNotes())
-	{
-		std::cout << "Packed file: switching to MIDITrail for the fast path." << std::endl;
-		config.render.SetCurrentRenderer(RendererType::MIDITrail);
-		SetRenderer<MIDIRendererMIDITrail>();
-	}
+	// A packed sequence only has the tick-ordered track store, so a renderer that needs per-key
+	// lists cannot draw it yet. Keep the user's renderer and build that store on a worker instead
+	// of silently replacing it with MIDITrail; the preparation overlay reports the progress.
+	const bool deferredLoad = seq->packed && renderer && renderer->UsesMergedNotes()
+		&& !seq->IsMergedNotesReady();
 
 	currentMidiPath = pendingPath;
 	ApplyFilePreset(currentMidiPath);
-	renderer->LoadSequence(seq);
+	if (deferredLoad)
+		DeferPendingSequenceRenderer(seq);
+	else
+		renderer->LoadSequence(seq);
 	navigationBar->SetMIDILengthFromSeq(*seq.get());
 	noteCounterInfo->ppq.value = seq->resolution;
 	hasSequence = true;
 	seqLength = seq->CalcLengthMilliseconds() / 1000.0;
 
 	midiAudio->SetSourcePath(pendingPath);
-	midiAudio->Start(seq, this->timer);
-	timer->ClearFlags();
-	timer->Start(-3.0);
+	if (deferredLoad)
+	{
+		// Start playback with the renderer instead of letting the song run out while the per-key
+		// store is still being built.
+		pendingRendererStartsPlayback = true;
+	}
+	else
+	{
+		midiAudio->Start(seq, this->timer);
+		timer->ClearFlags();
+		timer->Start(-3.0);
+	}
 	mainWindow->SetTitleInfo(pendingTitle);
 
 	// A crash while this file is open is much easier to reproduce with its details on the report.
@@ -445,6 +454,10 @@ void MIDIApp::SetRenderer()
 	// A new renderer choice supersedes a conversion that was waiting for the previous one.
 	// Save the outgoing choice against the current file before replacing it.
 	SaveFilePreset(currentMidiPath);
+	// A packed file's load may still be preparing its per-key store. Keep its sequence so this
+	// switch still ends up with the loaded song instead of an empty renderer.
+	const bool resumeDeferredPlayback = pendingRendererStartsPlayback;
+	std::shared_ptr<MIDISequence> deferredSequence = pendingRendererSequence;
 	pendingRenderer.reset();
 	pendingRendererSequence.reset();
 
@@ -466,6 +479,7 @@ void MIDIApp::SetRenderer()
 	// get renderer's sequence so the new one can automatically load it
 	std::shared_ptr<MIDISequence> seq;
 	if (this->renderer) seq = GetRenderer()->GetSequence();
+	if (seq == nullptr) seq = deferredSequence;
 
 	auto newRenderer = std::make_unique<T>(this);
 	newRenderer->OnResize(width, height);
@@ -493,6 +507,20 @@ void MIDIApp::SetRenderer()
 
 	this->renderer = std::move(newRenderer);
 	if (seq != nullptr) this->renderer->LoadSequence(seq);
+
+	if (resumeDeferredPlayback)
+	{
+		// The renderer switch replaced the deferred load before it finished, so start the song
+		// now that a renderer can draw it.
+		pendingRendererStartsPlayback = false;
+		if (seq != nullptr)
+		{
+			midiAudio->SetSourcePath(currentMidiPath);
+			midiAudio->Start(seq, timer);
+			timer->ClearFlags();
+			timer->Start(-3.0);
+		}
+	}
 
 	if (blurredQuadRenderer)
 		blurredQuadRenderer->SetSceneTexture(this->renderer->GetSceneTexture());
@@ -522,6 +550,61 @@ float MIDIApp::GetPerKeyPreparationProgress() const
 	return pendingRendererSequence ? pendingRendererSequence->GetMergedNotesProgress() : 0.0f;
 }
 
+void MIDIApp::DeferPendingSequenceRenderer(std::shared_ptr<MIDISequence> sequence)
+{
+	if (sequence == nullptr) return;
+
+	// A previous renderer switch is superseded by this file.
+	pendingRenderer.reset();
+	pendingRendererSequence.reset();
+
+	std::unique_ptr<AbstractMIDIRenderer> newRenderer;
+	switch (config.render.GetCurrentRenderer())
+	{
+	case RendererType::PFA:
+		newRenderer = std::make_unique<MIDIRendererPFA>(this);
+		break;
+	case RendererType::Synthesia:
+		newRenderer = std::make_unique<MIDIRendererSynthesia>(this);
+		break;
+	case RendererType::Textured:
+		newRenderer = std::make_unique<MIDIRenderer>(this);
+		break;
+	case RendererType::Enhanced:
+		newRenderer = std::make_unique<MIDIRendererEnhanced>(this);
+		break;
+	case RendererType::Channels:
+		newRenderer = std::make_unique<MIDIRendererChannels>(this);
+		break;
+	case RendererType::Velocities:
+		newRenderer = std::make_unique<MIDIRendererVelocities>(this);
+		break;
+	case RendererType::CounterOnly:
+		newRenderer = std::make_unique<MIDIRendererCounter>(this);
+		break;
+	default:
+		return;
+	}
+
+	const int width = config.render.GetWidth();
+	const int height = config.render.GetHeight();
+	for (auto& overlay : overlays)
+		overlay->OnResize(width, height);
+
+	newRenderer->OnResize(width, height);
+	newRenderer->SetNoteCounter(noteCounterInfo);
+	newRenderer->Initialize();
+
+	// ApplyFilePreset already stored this file's renderer settings under the serialization key.
+	const std::string settingsKey = newRenderer->GetSerializationKey();
+	if (config.renderersSettings[settingsKey])
+		newRenderer->LoadSettings(config.renderersSettings[settingsKey]);
+
+	sequence->StartMergedNotesPreparation();
+	pendingRenderer = std::move(newRenderer);
+	pendingRendererSequence = sequence;
+}
+
 void MIDIApp::FinishPendingRenderer()
 {
 	if (!pendingRenderer || !pendingRendererSequence) return;
@@ -531,6 +614,7 @@ void MIDIApp::FinishPendingRenderer()
 	{
 		pendingRenderer.reset();
 		pendingRendererSequence.reset();
+		pendingRendererStartsPlayback = false;
 		SetLoadError("Comet could not build the per-key render data for this file. It may be too large "
 			"for the selected renderer; MIDITrail can play it without that conversion.");
 		return;
@@ -557,6 +641,15 @@ void MIDIApp::FinishPendingRenderer()
 
 	if (config.render.shuffleColors) colorAsset.ShuffleColors(config.render.shuffleSeed);
 	else colorAsset.RestoreColors();
+
+	if (pendingRendererStartsPlayback)
+	{
+		pendingRendererStartsPlayback = false;
+		midiAudio->SetSourcePath(currentMidiPath);
+		midiAudio->Start(seq, timer);
+		timer->ClearFlags();
+		timer->Start(-3.0);
+	}
 }
 
 template void MIDIApp::SetRenderer<MIDIRendererPFA>();

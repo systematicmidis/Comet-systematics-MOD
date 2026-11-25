@@ -238,7 +238,17 @@ void SettingsDialog::DrawAppTab()
 				size_t themeIdx = 0;
 
 				if (ImGui::Button("Reload theme list"))
+				{
+					// Drop an unsaved preview first so reloading never keeps edited built-in colours.
+					if (editedTheme != nullptr)
+					{
+						editedTheme->colors = editedThemeColors;
+						editedTheme->ApplyTheme();
+					}
 					themesList->ReloadThemesList();
+					// Reloading replaces every theme object; resync the editor from the new one.
+					editedTheme = nullptr;
+				}
 
 				ImGui::SameLine();
 
@@ -259,6 +269,11 @@ void SettingsDialog::DrawAppTab()
 
 					if (ImGui::Selectable("##themeBtn", isSelected, 0, ImVec2(width, height)))
 					{
+						// Moving to another theme discards an unsaved preview without changing the old
+						// theme's palette. The new selection applies its own colours right after this.
+						if (editedTheme != nullptr && editedTheme != themePtr)
+							editedTheme->colors = editedThemeColors;
+
 						app->GetThemeList()->SetThemeAndApply(themeIdx);
 
 						ThemeInfo& themeInfo = themePtr->info;
@@ -313,6 +328,9 @@ void SettingsDialog::DrawAppTab()
 					ImGui::PopID();
 					themeIdx++;
 				}
+
+				ImGui::Spacing();
+				DrawThemeEditor();
 
 				break;
 			}
@@ -517,6 +535,196 @@ void SettingsDialog::DrawCrashReportsTab()
 		ImGui::TextWrapped(
 			"Use \"Copy report to clipboard\" above to see the exact JSON that would be sent, without "
 			"sending it.");
+	}
+}
+
+void SettingsDialog::ApplyThemePreset(bool synthesia)
+{
+	ThemesList* themesList = app->GetThemeList();
+	if (themesList == nullptr) return;
+
+	AppTheme* theme = themesList->GetCurrentTheme();
+	if (theme == nullptr) return;
+
+	// A light Comet theme gets Crystal Blue; a dark one gets Synthesia Classic. This is the same
+	// mapping the Synthesia opening banner follows.
+	const bool dark = ThemePresets::IsDark(theme->colors);
+	theme->colors = synthesia
+		? ThemePresets::SynthesiaRemastered(dark)
+		: ThemePresets::CometDefault(dark);
+	theme->ApplyTheme();
+
+	if (synthesia)
+	{
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", "Synthesia REMASTERED");
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", "Systematics");
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s", dark
+			? "Synthesia's classic dark chrome, recreated for Comet."
+			: "Synthesia's Crystal Blue chrome, recreated for Comet.");
+		themeStatus = dark
+			? "Loaded the Synthesia Classic palette."
+			: "Loaded the Crystal Blue palette.";
+	}
+	else
+	{
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", "Comet default");
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", "ponluxime");
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			"Comet's default palette.");
+		themeStatus = "Loaded Comet's default palette.";
+	}
+}
+
+void SettingsDialog::DrawThemeEditor()
+{
+	ThemesList* themesList = app->GetThemeList();
+	if (themesList == nullptr || themesList->GetThemesList().empty()) return;
+
+	AppTheme* theme = themesList->GetCurrentTheme();
+	if (theme == nullptr) return;
+
+	// Follow whichever theme is selected. Preset clicks edit that theme in place, so the text
+	// buffers are only refreshed when the selection itself moves.
+	if (theme != editedTheme)
+	{
+		editedTheme = theme;
+		editedThemeColors = theme->colors;
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", theme->info.name.c_str());
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", theme->info.author.c_str());
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			theme->info.description.c_str());
+	}
+
+	SECTION_HEADER("Custom theme");
+
+	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+	ImGui::TextWrapped(
+		"Pick a base, adjust any UI colour, then save. The theme is written to the themes folder "
+		"as a .yml file, so it can be edited and shared like any other theme.");
+	ImGui::PopStyleColor();
+
+	BEGIN_SECTION("##themePreset")
+	{
+		SETUP_SECTION;
+
+		SECTION_ENTRY(
+			TABLE_LABEL_TOOLTIP(
+				"Base",
+				"Comet default keeps Comet's own palette. Synthesia REMASTERED recreates Synthesia's "
+				"chrome: Crystal Blue on a light Comet theme, Synthesia Classic on a dark one."),
+			{
+				if (ImGui::Button("Comet default"))
+					ApplyThemePreset(false);
+
+				ImGui::SameLine();
+
+				if (ImGui::Button("Synthesia REMASTERED"))
+					ApplyThemePreset(true);
+			});
+	}
+	END_SECTION;
+
+	if (ImGui::CollapsingHeader("UI elements", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		BEGIN_SECTION("##themeElements")
+		{
+			SETUP_SECTION;
+
+			auto colorRow = [&](const char* label, ImVec4& color)
+			{
+				SECTION_ENTRY(SECTION_LABEL(label),
+					{
+						if (ImGui::ColorEdit4(("##theme" + std::string(label)).c_str(), &color.x,
+							ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf))
+						{
+							theme->ApplyTheme();
+						}
+					});
+			};
+
+			colorRow("Text", theme->colors.text);
+			colorRow("Disabled text", theme->colors.textDisabled);
+			colorRow("Window background", theme->colors.background);
+			colorRow("Panels and popups", theme->colors.backgroundAlt);
+			colorRow("Title and menu bars", theme->colors.headerBg);
+			colorRow("Buttons and headers", theme->colors.controlBase);
+			colorRow("Hovered controls", theme->colors.controlHover);
+			colorRow("Active controls", theme->colors.controlActive);
+			colorRow("Input fields", theme->colors.inputBg);
+			colorRow("Accent", theme->colors.accent);
+			colorRow("Active accent", theme->colors.accentActive);
+			colorRow("Borders", theme->colors.border);
+			colorRow("Separators", theme->colors.separator);
+		}
+		END_SECTION;
+	}
+
+	SECTION_HEADER("Save this theme");
+
+	BEGIN_SECTION("##themeMeta")
+	{
+		SETUP_SECTION;
+
+		SECTION_ENTRY(SECTION_LABEL("Name"),
+			{
+				ImGui::InputText("##themeName", themeNameInput, sizeof(themeNameInput));
+			});
+
+		SECTION_ENTRY(SECTION_LABEL("Author"),
+			{
+				ImGui::InputText("##themeAuthor", themeAuthorInput, sizeof(themeAuthorInput));
+			});
+
+		SECTION_ENTRY(SECTION_LABEL("Description"),
+			{
+				ImGui::InputText("##themeDescription", themeDescriptionInput, sizeof(themeDescriptionInput));
+			});
+	}
+	END_SECTION;
+
+	if (ImGui::Button("Save theme"))
+	{
+		AppTheme saved = *theme;
+		saved.info.name = themeNameInput[0] != '\0' ? themeNameInput : "Custom theme";
+		saved.info.author = themeAuthorInput[0] != '\0' ? themeAuthorInput : "Unknown";
+		saved.info.description = themeDescriptionInput[0] != '\0'
+			? themeDescriptionInput
+			: "Custom Comet theme.";
+		saved.info.version = 1;
+
+		// The saved copy owns the edited palette; put the source theme back so a built-in does
+		// not keep the preset colours after saving.
+		theme->colors = editedThemeColors;
+		theme->ApplyTheme();
+
+		std::string error;
+		const bool savedOk = themesList->SaveTheme(saved, error);
+
+		// Saving reloads the list, which replaces the theme objects this function is using.
+		editedTheme = nullptr;
+		themeStatus = savedOk
+			? "Saved \"" + saved.info.name + "\" to the themes folder."
+			: "Could not save the theme: " + error;
+		return;
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Revert changes"))
+	{
+		theme->colors = editedThemeColors;
+		theme->ApplyTheme();
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", theme->info.name.c_str());
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", theme->info.author.c_str());
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			theme->info.description.c_str());
+		themeStatus.clear();
+	}
+
+	if (!themeStatus.empty())
+	{
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", themeStatus.c_str());
 	}
 }
 

@@ -158,8 +158,9 @@ void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiv
 	{
 		std::ostringstream message;
 		message << "This file is " << (bytes / (1024.0 * 1024.0)) << " MB.\n\n"
-			<< "Large files use the packed track store. MIDITrail can draw it immediately; selecting "
-			<< "a per-key renderer builds that data in the background and may use several GB of RAM.\n\n"
+			<< "Large files use the packed track store. Your selected renderer builds its per-key data "
+			<< "in the background and may use several GB of RAM; MIDITrail can draw the packed file "
+			<< "immediately.\n\n"
 			<< "Continue loading?";
 
 		if (auto* messageDialog = dialogManager.GetDialog<MessageDialog>())

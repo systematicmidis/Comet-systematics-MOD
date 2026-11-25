@@ -30,7 +30,7 @@ The standalone EXEs are **not complete portable packages**. Keep them beside you
 
 1. Put `Comet-Release.exe` in the same folder as your existing Comet installation.
 2. Start it and open a `.mid`, `.midi`, or a supported compressed archive.
-3. Packed files open in MIDITrail automatically. Selecting a per-key renderer such as Piano From Above builds its data on a worker; the window stays usable and shows preparation progress.
+3. Packed files open in the renderer you selected. If it needs per-key data, Comet builds it on a worker and shows preparation progress; MIDITrail can draw the packed store immediately.
 4. Settings are saved to `config.yml`; the previous good copy is kept as `config.yml.bak`, and a malformed file is moved aside as `config.yml.broken` instead of blocking every launch.
 5. If a bad setting prevents startup, run `Comet.exe --safe-mode` (portable ZIP) or `Comet-Release.exe --safe-mode` (standalone) once. Safe mode ignores `config.yml` and starts with defaults so you can repair the file or click **Apply & Close** to rewrite it.
 
