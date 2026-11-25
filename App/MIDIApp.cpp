@@ -73,6 +73,7 @@ namespace
 		nlohmann::json settings;
 
 		settings["app"]["themeID"] = cfg.app.currThemeID;
+		settings["app"]["visualThemeID"] = cfg.app.visualThemeID;
 
 		settings["render"]["renderer"] = ToString(cfg.render.GetCurrentRenderer());
 		settings["render"]["width"] = cfg.render.GetWidth();
@@ -661,11 +662,24 @@ template void MIDIApp::SetRenderer<MIDIRendererChannels>();
 template void MIDIApp::SetRenderer<MIDIRendererVelocities>();
 template void MIDIApp::SetRenderer<MIDIRendererCounter>(); // <--- errors here
 
+void MIDIApp::ApplyCurrentThemes()
+{
+	if (!themesList || !visualThemeList) return;
+
+	themesList->ApplyCurrent();
+	visualThemeList->ApplyCurrent(themesList->GetCurrentTheme()->colors);
+}
+
 // called after glfw/glad initialization has finished, and is safe to load stuff, such as images, for rendering
 void MIDIApp::LoadResources()
 {
 	themesList = std::make_unique<ThemesList>("./assets/themes");
-	themesList->SetThemeAndApply(config.app.currThemeID);
+	themesList->SetTheme(config.app.currThemeID);
+
+	visualThemeList = std::make_unique<VisualThemeList>();
+	visualThemeList->SetTheme(config.app.visualThemeID);
+
+	ApplyCurrentThemes();
 
 	auto defaultPack = DefaultResourcePack::Instance();
 	defaultPack->Init();

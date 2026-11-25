@@ -13,6 +13,7 @@
 #include "backends/imgui_impl_opengl3.h"
 #include "Render/Renderer/PrimitiveShaders.h"
 #include "Fonts.h"
+#include "UI/Themes/Themes.h"
 #include <iostream>
 #include "nfd.h"
 #include "Comet.h"
@@ -115,6 +116,38 @@ void MainWindow::OpenMIDIDialog()
 	Utils::ChooseFile(outPath, "mid,midi,kar,7z,001,zip,xz,lzma,gz,bz2,bzip2,zst,zstd,lz4,rar,r00,tar,tgz,tbz,tbz2,txz,cab");
 	if (outPath.empty()) return;
 	LoadMIDIFile(outPath);
+}
+
+bool MainWindow::UsesSynthesiaToolbar()
+{
+	if (!midiApp) return false;
+	VisualThemeList* visualThemes = midiApp->GetVisualThemeList();
+	VisualTheme* visualTheme = visualThemes ? visualThemes->GetCurrentTheme() : nullptr;
+	return visualTheme != nullptr && visualTheme->style.framedToolbar;
+}
+
+void MainWindow::OpenSettingsDialog()
+{
+	if (auto* dialog = dialogManager.GetDialog<SettingsDialog>())
+		dialog->Open();
+}
+
+void MainWindow::OpenRenderVideoDialog()
+{
+	if (auto* dialog = dialogManager.GetDialog<RenderVideoDialog>())
+		dialog->Open();
+}
+
+void MainWindow::OpenDiagnosisDialog()
+{
+	if (auto* dialog = dialogManager.GetDialog<DiagnosisDialog>())
+		dialog->Open();
+}
+
+void MainWindow::OpenUpdateDialog()
+{
+	if (auto* dialog = dialogManager.GetDialog<UpdateDialog>())
+		dialog->Open();
 }
 
 void MainWindow::LoadMIDIFile(const std::string& path)
@@ -486,7 +519,8 @@ void MainWindow::ToggleFullscreen()
 
 void MainWindow::RenderUI()
 {
-	if (CanShowNavigationBar()) menuBuilder.Draw();
+	// The Synthesia play bar carries its own menu, so the top menu bar is hidden for that theme.
+	if (CanShowNavigationBar() && !UsesSynthesiaToolbar()) menuBuilder.Draw();
 
 	// Converting a packed track store to per-key arrays runs on a worker. Keep the old renderer
 	// usable and show why note density may look different for a few moments.

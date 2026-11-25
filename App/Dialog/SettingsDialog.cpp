@@ -178,6 +178,49 @@ void SettingsDialog::DrawContent()
 	}
 }
 
+bool SettingsDialog::DrawThemeCard(const void* id, const char* title, const char* subtitle,
+	bool selected, const ImVec4* swatches, int swatchCount, float rounding)
+{
+	ImGui::PushID(id);
+
+	const float width = ImGui::GetContentRegionAvail().x;
+	const float height = 50.0f;
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+
+	const bool clicked = ImGui::Selectable("##themeCard", selected, 0, ImVec2(width, height));
+	const bool hovered = ImGui::IsItemHovered();
+
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	auto toU32 = [](const ImVec4& color) { return ImGui::ColorConvertFloat4ToU32(color); };
+
+	ImVec4 selectColor = ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
+	selectColor.w = 0.08f;
+	const ImU32 bgColor = selected ? toU32(selectColor) : (hovered ? IM_COL32(150, 150, 150, 30) : IM_COL32(0, 0, 0, 0));
+	drawList->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), bgColor, 4.0f);
+	drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height),
+		ImGui::GetColorU32(selected ? ImGuiCol_CheckMark : ImGuiCol_Border), 4.0f, 0, selected ? 2.0f : 1.0f);
+
+	const float swatchSize = 26.0f;
+	const float padding = 12.0f;
+	ImVec2 swatchPos(pos.x + padding, pos.y + (height - swatchSize) * 0.5f);
+	for (int i = 0; i < swatchCount; ++i)
+	{
+		drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize),
+			toU32(swatches[i]), rounding);
+		drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize),
+			IM_COL32(50, 50, 50, 100), rounding);
+		swatchPos.x += swatchSize + 4.0f;
+	}
+
+	const ImVec2 textPos(swatchPos.x + 15.0f, pos.y + 8.0f);
+	drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), title);
+	drawList->AddText(ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + 2.0f),
+		ImGui::GetColorU32(ImGuiCol_TextDisabled), subtitle);
+
+	ImGui::PopID();
+	return clicked;
+}
+
 void SettingsDialog::DrawAppTab()
 {
 	auto config = app->GetConfig();
@@ -235,14 +278,14 @@ void SettingsDialog::DrawAppTab()
 			}
 			case Theme:
 			{
-				size_t themeIdx = 0;
-
+				ImGui::TextDisabled("Custom color themes are .yml files in the themes folder.");
 				if (ImGui::Button("Reload theme list"))
 				{
 					themesList->ReloadThemesList();
 					// Reloading can drop the selected custom theme; fall back to a theme that exists.
-					themesList->SetThemeAndApply(themesList->GetCurrentThemeIndex());
+					themesList->SetTheme(themesList->GetCurrentThemeIndex());
 					config->app.currThemeID = themesList->GetCurrentThemeIndex();
+					app->ApplyCurrentThemes();
 				}
 
 				ImGui::SameLine();
@@ -250,73 +293,69 @@ void SettingsDialog::DrawAppTab()
 				if (ImGui::Button("Open themes folder"))
 					themesList->OpenThemeListFolder();
 
-				ImGui::Separator();
+				ImGui::SeparatorText("Colors");
 
-				for (const auto& theme : themesList->GetThemesList())
+				for (size_t themeIdx = 0; themeIdx < themesList->GetThemesList().size(); ++themeIdx)
 				{
-					AppTheme* themePtr = theme.get();
-					bool isSelected = themePtr == themesList->GetCurrentTheme();
-					ImGui::PushID(themePtr);
-
-					float width = ImGui::GetContentRegionAvail().x;
-					float height = 50.0f;
-					ImVec2 pos = ImGui::GetCursorScreenPos();
-
-					if (ImGui::Selectable("##themeBtn", isSelected, 0, ImVec2(width, height)))
+					AppTheme* theme = themesList->GetThemesList()[themeIdx].get();
+					const ImVec4 swatches[3] = {
+						theme->colors.background, theme->colors.controlBase, theme->colors.accent
+					};
+					const std::string author = "by " + theme->info.author;
+					if (DrawThemeCard(theme, theme->info.name.c_str(), author.c_str(),
+						theme == themesList->GetCurrentTheme(), swatches, 3, 4.0f))
 					{
-						app->GetThemeList()->SetThemeAndApply(themeIdx);
+						themesList->SetTheme(themeIdx);
+						config->app.currThemeID = themeIdx;
+						app->ApplyCurrentThemes();
 
-						ThemeInfo& themeInfo = themePtr->info;
+						const ThemeInfo& themeInfo = theme->info;
 						std::cout << "Loaded \"" << themeInfo.name << "\"" << std::endl
 							<< "  By " << themeInfo.author << std::endl
 							<< "  Desc:" << themeInfo.description << std::endl
 							<< "  Version: " << themeInfo.version << std::endl;
-
-						config->app.currThemeID = themeIdx;
 					}
+				}
 
-					bool isHovered = ImGui::IsItemHovered();
-					ImDrawList* drawList = ImGui::GetWindowDrawList();
+				ImGui::SeparatorText("Visual theme");
 
-					// draw card background
-					auto toU32 = [](const ImVec4& color) { return ImGui::ColorConvertFloat4ToU32(color); };
+				VisualThemeList* visualThemes = app->GetVisualThemeList();
+				if (visualThemes != nullptr)
+				{
+					const ThemeColors& activeColors = themesList->GetCurrentTheme()->colors;
 
-					ImVec4 selectColor = ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
-					selectColor.w = 20;
-					ImU32 bgColor = isSelected ? toU32(selectColor) : (isHovered ? IM_COL32(150, 150, 150, 30) : IM_COL32(0, 0, 0, 0));
-					drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(isSelected ? ImGuiCol_CheckMark : ImGuiCol_Border), 4.0f, 0, 2.0f);
+					for (size_t visualIdx = 0; visualIdx < visualThemes->GetThemesList().size(); ++visualIdx)
+					{
+						VisualTheme* visual = visualThemes->GetThemesList()[visualIdx].get();
+						const ImVec4 swatches[2] = { activeColors.controlBase, activeColors.backgroundAlt };
+						if (DrawThemeCard(visual, visual->info.name.c_str(), visual->info.description.c_str(),
+							visual == visualThemes->GetCurrentTheme(), swatches, 2, visual->style.windowRounding))
+						{
+							visualThemes->SetTheme(visualIdx);
+							config->app.visualThemeID = visualIdx;
+							app->ApplyCurrentThemes();
+						}
+					}
+				}
 
-					// draw swatch previews for controls n stuff
-					float swatchSize = 26.0f;
-					float padding = 12.0f;
-					ImVec2 swatchPos = ImVec2(pos.x + padding, pos.y + (height - swatchSize) * 0.5f);
+				ImGui::Spacing();
+				ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+				ImGui::TextWrapped("To make a custom color theme, put a .yml file in assets/themes, edit its "
+					"colors, then press Reload theme list. Missing colors keep Comet's defaults.");
+				ImGui::PopStyleColor();
 
-					ImU32 outlineColor = IM_COL32(50, 50, 50, 100);
-
-					// bg swatch
-					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.background), 4.0f);
-					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
-					swatchPos.x += swatchSize + 4;
-
-					// control swatch
-					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.controlBase), 4.0f);
-					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
-					swatchPos.x += swatchSize + 4;
-
-					// accent swatch
-					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.accent), 4.0f);
-					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
-					swatchPos.x += swatchSize + 4;
-
-					// draw theme's name and author
-					ImVec2 textPos = ImVec2(swatchPos.x + 15.0f, pos.y + 8.0f);
-					drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), theme->info.name.c_str());
-
-					ImVec2 subTextPos = ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + 2.0f);
-					drawList->AddText(subTextPos, ImGui::GetColorU32(ImGuiCol_TextDisabled), ("by " + theme->info.author).c_str());
-
-					ImGui::PopID();
-					themeIdx++;
+				if (ImGui::CollapsingHeader("Example theme file"))
+				{
+					ImGui::BeginChild("##themeExample", ImVec2(0.0f, 145.0f), ImGuiChildFlags_Borders);
+					ImGui::TextUnformatted(
+						"information:\n"
+						"  name: My theme\n"
+						"  author: You\n"
+						"theme:\n"
+						"  background: [0.12, 0.13, 0.15, 1.0]\n"
+						"  text: [0.90, 0.90, 0.90, 1.0]\n"
+						"  accent: [0.30, 0.60, 1.00, 1.0]");
+					ImGui::EndChild();
 				}
 
 				break;

@@ -13,6 +13,7 @@
 
 class MainWindow;
 class ThemesList;
+class VisualThemeList;
 class FontList;
 class AbstractMIDIRenderer;
 class AbstractOverlayRenderer;
@@ -91,6 +92,9 @@ public:
 	void ClearCounterSource();
 	MIDIAudio* GetMIDIAudio() { return midiAudio.get(); }
 	ThemesList* GetThemeList() { return themesList.get(); }
+	VisualThemeList* GetVisualThemeList() { return visualThemeList.get(); }
+	// Applies the selected colour palette, then the selected visual (shape) theme on top.
+	void ApplyCurrentThemes();
 	FontList* GetFontList() { return fontList.get(); }
 	NoteCounterInfo* GetNoteCounterInfo() { return noteCounterInfo.get(); }
 
@@ -155,6 +159,7 @@ private:
 	MIDIPlayerConfig config;
 
 	std::unique_ptr<ThemesList> themesList;
+	std::unique_ptr<VisualThemeList> visualThemeList;
 	std::unique_ptr<FontList> fontList;
 	std::unique_ptr<AbstractMIDIRenderer> renderer;
 	// A renderer that needs the merged per-key store is built immediately but installed only

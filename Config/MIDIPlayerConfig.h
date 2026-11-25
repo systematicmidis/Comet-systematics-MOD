@@ -63,6 +63,7 @@ struct MIDIPlayerConfig
 	struct ConfigApp
 	{
 		size_t currThemeID = 0;
+		size_t visualThemeID = 0;
 	};
 
 	struct ConfigOverlayInfo

@@ -21,6 +21,11 @@ private:
 	void DrawModTab();
 	void DrawCrashReportsTab();
 
+	// One selectable theme card with colour swatches. Used for both the colour list and the
+	// visual-theme list so the two selectors look the same.
+	bool DrawThemeCard(const void* id, const char* title, const char* subtitle, bool selected,
+		const ImVec4* swatches, int swatchCount, float rounding);
+
 	// Pushes the crash-report settings into the reporter (and optionally straight to disk, since a
 	// crash means the usual save-on-exit never runs).
 	void ApplyCrashConfiguration(bool saveNow);
