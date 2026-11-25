@@ -44,6 +44,4 @@ private:
 
 	void TryLoadUITextures();
 	void VerticalSeparator(float height = 0.0f, bool altColor = false);
-	void DrawCometToolbar();
-	void DrawSynthesiaToolbar();
 };

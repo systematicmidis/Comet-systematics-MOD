@@ -2,6 +2,7 @@
 
 #include "App/MIDIApp.h"
 #include "App/UI/Dialog.h"
+#include "App/UI/Themes/Themes.h"
 
 class SettingsDialog : public Dialog
 {
@@ -20,11 +21,6 @@ private:
 	void DrawMIDITab();
 	void DrawModTab();
 	void DrawCrashReportsTab();
-
-	// One selectable theme card with colour swatches. Used for both the colour list and the
-	// visual-theme list so the two selectors look the same.
-	bool DrawThemeCard(const void* id, const char* title, const char* subtitle, bool selected,
-		const ImVec4* swatches, int swatchCount, float rounding);
 
 	// Pushes the crash-report settings into the reporter (and optionally straight to disk, since a
 	// crash means the usual save-on-exit never runs).
@@ -55,4 +51,15 @@ private:
 		std::string message;
 	};
 	std::shared_ptr<CrashTestState> crashTest = std::make_shared<CrashTestState>();
+
+	// Custom theme editor. Tweaks are applied to the selected theme immediately so the whole app
+	// previews them; "Save theme" writes a .yml copy and selects it.
+	AppTheme* editedTheme = nullptr;
+	ThemeColors editedThemeColors{};
+	char themeNameInput[128] = "";
+	char themeAuthorInput[128] = "";
+	char themeDescriptionInput[512] = "";
+	std::string themeStatus;
+	void DrawThemeEditor();
+	void ApplyThemePreset(bool synthesia);
 };

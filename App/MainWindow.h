@@ -44,13 +44,6 @@ public:
 	void SetTitleInfo(std::string midiName = "");
 	// File > Open: pick a MIDI, start loading it and show the loading dialog.
 	void OpenMIDIDialog();
-	// The Synthesia visual theme draws its own play bar and hides the regular menu bar; the bar's
-	// menu popup needs the same dialogs the menu items open.
-	bool UsesSynthesiaToolbar();
-	void OpenSettingsDialog();
-	void OpenRenderVideoDialog();
-	void OpenDiagnosisDialog();
-	void OpenUpdateDialog();
 	// Starts loading a known path and shows the loading dialog; used by File > Open and by a
 	// path passed on the command line. The overload with an entry name is used by the archive
 	// picker when the container holds more than one MIDI.

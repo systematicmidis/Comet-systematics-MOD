@@ -7,18 +7,12 @@
 #include <vector>
 
 class AppTheme;
-class VisualTheme;
 
 namespace CometDefaultThemes
 {
     extern std::shared_ptr<AppTheme> DefaultLightMode;
     extern std::shared_ptr<AppTheme> DefaultDarkMode;
     extern std::vector<std::shared_ptr<AppTheme>> DefaultThemesList;
-
-    extern std::shared_ptr<VisualTheme> DefaultVisualTheme;
-    extern std::shared_ptr<VisualTheme> SynthesiaVisualTheme;
-    extern std::vector<std::shared_ptr<VisualTheme>> DefaultVisualThemesList;
-
     void InitializeDefaultThemes();
 }
 
@@ -44,36 +38,6 @@ struct ThemeColors
     ImVec4 separator =     ImVec4(0.75f, 0.75f, 0.75f, 1.00f);
 };
 
-// Shape and spacing of the UI. Colour themes only change colours; a visual theme carries these
-// values so the Synthesia layout can be combined with any Comet colour palette.
-struct ThemeStyle
-{
-    float windowRounding = 6.0f;
-    float childRounding = 4.0f;
-    float frameRounding = 4.0f;
-    float popupRounding = 4.0f;
-    float scrollbarRounding = 6.0f;
-    float grabRounding = 4.0f;
-    float tabRounding = 5.0f;
-
-    float windowBorderSize = 1.0f;
-    float frameBorderSize = 1.0f;
-    float popupBorderSize = 1.0f;
-    float tabBarBorderSize = 1.0f;
-    float tabBarOverlineSize = 1.0f;
-
-    ImVec2 itemSpacing = ImVec2(8.0f, 6.0f);
-    ImVec2 windowPadding = ImVec2(10.0f, 10.0f);
-    ImVec2 framePadding = ImVec2(4.0f, 3.0f);
-    ImVec2 cellPadding = ImVec2(4.0f, 2.0f);
-    float scrollbarSize = 14.0f;
-    float grabMinSize = 12.0f;
-
-    // Synthesia's transport bar is an opaque strip with framed icon buttons, not a floating
-    // translucent overlay.
-    bool framedToolbar = false;
-};
-
 struct ThemeInfo
 {
     std::string name = "Unnamed theme";
@@ -82,29 +46,26 @@ struct ThemeInfo
     int version = 0;
 };
 
+// Palettes the custom-theme editor starts from. Synthesia REMASTERED follows the app's light or
+// dark appearance the same way the Synthesia opening banner does: Crystal Blue on a light Comet
+// theme, Synthesia Classic on a dark one.
+namespace ThemePresets
+{
+    bool IsDark(const ThemeColors& colors);
+    ThemeColors CometDefault(bool dark);
+    ThemeColors SynthesiaRemastered(bool dark);
+}
+
 class AppTheme
 {
 public:
     AppTheme() = default;
     ~AppTheme() = default;
 
-    void ApplyColors();
+    void ApplyTheme();
 
     ThemeColors colors;
     ThemeInfo info;
-};
-
-class VisualTheme
-{
-public:
-    void Apply(const ThemeColors& colors) const;
-
-    ThemeStyle style;
-    ThemeInfo info;
-
-    // Synthesia paints flat rows with a light 1px outline and flat segmented tabs. The outline is
-    // derived from the active palette so the layout also works on a light Comet theme.
-    bool synthesiaChrome = false;
 };
 
 class ThemesList
@@ -123,10 +84,24 @@ public:
     {
         return currentTheme;
     }
-    void SetTheme(size_t themeIdx);
-    void ApplyCurrent();
+    void SetThemeAndApply(size_t themeIdx)
+    {
+        if (availableThemes.size() == 0) return;
+
+        if (themeIdx > availableThemes.size())
+        {
+            SetThemeAndApply(availableThemes.size() - 1);
+            return;
+        }
+        currentTheme = themeIdx;
+        GetCurrentTheme()->ApplyTheme();
+    }
     void ReloadThemesList();
     void OpenThemeListFolder() const;
+
+    // Writes the theme to <themes folder>/<name>.yml, reloads the list and selects the saved
+    // theme. Returns false with an explanation in error when the file cannot be written.
+    bool SaveTheme(const AppTheme& theme, std::string& error);
 private:
     std::shared_ptr<AppTheme> ParseTheme(std::string path);
     ImVec4 ParseColor(const YAML::Node& node, const ImVec4& defaultColor);
@@ -134,28 +109,4 @@ private:
     std::string themesPath;
     size_t currentTheme = 0;
     std::vector<std::shared_ptr<AppTheme>> availableThemes = CometDefaultThemes::DefaultThemesList;
-};
-
-class VisualThemeList
-{
-public:
-    VisualThemeList();
-
-    std::vector<std::shared_ptr<VisualTheme>>& GetThemesList()
-    {
-        return availableThemes;
-    }
-    VisualTheme* GetCurrentTheme()
-    {
-        return availableThemes[currentTheme].get();
-    }
-    size_t GetCurrentThemeIndex() const
-    {
-        return currentTheme;
-    }
-    void SetTheme(size_t themeIdx);
-    void ApplyCurrent(const ThemeColors& colors);
-private:
-    size_t currentTheme = 0;
-    std::vector<std::shared_ptr<VisualTheme>> availableThemes = CometDefaultThemes::DefaultVisualThemesList;
 };

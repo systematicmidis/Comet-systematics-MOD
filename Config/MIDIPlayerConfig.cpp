@@ -48,7 +48,6 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		{
 			ConfigApp app;
 			app.currThemeID = appSec->GetInt("themeID", 0);
-			app.visualThemeID = appSec->GetInt("visualThemeID", 0);
 			this->app = app;
 		}
 
@@ -270,7 +269,6 @@ void MIDIPlayerConfig::SaveConfig()
 	config["version"] = 2;
 
 	config["app"]["themeID"] = app.currThemeID;
-	config["app"]["visualThemeID"] = app.visualThemeID;
 
 	config["overlay"]["scale"] = overlayInfo.scale;
 	config["overlay"]["blurBehind"] = overlayInfo.blurBehind;

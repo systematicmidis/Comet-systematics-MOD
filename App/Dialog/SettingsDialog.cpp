@@ -178,49 +178,6 @@ void SettingsDialog::DrawContent()
 	}
 }
 
-bool SettingsDialog::DrawThemeCard(const void* id, const char* title, const char* subtitle,
-	bool selected, const ImVec4* swatches, int swatchCount, float rounding)
-{
-	ImGui::PushID(id);
-
-	const float width = ImGui::GetContentRegionAvail().x;
-	const float height = 50.0f;
-	const ImVec2 pos = ImGui::GetCursorScreenPos();
-
-	const bool clicked = ImGui::Selectable("##themeCard", selected, 0, ImVec2(width, height));
-	const bool hovered = ImGui::IsItemHovered();
-
-	ImDrawList* drawList = ImGui::GetWindowDrawList();
-	auto toU32 = [](const ImVec4& color) { return ImGui::ColorConvertFloat4ToU32(color); };
-
-	ImVec4 selectColor = ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
-	selectColor.w = 0.08f;
-	const ImU32 bgColor = selected ? toU32(selectColor) : (hovered ? IM_COL32(150, 150, 150, 30) : IM_COL32(0, 0, 0, 0));
-	drawList->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), bgColor, 4.0f);
-	drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height),
-		ImGui::GetColorU32(selected ? ImGuiCol_CheckMark : ImGuiCol_Border), 4.0f, 0, selected ? 2.0f : 1.0f);
-
-	const float swatchSize = 26.0f;
-	const float padding = 12.0f;
-	ImVec2 swatchPos(pos.x + padding, pos.y + (height - swatchSize) * 0.5f);
-	for (int i = 0; i < swatchCount; ++i)
-	{
-		drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize),
-			toU32(swatches[i]), rounding);
-		drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize),
-			IM_COL32(50, 50, 50, 100), rounding);
-		swatchPos.x += swatchSize + 4.0f;
-	}
-
-	const ImVec2 textPos(swatchPos.x + 15.0f, pos.y + 8.0f);
-	drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), title);
-	drawList->AddText(ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + 2.0f),
-		ImGui::GetColorU32(ImGuiCol_TextDisabled), subtitle);
-
-	ImGui::PopID();
-	return clicked;
-}
-
 void SettingsDialog::DrawAppTab()
 {
 	auto config = app->GetConfig();
@@ -278,14 +235,19 @@ void SettingsDialog::DrawAppTab()
 			}
 			case Theme:
 			{
-				ImGui::TextDisabled("Custom color themes are .yml files in the themes folder.");
+				size_t themeIdx = 0;
+
 				if (ImGui::Button("Reload theme list"))
 				{
+					// Drop an unsaved preview first so reloading never keeps edited built-in colours.
+					if (editedTheme != nullptr)
+					{
+						editedTheme->colors = editedThemeColors;
+						editedTheme->ApplyTheme();
+					}
 					themesList->ReloadThemesList();
-					// Reloading can drop the selected custom theme; fall back to a theme that exists.
-					themesList->SetTheme(themesList->GetCurrentThemeIndex());
-					config->app.currThemeID = themesList->GetCurrentThemeIndex();
-					app->ApplyCurrentThemes();
+					// Reloading replaces every theme object; resync the editor from the new one.
+					editedTheme = nullptr;
 				}
 
 				ImGui::SameLine();
@@ -293,70 +255,82 @@ void SettingsDialog::DrawAppTab()
 				if (ImGui::Button("Open themes folder"))
 					themesList->OpenThemeListFolder();
 
-				ImGui::SeparatorText("Colors");
+				ImGui::Separator();
 
-				for (size_t themeIdx = 0; themeIdx < themesList->GetThemesList().size(); ++themeIdx)
+				for (const auto& theme : themesList->GetThemesList())
 				{
-					AppTheme* theme = themesList->GetThemesList()[themeIdx].get();
-					const ImVec4 swatches[3] = {
-						theme->colors.background, theme->colors.controlBase, theme->colors.accent
-					};
-					const std::string author = "by " + theme->info.author;
-					if (DrawThemeCard(theme, theme->info.name.c_str(), author.c_str(),
-						theme == themesList->GetCurrentTheme(), swatches, 3, 4.0f))
-					{
-						themesList->SetTheme(themeIdx);
-						config->app.currThemeID = themeIdx;
-						app->ApplyCurrentThemes();
+					AppTheme* themePtr = theme.get();
+					bool isSelected = themePtr == themesList->GetCurrentTheme();
+					ImGui::PushID(themePtr);
 
-						const ThemeInfo& themeInfo = theme->info;
+					float width = ImGui::GetContentRegionAvail().x;
+					float height = 50.0f;
+					ImVec2 pos = ImGui::GetCursorScreenPos();
+
+					if (ImGui::Selectable("##themeBtn", isSelected, 0, ImVec2(width, height)))
+					{
+						// Moving to another theme discards an unsaved preview without changing the old
+						// theme's palette. The new selection applies its own colours right after this.
+						if (editedTheme != nullptr && editedTheme != themePtr)
+							editedTheme->colors = editedThemeColors;
+
+						app->GetThemeList()->SetThemeAndApply(themeIdx);
+
+						ThemeInfo& themeInfo = themePtr->info;
 						std::cout << "Loaded \"" << themeInfo.name << "\"" << std::endl
 							<< "  By " << themeInfo.author << std::endl
 							<< "  Desc:" << themeInfo.description << std::endl
 							<< "  Version: " << themeInfo.version << std::endl;
+
+						config->app.currThemeID = themeIdx;
 					}
-				}
 
-				ImGui::SeparatorText("Visual theme");
+					bool isHovered = ImGui::IsItemHovered();
+					ImDrawList* drawList = ImGui::GetWindowDrawList();
 
-				VisualThemeList* visualThemes = app->GetVisualThemeList();
-				if (visualThemes != nullptr)
-				{
-					const ThemeColors& activeColors = themesList->GetCurrentTheme()->colors;
+					// draw card background
+					auto toU32 = [](const ImVec4& color) { return ImGui::ColorConvertFloat4ToU32(color); };
 
-					for (size_t visualIdx = 0; visualIdx < visualThemes->GetThemesList().size(); ++visualIdx)
-					{
-						VisualTheme* visual = visualThemes->GetThemesList()[visualIdx].get();
-						const ImVec4 swatches[2] = { activeColors.controlBase, activeColors.backgroundAlt };
-						if (DrawThemeCard(visual, visual->info.name.c_str(), visual->info.description.c_str(),
-							visual == visualThemes->GetCurrentTheme(), swatches, 2, visual->style.windowRounding))
-						{
-							visualThemes->SetTheme(visualIdx);
-							config->app.visualThemeID = visualIdx;
-							app->ApplyCurrentThemes();
-						}
-					}
+					ImVec4 selectColor = ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
+					selectColor.w = 20;
+					ImU32 bgColor = isSelected ? toU32(selectColor) : (isHovered ? IM_COL32(150, 150, 150, 30) : IM_COL32(0, 0, 0, 0));
+					drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(isSelected ? ImGuiCol_CheckMark : ImGuiCol_Border), 4.0f, 0, 2.0f);
+
+					// draw swatch previews for controls n stuff
+					float swatchSize = 26.0f;
+					float padding = 12.0f;
+					ImVec2 swatchPos = ImVec2(pos.x + padding, pos.y + (height - swatchSize) * 0.5f);
+
+					ImU32 outlineColor = IM_COL32(50, 50, 50, 100);
+
+					// bg swatch
+					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.background), 4.0f);
+					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
+					swatchPos.x += swatchSize + 4;
+
+					// control swatch
+					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.controlBase), 4.0f);
+					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
+					swatchPos.x += swatchSize + 4;
+
+					// accent swatch
+					drawList->AddRectFilled(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), toU32(theme->colors.accent), 4.0f);
+					drawList->AddRect(swatchPos, ImVec2(swatchPos.x + swatchSize, swatchPos.y + swatchSize), outlineColor, 4.0f);
+					swatchPos.x += swatchSize + 4;
+
+					// draw theme's name and author
+					ImVec2 textPos = ImVec2(swatchPos.x + 15.0f, pos.y + 8.0f);
+					drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), theme->info.name.c_str());
+
+					ImVec2 subTextPos = ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + 2.0f);
+					drawList->AddText(subTextPos, ImGui::GetColorU32(ImGuiCol_TextDisabled), ("by " + theme->info.author).c_str());
+
+					ImGui::PopID();
+					themeIdx++;
 				}
 
 				ImGui::Spacing();
-				ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-				ImGui::TextWrapped("To make a custom color theme, put a .yml file in assets/themes, edit its "
-					"colors, then press Reload theme list. Missing colors keep Comet's defaults.");
-				ImGui::PopStyleColor();
-
-				if (ImGui::CollapsingHeader("Example theme file"))
-				{
-					ImGui::BeginChild("##themeExample", ImVec2(0.0f, 145.0f), ImGuiChildFlags_Borders);
-					ImGui::TextUnformatted(
-						"information:\n"
-						"  name: My theme\n"
-						"  author: You\n"
-						"theme:\n"
-						"  background: [0.12, 0.13, 0.15, 1.0]\n"
-						"  text: [0.90, 0.90, 0.90, 1.0]\n"
-						"  accent: [0.30, 0.60, 1.00, 1.0]");
-					ImGui::EndChild();
-				}
+				DrawThemeEditor();
 
 				break;
 			}
@@ -561,6 +535,196 @@ void SettingsDialog::DrawCrashReportsTab()
 		ImGui::TextWrapped(
 			"Use \"Copy report to clipboard\" above to see the exact JSON that would be sent, without "
 			"sending it.");
+	}
+}
+
+void SettingsDialog::ApplyThemePreset(bool synthesia)
+{
+	ThemesList* themesList = app->GetThemeList();
+	if (themesList == nullptr) return;
+
+	AppTheme* theme = themesList->GetCurrentTheme();
+	if (theme == nullptr) return;
+
+	// A light Comet theme gets Crystal Blue; a dark one gets Synthesia Classic. This is the same
+	// mapping the Synthesia opening banner follows.
+	const bool dark = ThemePresets::IsDark(theme->colors);
+	theme->colors = synthesia
+		? ThemePresets::SynthesiaRemastered(dark)
+		: ThemePresets::CometDefault(dark);
+	theme->ApplyTheme();
+
+	if (synthesia)
+	{
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", "Synthesia REMASTERED");
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", "Systematics");
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s", dark
+			? "Synthesia's classic dark chrome, recreated for Comet."
+			: "Synthesia's Crystal Blue chrome, recreated for Comet.");
+		themeStatus = dark
+			? "Loaded the Synthesia Classic palette."
+			: "Loaded the Crystal Blue palette.";
+	}
+	else
+	{
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", "Comet default");
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", "ponluxime");
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			"Comet's default palette.");
+		themeStatus = "Loaded Comet's default palette.";
+	}
+}
+
+void SettingsDialog::DrawThemeEditor()
+{
+	ThemesList* themesList = app->GetThemeList();
+	if (themesList == nullptr || themesList->GetThemesList().empty()) return;
+
+	AppTheme* theme = themesList->GetCurrentTheme();
+	if (theme == nullptr) return;
+
+	// Follow whichever theme is selected. Preset clicks edit that theme in place, so the text
+	// buffers are only refreshed when the selection itself moves.
+	if (theme != editedTheme)
+	{
+		editedTheme = theme;
+		editedThemeColors = theme->colors;
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", theme->info.name.c_str());
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", theme->info.author.c_str());
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			theme->info.description.c_str());
+	}
+
+	SECTION_HEADER("Custom theme");
+
+	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+	ImGui::TextWrapped(
+		"Pick a base, adjust any UI colour, then save. The theme is written to the themes folder "
+		"as a .yml file, so it can be edited and shared like any other theme.");
+	ImGui::PopStyleColor();
+
+	BEGIN_SECTION("##themePreset")
+	{
+		SETUP_SECTION;
+
+		SECTION_ENTRY(
+			TABLE_LABEL_TOOLTIP(
+				"Base",
+				"Comet default keeps Comet's own palette. Synthesia REMASTERED recreates Synthesia's "
+				"chrome: Crystal Blue on a light Comet theme, Synthesia Classic on a dark one."),
+			{
+				if (ImGui::Button("Comet default"))
+					ApplyThemePreset(false);
+
+				ImGui::SameLine();
+
+				if (ImGui::Button("Synthesia REMASTERED"))
+					ApplyThemePreset(true);
+			});
+	}
+	END_SECTION;
+
+	if (ImGui::CollapsingHeader("UI elements", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		BEGIN_SECTION("##themeElements")
+		{
+			SETUP_SECTION;
+
+			auto colorRow = [&](const char* label, ImVec4& color)
+			{
+				SECTION_ENTRY(SECTION_LABEL(label),
+					{
+						if (ImGui::ColorEdit4(("##theme" + std::string(label)).c_str(), &color.x,
+							ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf))
+						{
+							theme->ApplyTheme();
+						}
+					});
+			};
+
+			colorRow("Text", theme->colors.text);
+			colorRow("Disabled text", theme->colors.textDisabled);
+			colorRow("Window background", theme->colors.background);
+			colorRow("Panels and popups", theme->colors.backgroundAlt);
+			colorRow("Title and menu bars", theme->colors.headerBg);
+			colorRow("Buttons and headers", theme->colors.controlBase);
+			colorRow("Hovered controls", theme->colors.controlHover);
+			colorRow("Active controls", theme->colors.controlActive);
+			colorRow("Input fields", theme->colors.inputBg);
+			colorRow("Accent", theme->colors.accent);
+			colorRow("Active accent", theme->colors.accentActive);
+			colorRow("Borders", theme->colors.border);
+			colorRow("Separators", theme->colors.separator);
+		}
+		END_SECTION;
+	}
+
+	SECTION_HEADER("Save this theme");
+
+	BEGIN_SECTION("##themeMeta")
+	{
+		SETUP_SECTION;
+
+		SECTION_ENTRY(SECTION_LABEL("Name"),
+			{
+				ImGui::InputText("##themeName", themeNameInput, sizeof(themeNameInput));
+			});
+
+		SECTION_ENTRY(SECTION_LABEL("Author"),
+			{
+				ImGui::InputText("##themeAuthor", themeAuthorInput, sizeof(themeAuthorInput));
+			});
+
+		SECTION_ENTRY(SECTION_LABEL("Description"),
+			{
+				ImGui::InputText("##themeDescription", themeDescriptionInput, sizeof(themeDescriptionInput));
+			});
+	}
+	END_SECTION;
+
+	if (ImGui::Button("Save theme"))
+	{
+		AppTheme saved = *theme;
+		saved.info.name = themeNameInput[0] != '\0' ? themeNameInput : "Custom theme";
+		saved.info.author = themeAuthorInput[0] != '\0' ? themeAuthorInput : "Unknown";
+		saved.info.description = themeDescriptionInput[0] != '\0'
+			? themeDescriptionInput
+			: "Custom Comet theme.";
+		saved.info.version = 1;
+
+		// The saved copy owns the edited palette; put the source theme back so a built-in does
+		// not keep the preset colours after saving.
+		theme->colors = editedThemeColors;
+		theme->ApplyTheme();
+
+		std::string error;
+		const bool savedOk = themesList->SaveTheme(saved, error);
+
+		// Saving reloads the list, which replaces the theme objects this function is using.
+		editedTheme = nullptr;
+		themeStatus = savedOk
+			? "Saved \"" + saved.info.name + "\" to the themes folder."
+			: "Could not save the theme: " + error;
+		return;
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Revert changes"))
+	{
+		theme->colors = editedThemeColors;
+		theme->ApplyTheme();
+		std::snprintf(themeNameInput, sizeof(themeNameInput), "%s", theme->info.name.c_str());
+		std::snprintf(themeAuthorInput, sizeof(themeAuthorInput), "%s", theme->info.author.c_str());
+		std::snprintf(themeDescriptionInput, sizeof(themeDescriptionInput), "%s",
+			theme->info.description.c_str());
+		themeStatus.clear();
+	}
+
+	if (!themeStatus.empty())
+	{
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", themeStatus.c_str());
 	}
 }
 
