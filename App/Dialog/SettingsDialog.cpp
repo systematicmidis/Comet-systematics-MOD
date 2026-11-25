@@ -246,6 +246,7 @@ void SettingsDialog::DrawAppTab()
 						editedTheme->ApplyTheme();
 					}
 					themesList->ReloadThemesList();
+					config->app.currThemeID = themesList->GetCurrentThemeIndex();
 					// Reloading replaces every theme object; resync the editor from the new one.
 					editedTheme = nullptr;
 				}
@@ -699,6 +700,7 @@ void SettingsDialog::DrawThemeEditor()
 
 		std::string error;
 		const bool savedOk = themesList->SaveTheme(saved, error);
+		app->GetConfig()->app.currThemeID = themesList->GetCurrentThemeIndex();
 
 		// Saving reloads the list, which replaces the theme objects this function is using.
 		editedTheme = nullptr;

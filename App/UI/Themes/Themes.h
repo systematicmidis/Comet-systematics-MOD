@@ -86,15 +86,14 @@ public:
     }
     void SetThemeAndApply(size_t themeIdx)
     {
-        if (availableThemes.size() == 0) return;
+        if (availableThemes.empty()) return;
 
-        if (themeIdx > availableThemes.size())
-        {
-            SetThemeAndApply(availableThemes.size() - 1);
-            return;
-        }
+        // A config written while a custom theme existed can point past the end of the list.
+        if (themeIdx >= availableThemes.size())
+            themeIdx = availableThemes.size() - 1;
+
         currentTheme = themeIdx;
-        GetCurrentTheme()->ApplyTheme();
+        availableThemes[currentTheme]->ApplyTheme();
     }
     void ReloadThemesList();
     void OpenThemeListFolder() const;

@@ -666,6 +666,8 @@ void MIDIApp::LoadResources()
 {
 	themesList = std::make_unique<ThemesList>("./assets/themes");
 	themesList->SetThemeAndApply(config.app.currThemeID);
+	// Persist the clamped index so a stale config cannot point past the list next launch.
+	config.app.currThemeID = themesList->GetCurrentThemeIndex();
 
 	auto defaultPack = DefaultResourcePack::Instance();
 	defaultPack->Init();

@@ -307,6 +307,15 @@ void ThemesList::ReloadThemesList()
         std::shared_ptr<AppTheme> parsedTheme = ParseTheme(file.path().string());
         availableThemes.push_back(parsedTheme);
     }
+
+    if (availableThemes.empty()) return;
+
+    // The selected file may have been deleted since the last reload. Keep the index in range and
+    // reapply the surviving theme so the UI does not keep colours from a theme that is gone.
+    if (currentTheme >= availableThemes.size())
+        currentTheme = availableThemes.size() - 1;
+
+    availableThemes[currentTheme]->ApplyTheme();
 }
 
 
