@@ -188,5 +188,7 @@
     "stats.buffer": "バッファ",
 
     "widget.file.browse": "ブラウザで開く...",
-    "general.open": "開く..."
+    "general.open": "開く...",
+    "renderer.synthesia.sheet": "楽譜",
+    "renderer.synthesia.keyOctaves": "オクターブ表示"
 }

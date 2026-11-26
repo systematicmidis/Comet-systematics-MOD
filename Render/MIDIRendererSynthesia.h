@@ -34,6 +34,7 @@ struct SynthesiaRenderSettings
 	bool renderKeySparkle = true;
 	bool renderBackground = true;
 	bool showKeyOctaves = true;
+	bool showSheetMusic = true;
 
 	SynthesiaStyle style = SYNTHESIA_10;
 
@@ -258,6 +259,10 @@ private:
 	std::unique_ptr<GPUImage> noteBlackTop;
 	std::unique_ptr<GPUImage> noteBlackBottom;
 	std::unique_ptr<GPUImage> noteOOB;
+	std::unique_ptr<GPUImage> sheetTreble;
+	std::unique_ptr<GPUImage> sheetBass;
+	std::unique_ptr<GPUImage> sheetSharp;
+	std::unique_ptr<GPUImage> sheetFlat;
 #pragma endregion
 
 #pragma region Particle variables
@@ -307,6 +312,8 @@ private:
 	void RenderMeasureLines();
 	void RenderKeyboard();
 	void RenderOctaveTextOverlays();
+	void RenderSheetMusic();
+	void DrawSheetImage(std::unique_ptr<GPUImage>& image, float x, float y, float height, uint32_t tint);
 
 	void GenerateParticles(double deltaTime);
 	void RenderParticles();

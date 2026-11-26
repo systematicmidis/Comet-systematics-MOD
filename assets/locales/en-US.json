@@ -188,5 +188,7 @@
     "stats.buffer": "Buffer",
 
     "widget.file.browse": "Browse...",
-    "general.open": "Open"
+    "general.open": "Open",
+    "renderer.synthesia.sheet": "Sheet music",
+    "renderer.synthesia.keyOctaves": "Key octave labels"
 }

@@ -1,15 +1,33 @@
 #include "MIDIRendererSynthesia.h"
 #include "Utils.h"
+#include "App/Fonts.h"
+#include "App/Localization/Localization.h"
 #include "App/MIDIApp.h"
+#include "App/UI/NavigationBar.h"
 #include "MIDI/Timer/MIDITimer.h"
 #include "MIDI/TempoMap.h"
 #include "RenderView.h"
 #include "App/Dialog/DialogMacros.h"
 #include <memory>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <string>
 
 #define LOAD_VAL(n, key, target) \
         if (n && n[key]) { target = n[key].as<std::decay_t<decltype(target)>>(); }
+
+namespace
+{
+	constexpr int SHEET_LETTER[12] = { 0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6 };
+
+	// MIDI 0 is C-1, MIDI 60 is C4, MIDI 120 is C9. This is the same octave spelling
+	// Synthesia uses on its keyboard labels.
+	int DiatonicNumber(int midiNote)
+	{
+		return (midiNote / 12 - 1) * 7 + SHEET_LETTER[midiNote % 12];
+	}
+}
 
 #pragma region Shaders
 inline constexpr const char* rectVert = R"(#version 330 core
@@ -731,6 +749,14 @@ void MIDIRendererSynthesia::UpdateStyle()
 	noteBlackBottom = std::make_unique<GPUImage>(Utils::TryGetStream(noteBlackBottomPath));
 	noteOOB = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/notes/noteOOB.png"));
 
+	// Sheet-music symbols are pre-rasterized from the Segoe UI Symbol clef glyphs. Keeping
+	// them as textures lets the notation use crisp shapes without depending on a music font
+	// being installed on the user's machine.
+	sheetTreble = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/treble.png"));
+	sheetBass = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/bass.png"));
+	sheetSharp = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/sharp.png"));
+	sheetFlat = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/flat.png"));
+
 	{
 		ShaderBind bind(*notesProgram);
 		notesProgram->SetFloat("brightnessBoost", brightnessBoost);
@@ -815,7 +841,8 @@ void MIDIRendererSynthesia::Render(double deltaTime)
 
 	RenderKeyboard();
 	RenderQuads(rectDrawCount);
-	if (renderSettings.showKeyOctaves && renderSettings.style == SYNTHESIA_9) RenderOctaveTextOverlays();
+	if (renderSettings.showSheetMusic) RenderSheetMusic();
+	if (renderSettings.showKeyOctaves) RenderOctaveTextOverlays();
 
 	glDisable(GL_BLEND);
 
@@ -826,7 +853,28 @@ void MIDIRendererSynthesia::Render(double deltaTime)
 
 void MIDIRendererSynthesia::RenderBackground()
 {
-	PushQuad(0.0, 0.0, 1.0, 1.0, 0xFF252525);
+	// The real Synthesia room is not a flat fill: it has a soft light falloff toward the
+	// keyboard and a darker ceiling. A small number of horizontal bands gives that depth
+	// without another shader or a full-screen texture.
+	constexpr int bands = 48;
+	for (int i = 0; i < bands; ++i)
+	{
+		const float t = (float)i / (float)(bands - 1);
+		const float shade = 0.095f + t * 0.055f;
+		const int c = (int)std::lround(shade * 255.0f);
+		PushQuad(0.0f, (float)i / bands, 1.0f, 1.0f / bands, 0xFF000000u | ((uint32_t)c << 16) | ((uint32_t)c << 8) | (uint32_t)c);
+	}
+
+	// A little vignette on the sides frames the keyboard the way Synthesia's stage does.
+	constexpr int vignetteBands = 16;
+	for (int i = 0; i < vignetteBands; ++i)
+	{
+		const float t = (float)i / (float)vignetteBands;
+		const uint32_t alpha = (uint32_t)std::lround((1.0f - t) * 22.0f) << 24;
+		const float inset = t * 0.12f;
+		PushQuad(0.0f, 0.0f, 0.12f - inset, 1.0f, alpha);
+		PushQuad(0.88f + inset, 0.0f, 0.12f - inset, 1.0f, alpha);
+	}
 }
 
 void MIDIRendererSynthesia::RenderLines()
@@ -1844,76 +1892,273 @@ void MIDIRendererSynthesia::UpdateParticles(double deltaTime)
 void MIDIRendererSynthesia::RenderOctaveTextOverlays()
 {
 	ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+	ImFont* font = Fonts::DefaultFont != nullptr ? Fonts::DefaultFont : ImGui::GetFont();
+	if (font == nullptr) return;
 
 	MIDIPlayerConfig* config = app->GetConfig();
-	int keyFirst = config->render.GetKeyFirst();
-	int keyLast = config->render.GetKeyLast() + 1;
+	int keyFirst = std::clamp(config->render.GetKeyFirst(), 0, MIDI_KEYS - 1);
+	int keyLast = std::clamp(config->render.GetKeyLast() + 1, 0, MIDI_KEYS);
 
-	float aspect = (float)width / (float)height;
-
-	for (size_t k = keyFirst; k < keyLast; k++)
+	for (int k = keyFirst; k < keyLast; ++k)
 	{
 		if (k % 12 != 0) continue;
 
-		int i = (k / 12) - 1;
+		const int octave = (k / 12) - 1;
+		const float left = keyPos[k];
+		const float right = keyPos[k] + keyWidth[k];
+		const float keyPixels = (right - left) * width;
+		if (keyPixels < 4.0f) continue;
 
-		float left = keyPos[k];
-		float right = keyPos[k] + keyWidth[k];
+		const std::string txt = "C" + std::to_string(octave);
+		float fontSize = std::clamp(keyPixels * 1.15f, 7.0f, height * 0.035f);
+		float textWidth = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, txt.c_str()).x;
+		// C labels are seven white keys apart, so they have room to be wider than one key. The
+		// old one-key limit made the 256-key range's labels unreadably small.
+		if (textWidth > keyPixels * 5.0f && textWidth > 0.0f)
+			fontSize *= keyPixels * 5.0f / textWidth;
 
-		float size = 1.2f;
-		float spacing = 0.6;
-		float offset = 0.0f;
-		float textHeight = size;
+		textWidth = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, txt.c_str()).x;
+		const float x = std::clamp((left + right) * 0.5f * width - textWidth * 0.5f, 0.0f, width - textWidth);
+		const float y = height - fontSize - std::max(2.0f, keyPixels * 0.22f);
 
-		if (i >= 10)
-		{
-			textHeight = 0.75f * size;
-			spacing = 0.55f;
-			offset = -0.02f;
-		}
-
-		if (i == -1)
-		{
-			textHeight = 0.8f * size;
-			spacing = 0.55f;
-			offset = -0.02f;
-		}
-
-		textHeight *= right - left;
-
-		std::string txt = "C" + std::to_string(i);
-
-		float middle =
-			(right + left) * 0.5f +
-			(right - left) * offset;
-
-		float x = middle * width;
-
-		float fontSize = textHeight * height;
-		float offsetY = (right - left) * aspect * 0.25f * height;
-		float y = height - offsetY - fontSize;
-
-		ImVec2 textSize = ImGui::CalcTextSize(txt.c_str());
-		float scale = fontSize / ImGui::GetFontSize();
-
-		ImVec2 pos(
-			x - textSize.x * scale * 0.5f,
-			y
-		);
-
-		ImU32 col = IM_COL32(0, 0, 0, 92);
-
-		if (k == 5 * 12)
-			col = IM_COL32(0, 0, 0, 163);
-
-		drawList->AddText(
-			ImGui::GetFont(),
-			fontSize,
-			pos,
-			col,
-			txt.c_str()
-		);
+		const ImU32 col = k == 5 * 12 ? IM_COL32(0, 0, 0, 163) : IM_COL32(0, 0, 0, 92);
+		drawList->AddText(font, fontSize, ImVec2(x, y), col, txt.c_str());
 	}
+}
+
+void MIDIRendererSynthesia::DrawSheetImage(std::unique_ptr<GPUImage>& image, float x, float y, float imageHeight, uint32_t tint)
+{
+	if (!image || !image->IsValidTexture() || image->height <= 0) return;
+
+	const float imageWidth = imageHeight * (float)image->width / (float)image->height;
+	// GPUImage uploads the first PNG row as the OpenGL bottom row. Flip the V axis for ImGui's
+	// top-left coordinate system so the clef isn't upside down.
+	ImGui::GetBackgroundDrawList()->AddImage(
+		(ImTextureID)(intptr_t)image->GetTextureID(),
+		ImVec2(x, y), ImVec2(x + imageWidth, y + imageHeight),
+		ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), (ImU32)tint);
+}
+
+void MIDIRendererSynthesia::RenderSheetMusic()
+{
+	if (!seq || !renderSettings.showSheetMusic || isTimeBased) return;
+	if (seq->mergedNotes.size() < MIDI_KEYS) return;
+
+	TempoMap* tempoMap = seq->GetTempoMap();
+	if (!tempoMap) return;
+
+	const double elapsed = std::max(0.0, app->GetTimer()->Elapsed());
+	const long currentTick = tempoMap->SecsToTicksFromMap(seq->resolution, elapsed);
+
+	// The first time signature is enough for the scrolling notation. A change in the middle of
+	// a song is rare in this renderer's target files and is still represented by bar lines.
+	int numerator = 4;
+	int denominator = 4;
+	if (!seq->timeSignatures.empty())
+	{
+		const TimeSignatureEvent& signature = seq->timeSignatures.front();
+		if (signature.numerator > 0) numerator = signature.numerator;
+		if (signature.denominator > 0) denominator = signature.denominator;
+	}
+
+	const long measureTicks = std::max(1L, (long)seq->resolution * 4L * numerator / denominator);
+	const long windowTicks = measureTicks * 4L;
+	const long windowStart = std::max(0L, currentTick) / measureTicks * measureTicks;
+	const long windowEnd = windowStart + windowTicks;
+
+	const float uiWidth = ImGui::GetIO().DisplaySize.x;
+	const float uiHeight = ImGui::GetIO().DisplaySize.y;
+	if (uiWidth <= 0.0f || uiHeight <= 0.0f) return;
+
+	ImDrawList* draw = ImGui::GetBackgroundDrawList();
+
+	// The navigation bar is drawn above the renderer. In the live preview, start the paper below
+	// it so the treble staff and title are not hidden behind the chrome. Video renders have no
+	// navigation bar and keep the reference's edge-to-edge layout.
+	float panelTop = 0.0f;
+	if (!app->IsRendering())
+	{
+		if (NavigationBar* navigationBar = app->GetNavigationBar())
+			panelTop = std::max(0.0f, navigationBar->GetPosition().y + navigationBar->GetResolution().y);
+	}
+
+	// Reference measurements: the sheet occupies roughly the top quarter of the frame, with
+	// two five-line staves and a comfortable margin for ledger lines.
+	const float availableHeight = std::max(120.0f, uiHeight - panelTop);
+	const float panelHeight = std::clamp(availableHeight * 0.30f, 170.0f, 430.0f);
+	const float panelBottom = panelTop + panelHeight;
+	const float space = std::clamp(std::min(panelHeight * 0.028f, uiWidth * 0.0062f), 4.0f, 15.0f);
+	const float paperLeft = 0.0f;
+	const float staffLeft = std::max(8.0f, uiWidth * 0.025f);
+	const float noteLeft = std::max(70.0f, uiWidth * 0.095f);
+	const float staffRight = uiWidth - std::max(10.0f, uiWidth * 0.025f);
+
+	const float trebleTop = panelTop + panelHeight * 0.145f;
+	const float trebleBottom = trebleTop + space * 4.0f;
+	const float bassTop = trebleBottom + space * 5.2f;
+	const float bassBottom = bassTop + space * 4.0f;
+
+	const ImU32 paper = IM_COL32(247, 246, 241, 255);
+	const ImU32 paperShadow = IM_COL32(8, 8, 8, 110);
+	const ImU32 ink = IM_COL32(28, 28, 28, 255);
+	const ImU32 staffInk = IM_COL32(77, 77, 77, 255);
+	const ImU32 measureHighlight = IM_COL32(117, 185, 230, 75);
+
+	draw->AddRectFilled(ImVec2(paperLeft, panelBottom), ImVec2(uiWidth, panelBottom + space * 1.8f), paperShadow);
+	draw->AddRectFilled(ImVec2(paperLeft, panelTop), ImVec2(uiWidth, panelBottom), paper);
+	draw->AddLine(ImVec2(paperLeft, panelBottom), ImVec2(uiWidth, panelBottom), IM_COL32(65, 65, 65, 255), 1.0f);
+
+	draw->PushClipRect(ImVec2(0.0f, panelTop), ImVec2(uiWidth, panelBottom), true);
+
+	const float contentWidth = std::max(1.0f, staffRight - noteLeft);
+	auto measureX = [&](int measure)
+		{
+			return noteLeft + contentWidth * (float)measure / 4.0f;
+		};
+
+	// The current measure is tinted blue in the reference. It is always the leftmost measure
+	// because the notation scrolls one measure at a time.
+	draw->AddRectFilled(ImVec2(staffLeft, trebleTop - space * 1.7f),
+		ImVec2(measureX(1), bassBottom + space * 1.7f), measureHighlight);
+
+	auto staffLines = [&](float top, float bottom)
+		{
+			for (int line = 0; line < 5; ++line)
+			{
+				const float y = top + (bottom - top) * (float)line / 4.0f;
+				draw->AddLine(ImVec2(staffLeft, y), ImVec2(staffRight, y), staffInk, std::max(1.0f, space * 0.075f));
+			}
+		};
+
+	staffLines(trebleTop, trebleBottom);
+	staffLines(bassTop, bassBottom);
+
+	for (int measure = 0; measure <= 4; ++measure)
+	{
+		const float x = measure == 0 ? staffLeft : measureX(measure);
+		draw->AddLine(ImVec2(x, trebleTop), ImVec2(x, trebleBottom), staffInk, std::max(1.0f, space * 0.11f));
+		draw->AddLine(ImVec2(x, bassTop), ImVec2(x, bassBottom), staffInk, std::max(1.0f, space * 0.11f));
+	}
+
+	// Connect the two staves at the outer edges, like a grand staff bracket.
+	draw->AddLine(ImVec2(staffLeft, trebleTop), ImVec2(staffLeft, bassBottom), staffInk, std::max(1.0f, space * 0.13f));
+	draw->AddLine(ImVec2(staffRight, trebleTop), ImVec2(staffRight, bassBottom), staffInk, std::max(1.0f, space * 0.13f));
+
+	const float clefHeight = space * 7.2f;
+	DrawSheetImage(sheetTreble, staffLeft + space * 0.35f, trebleTop - space * 2.7f, clefHeight, 0xFFFFFFFFu);
+	DrawSheetImage(sheetBass, staffLeft + space * 0.45f, bassTop - space * 1.7f, clefHeight * 0.9f, 0xFFFFFFFFu);
+
+	// Time signature on the top staff. The clef and signature sit before the first note.
+	const std::string numeratorText = std::to_string(numerator);
+	const std::string denominatorText = std::to_string(denominator);
+	ImFont* font = Fonts::DefaultFont != nullptr ? Fonts::DefaultFont : ImGui::GetFont();
+	if (font != nullptr)
+	{
+		const float signatureSize = space * 2.2f;
+		const float signatureX = staffLeft + space * 4.3f;
+		draw->AddText(font, signatureSize, ImVec2(signatureX, trebleTop - space * 0.05f), ink, numeratorText.c_str());
+		draw->AddText(font, signatureSize, ImVec2(signatureX, trebleTop + space * 1.95f), ink, denominatorText.c_str());
+	}
+
+	const int trebleBase = 4 * 7 + 2; // E4, bottom line of the treble staff.
+	const int bassBase = 2 * 7 + 4;   // G2, bottom line of the bass staff.
+	const long quarterTicks = std::max(1L, (long)seq->resolution);
+
+	size_t renderedNotes = 0;
+	constexpr size_t MAX_SHEET_NOTES = 2400;
+
+	for (int key = 0; key < 128 && renderedNotes < MAX_SHEET_NOTES; ++key)
+	{
+		const NoteSequence& notes = seq->mergedNotes[key];
+		if (notes.Empty()) continue;
+
+		const bool treble = key >= 60;
+		const int base = treble ? trebleBase : bassBase;
+		const float staffTop = treble ? trebleTop : bassTop;
+		const float staffBottom = treble ? trebleBottom : bassBottom;
+		const int diatonicStep = DiatonicNumber(key) - base;
+		const float noteY = staffBottom - (float)diatonicStep * space * 0.5f;
+
+		auto begin = std::lower_bound(notes.tick.begin(), notes.tick.end(), (uint32_t)windowStart);
+		size_t index = (size_t)std::distance(notes.tick.begin(), begin);
+		uint32_t previousTick = UINT32_MAX;
+		uint32_t previousGate = UINT32_MAX;
+
+		for (; index < notes.Size() && renderedNotes < MAX_SHEET_NOTES; ++index)
+		{
+			const uint32_t tick = notes.tick[index];
+			if (tick >= (uint32_t)windowEnd) break;
+			if (tick == previousTick && notes.gate[index] == previousGate) continue;
+			previousTick = tick;
+			previousGate = notes.gate[index];
+
+			const float rawX = (float)((double)((long)tick - windowStart) / (double)windowTicks);
+			const float x = noteLeft + rawX * contentWidth;
+			if (x < staffLeft || x > staffRight) continue;
+
+			const uint32_t gate = std::max<uint32_t>(1, notes.gate[index]);
+			const bool openHead = gate >= quarterTicks * 2;
+			const bool wholeHead = gate >= quarterTicks * 4;
+			const float headRX = space * 0.92f;
+			const float headRY = space * 0.62f;
+			const ImVec2 center(x, noteY);
+
+			// Ledger lines only belong on line positions (even diatonic steps), never in the
+			// space immediately next to the staff.
+			if (diatonicStep <= -2)
+			{
+				for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep - 1; step < 0; step += 2)
+				{
+					const float ledgerY = staffBottom - (float)step * space * 0.5f;
+					draw->AddLine(ImVec2(x - headRX * 1.8f, ledgerY), ImVec2(x + headRX * 1.8f, ledgerY), staffInk, std::max(1.0f, space * 0.085f));
+				}
+			}
+			else if (diatonicStep >= 10)
+			{
+				for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep + 1; step > 8; step -= 2)
+				{
+					const float ledgerY = staffBottom - (float)step * space * 0.5f;
+					draw->AddLine(ImVec2(x - headRX * 1.8f, ledgerY), ImVec2(x + headRX * 1.8f, ledgerY), staffInk, std::max(1.0f, space * 0.085f));
+				}
+			}
+
+			// Stems are on the right when they point up and on the left when they point down.
+			const bool stemUp = noteY > (staffTop + staffBottom) * 0.5f;
+			const float stemX = x + (stemUp ? headRX : -headRX);
+			const float stemTip = noteY + (stemUp ? -space * 3.3f : space * 3.3f);
+
+			if (!wholeHead)
+			{
+				draw->AddLine(ImVec2(stemX, noteY), ImVec2(stemX, stemTip), ink, std::max(1.0f, space * 0.11f));
+				if (gate < quarterTicks)
+				{
+					// One flag is enough to read an eighth note; real beaming would require grouping
+					// adjacent voices, which is not meaningful for the dense files this renderer sees.
+					const float direction = stemUp ? 1.0f : -1.0f;
+					draw->AddLine(ImVec2(stemX, stemTip), ImVec2(stemX + space * 0.8f, stemTip + direction * space * 0.7f), ink, std::max(1.0f, space * 0.09f));
+				}
+			}
+
+			if (openHead)
+				 draw->AddEllipse(center, ImVec2(headRX, headRY), ink, 0.0f, 16, std::max(1.0f, space * 0.16f));
+			else
+				draw->AddEllipseFilled(center, ImVec2(headRX, headRY), ink, 0.0f, 16);
+
+			if (IsSharp(key))
+			{
+				const float accidentalHeight = space * 2.15f;
+				if (sheetSharp && sheetSharp->IsValidTexture())
+				{
+					const float accidentalWidth = accidentalHeight * (float)sheetSharp->width / (float)sheetSharp->height;
+					DrawSheetImage(sheetSharp, x - headRX - accidentalWidth - space * 0.25f, noteY - accidentalHeight * 0.55f, accidentalHeight, 0xFFFFFFFFu);
+				}
+			}
+
+			++renderedNotes;
+		}
+	}
+
+	draw->PopClipRect();
 }
 
 void MIDIRendererSynthesia::RenderSettings()
@@ -2005,6 +2250,16 @@ void MIDIRendererSynthesia::RenderSettings()
 						ImGui::Checkbox("##background", &renderSettings.renderBackground);
 					});
 
+				SECTION_ENTRY(SECTION_LABEL(app->GetLocalization()->Get("renderer.synthesia.sheet", "Sheet music").c_str()),
+					{
+						ImGui::Checkbox("##sheetMusic", &renderSettings.showSheetMusic);
+					});
+
+				SECTION_ENTRY(SECTION_LABEL(app->GetLocalization()->Get("renderer.synthesia.keyOctaves", "Key octave labels").c_str()),
+					{
+						ImGui::Checkbox("##keyOctavesGeneral", &renderSettings.showKeyOctaves);
+					});
+
 				END_SECTION;
 			}
 
@@ -2044,23 +2299,6 @@ void MIDIRendererSynthesia::RenderStyleSettings()
 {
 	switch (renderSettings.style)
 	{
-	case SYNTHESIA_9:
-	{
-		if (ImGui::BeginTabItem("Synthesia 9"))
-		{
-			BEGIN_SECTION("##sStyle")
-			{
-				SETUP_SECTION;
-				SECTION_ENTRY(SECTION_LABEL("Key octaves"),
-					{
-						ImGui::Checkbox("##keyOctaves", &renderSettings.showKeyOctaves);
-					});
-				END_SECTION;
-			}
-			ImGui::EndTabItem();
-		}
-		break;
-	}
 	case SYNTHESIA_10:
 		break;
 	default:
@@ -2091,6 +2329,7 @@ YAML::Node MIDIRendererSynthesia::GetSettings()
 	node["keySparkle"] = renderSettings.renderKeySparkle;
 	node["background"] = renderSettings.renderBackground;
 	node["keyOctaves"] = renderSettings.showKeyOctaves;
+	node["sheetMusic"] = renderSettings.showSheetMusic;
 
 	return node;
 }
@@ -2108,6 +2347,7 @@ void MIDIRendererSynthesia::LoadSettings(const YAML::Node& node)
 	LOAD_VAL(node, "keySparkle", renderSettings.renderKeySparkle);
 	LOAD_VAL(node, "background", renderSettings.renderBackground);
 	LOAD_VAL(node, "keyOctaves", renderSettings.showKeyOctaves);
+	LOAD_VAL(node, "sheetMusic", renderSettings.showSheetMusic);
 
 	UpdateStyle();
 }

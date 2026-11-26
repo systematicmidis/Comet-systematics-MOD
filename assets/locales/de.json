@@ -61,7 +61,7 @@
     "dialog.render.encoding.bitrate": "Bitrate (Kbps)",
     "dialog.render.encoding.crf": "CRF",
 
-    "dialog.render.rendering": "Rendering",
+    "dialog.render.rendering": "Rendern",
     "dialog.render.rendering.resolution": "Auflösung",
     "dialog.render.rendering.framerate": "Bildrate",
     "dialog.render.rendering.outpath": "Ausgabepfad",
@@ -99,7 +99,7 @@
 
     "dialog.settings.title": "Einstellungen",
 
-    "dialog.settings.app": "App",
+    "dialog.settings.app": "Anwendung",
     "dialog.settings.app.header": "APP-EINSTELLUNGEN",
     "dialog.settings.app.general": "Allgemein",
     "dialog.settings.app.general.language": "Sprache",
@@ -133,7 +133,7 @@
     "dialog.settings.visual.colors.open": "Palettenordner öffnen",
     "dialog.settings.visual.colors.loop": "Farben wiederholen",
     "dialog.settings.visual.colors.shuffle": "Farben mischen",
-    "dialog.settings.visual.colors.seed": "Seed",
+    "dialog.settings.visual.colors.seed": "Startwert",
 
     "dialog.settings.visual.counter": "Zähler und Statistiken",
     "dialog.settings.visual.counter.appearance": "Aussehen",
@@ -188,5 +188,7 @@
     "stats.buffer": "Puffer",
 
     "widget.file.browse": "Durchsuchen...",
-    "general.open": "Öffnen"
+    "general.open": "Öffnen",
+    "renderer.synthesia.sheet": "Notenblatt",
+    "renderer.synthesia.keyOctaves": "Oktavenbeschriftung"
 }

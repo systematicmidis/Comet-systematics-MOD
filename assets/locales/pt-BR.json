@@ -177,7 +177,7 @@
     "dialog.update.error.title": "Erro na Atualização",
     "dialog.update.error.content": "Ocorreu um erro ao verificar atualizações.",
 
-    "counter.tick": "Tick",
+    "counter.tick": "Tique",
     "counter.time": "Tempo",
     "counter.bpm": "BPM",
     "counter.notes": "Notas",
@@ -188,5 +188,7 @@
     "stats.buffer": "Buffer",
 
     "widget.file.browse": "Procurar...",
-    "general.open": "Abrir"
+    "general.open": "Abrir",
+    "renderer.synthesia.sheet": "Partitura",
+    "renderer.synthesia.keyOctaves": "Rótulos de oitava"
 }

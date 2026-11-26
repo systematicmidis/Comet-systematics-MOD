@@ -188,5 +188,7 @@
     "stats.buffer": "बफ़र",
 
     "widget.file.browse": "ब्राउज़ करें...",
-    "general.open": "खोलें"
+    "general.open": "खोलें",
+    "renderer.synthesia.sheet": "शीट संगीत",
+    "renderer.synthesia.keyOctaves": "ऑक्टेव लेबल"
 }

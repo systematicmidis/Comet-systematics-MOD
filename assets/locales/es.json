@@ -97,7 +97,7 @@
 
     "dialog.settings.title": "Configuración",
 
-    "dialog.settings.app": "App",
+    "dialog.settings.app": "Aplicación",
     "dialog.settings.app.header": "CONFIGURACIÓN DE LA APP",
     "dialog.settings.app.general": "General",
     "dialog.settings.app.general.language": "Idioma",
@@ -175,7 +175,7 @@
     "dialog.update.error.title": "Error de actualización",
     "dialog.update.error.content": "Ha ocurrido un error al buscar actualizaciones.",
 
-    "counter.tick": "Tick",
+    "counter.tick": "Pulso",
     "counter.time": "Tiempo",
     "counter.bpm": "BPM",
     "counter.notes": "Notas",
@@ -187,5 +187,7 @@
 
     "widget.file.browse": "Navegar...",
     "title.nomidi": "No hay ningún MIDI cargado",
-    "general.open": "Abrir"
+    "general.open": "Abrir",
+    "renderer.synthesia.sheet": "Partitura",
+    "renderer.synthesia.keyOctaves": "Etiquetas de octava"
 }

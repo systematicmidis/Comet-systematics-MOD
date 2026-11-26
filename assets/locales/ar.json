@@ -177,7 +177,7 @@
     "dialog.update.error.title": "خطأ في التحديث",
     "dialog.update.error.content": "حدث خطأ أثناء التحقق من وجود تحديث.",
 
-    "counter.tick": "Tick",
+    "counter.tick": "نبضة",
     "counter.time": "الوقت",
     "counter.bpm": "BPM",
     "counter.notes": "النوتات",
@@ -188,5 +188,7 @@
     "stats.buffer": "المخزن المؤقت",
 
     "widget.file.browse": "استعراض...",
-    "general.open": "فتح"
+    "general.open": "فتح",
+    "renderer.synthesia.sheet": "النوتة الموسيقية",
+    "renderer.synthesia.keyOctaves": "تسميات الأوكتاف"
 }

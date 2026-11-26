@@ -447,7 +447,7 @@ void MIDIApp::UpdatePendingSequence()
 	{
 		midiAudio->Start(seq, this->timer);
 		timer->ClearFlags();
-		timer->Start(-3.0);
+		timer->Start(GetPreviewStartTime());
 	}
 	mainWindow->SetTitleInfo(pendingTitle);
 
@@ -538,7 +538,7 @@ void MIDIApp::SetRenderer()
 			midiAudio->SetSourcePath(currentMidiPath);
 			midiAudio->Start(seq, timer);
 			timer->ClearFlags();
-			timer->Start(-3.0);
+			timer->Start(GetPreviewStartTime());
 		}
 	}
 
@@ -668,7 +668,7 @@ void MIDIApp::FinishPendingRenderer()
 		midiAudio->SetSourcePath(currentMidiPath);
 		midiAudio->Start(seq, timer);
 		timer->ClearFlags();
-		timer->Start(-3.0);
+		timer->Start(GetPreviewStartTime());
 	}
 }
 
@@ -975,7 +975,7 @@ void MIDIApp::RegisterInput(InputState& inputState)
 		{
 			if (IsRendering()) return;
 			double currTime = timer->Elapsed();
-			double seekTime = std::max(-3.0, currTime - config->navigation.seekBackwardSeconds);
+			double seekTime = std::max(GetPreviewStartTime(), currTime - config->navigation.seekBackwardSeconds);
 			timer->NavigateTo(seekTime);
 			break;
 		}
@@ -1127,6 +1127,18 @@ void MIDIApp::CaptureFrame()
 
 	currentFrame++;
 	if (currentFrame % 10 == 0) std::cout << "Rendered frame " << currentFrame << std::endl;
+}
+
+double MIDIApp::GetPreviewPrerollSeconds()
+{
+	return config.render.GetCurrentRenderer() == RendererType::Synthesia
+		? SYNTHESIA_MIDI_START_DELAY_SECONDS
+		: 3.0;
+}
+
+double MIDIApp::GetPreviewStartTime()
+{
+	return -GetPreviewPrerollSeconds();
 }
 
 void MIDIApp::ApplySynthesiaRenderView()

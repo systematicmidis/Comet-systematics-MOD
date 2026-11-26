@@ -154,5 +154,7 @@
     "stats.buffer": "Буфер",
     "widget.file.browse": "Обзор...",
     "title.nomidi": "MIDI не загружено",
-    "general.open": "Открыть"
+    "general.open": "Открыть",
+    "renderer.synthesia.sheet": "Ноты",
+    "renderer.synthesia.keyOctaves": "Подписи октав"
 }

@@ -93,7 +93,7 @@
     "dialog.diagnose.tracks": "音轨",
     "dialog.diagnose.notes": "音符",
     "dialog.diagnose.memory": "打开所需内存",
-    "dialog.diagnose.tempo": "Tempo",
+    "dialog.diagnose.tempo": "速度",
     "dialog.diagnose.nps": "瞬时最大 NPS",
     "dialog.diagnose.overlap": "重叠音符",
 
@@ -177,7 +177,7 @@
     "dialog.update.error.title": "更新错误",
     "dialog.update.error.content": "检查更新时出错。",
 
-    "counter.tick": "Tick",
+    "counter.tick": "刻度",
     "counter.time": "时间",
     "counter.bpm": "BPM",
     "counter.notes": "音符",
@@ -188,5 +188,7 @@
     "stats.buffer": "缓冲",
 
     "widget.file.browse": "浏览...",
-    "general.open": "打开"
+    "general.open": "打开",
+    "renderer.synthesia.sheet": "乐谱",
+    "renderer.synthesia.keyOctaves": "八度标签"
 }

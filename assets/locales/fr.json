@@ -177,7 +177,7 @@
     "dialog.update.error.title": "Erreur de mise à jour",
     "dialog.update.error.content": "Une erreur s’est produite lors de la recherche de mises à jour.",
 
-    "counter.tick": "Tick",
+    "counter.tick": "Pulsation",
     "counter.time": "Temps",
     "counter.bpm": "BPM",
     "counter.notes": "Notes",
@@ -188,5 +188,7 @@
     "stats.buffer": "Tampon",
 
     "widget.file.browse": "Parcourir...",
-    "general.open": "Ouvrir"
+    "general.open": "Ouvrir",
+    "renderer.synthesia.sheet": "Partition",
+    "renderer.synthesia.keyOctaves": "Étiquettes d'octave"
 }

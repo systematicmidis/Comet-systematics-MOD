@@ -120,6 +120,10 @@ public:
 	NavigationBar* GetNavigationBar() { return navigationBar.get(); }
 
 	const RenderSettings& GetCurrentRenderSettings() const { return currentRenderSettings; }
+	// Lead-in used by the interactive playhead. Synthesia needs the same 5.4 s pre-roll as its
+	// video export so the title band is gone before the first falling note reaches the keys.
+	double GetPreviewPrerollSeconds();
+	double GetPreviewStartTime();
 	// Index of the render frame currently being drawn. Banner timing is derived from it so the
 	// exported frames and the banner cannot drift apart.
 	int GetCurrentFrame() const { return currentFrame; }

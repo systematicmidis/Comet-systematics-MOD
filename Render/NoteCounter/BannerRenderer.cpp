@@ -27,9 +27,6 @@ namespace
 	constexpr double SYNTHESIA_TITLE_OUT_START = 2.72;
 	constexpr double SYNTHESIA_TITLE_OUT_SECONDS = 0.45;
 
-	// The preview starts its timer three seconds before the MIDI so the first notes have time to
-	// fall. The "Now playing" card uses that pre-roll as its opening window.
-	constexpr double PREVIEW_PREROLL_SECONDS = 3.0;
 
 	// UMP's card is a white band 140 px high in a 1080p frame, centred vertically. The reference's
 	// Comic Sans title/credit are 34 px/16.5 px faces; ImGui's bitmap font baker lays them out at
@@ -236,9 +233,9 @@ void BannerRenderer::Render()
 	{
 		if (!config->banner.showInPreview) return;
 
-		// The preview's pre-roll starts at -3 s, so the card appears as soon as a song is loaded
-		// and finishes fading just as the MIDI begins.
-		const double previewTime = app->GetTimer()->Elapsed() + PREVIEW_PREROLL_SECONDS;
+		// The preview's pre-roll is renderer-specific. Synthesia uses its full 5.4 s intro so the
+		// title band is gone before the first note; the other visuals keep the original 3 s card.
+		const double previewTime = app->GetTimer()->Elapsed() + app->GetPreviewPrerollSeconds();
 		if (previewTime < 0.0) return;
 		time = (float)previewTime;
 	}

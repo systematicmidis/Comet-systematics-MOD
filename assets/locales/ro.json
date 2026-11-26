@@ -10,8 +10,8 @@
     "menu.file.screenshot": "Captură de ecran",
     "menu.file.quit": "Ieșire",
 
-    "menu.play": "Play",
-    "menu.play.stop": "Stop",
+    "menu.play": "Redare",
+    "menu.play.stop": "Oprește",
     "menu.play.unload": "Stop și inchide MIDI-ul",
 
     "menu.view": "Vizualizare",
@@ -38,7 +38,7 @@
     "dialog.render.input": "Intrare",
     "dialog.render.input.ffmpeg": "Executabil FFmpeg",
     "dialog.render.input.ffmpeg.installed": "FFmpeg este instalat!",
-    "dialog.render.input.ffmpeg.get": "Get FFmpeg",
+    "dialog.render.input.ffmpeg.get": "Obține FFmpeg",
     "dialog.render.input.ffmpeg.detect": "Detectează FFmpeg",
     "dialog.render.input.midi": "MIDI",
     "dialog.render.input.midi.loaded": "Se va randa MIDI-ul curent",
@@ -58,7 +58,7 @@
     "dialog.render.encoding.bitratemode": "Modul bitrate-ului",
     "dialog.render.encoding.brm.const": "Constant",
     "dialog.render.encoding.brm.var": "Variabil",
-    "dialog.render.encoding.bitrate": "Bitrate (Kbps)",
+    "dialog.render.encoding.bitrate": "Debit (Kbps)",
     "dialog.render.encoding.crf": "CRF",
 
     "dialog.render.rendering": "Randare video",
@@ -126,14 +126,14 @@
 
     "dialog.settings.visual.colors": "Culori Note",
     "dialog.settings.visual.colors.use": "Folosește culori din",
-    "dialog.settings.visual.colors.use.0": "Resource pack",
+    "dialog.settings.visual.colors.use.0": "Pachet de resurse",
     "dialog.settings.visual.colors.use.1": "Listă Culori",
     "dialog.settings.visual.colors.palette": "Listă palete",
     "dialog.settings.visual.colors.refresh": "Reîmprospătează lista paletelor",
     "dialog.settings.visual.colors.open": "Deschide folderul paletelor",
     "dialog.settings.visual.colors.loop": "Repetare culori",
     "dialog.settings.visual.colors.shuffle": "Amestecă culori",
-    "dialog.settings.visual.colors.seed": "Seed",
+    "dialog.settings.visual.colors.seed": "Sămânță",
 
     "dialog.settings.visual.counter": "Contor & Statistici",
     "dialog.settings.visual.counter.appearance": "Aparență",
@@ -147,7 +147,7 @@
     "dialog.settings.visual.counter.blur": "Fundal blurat",
     "dialog.settings.visual.counter.font": "Font",
     "dialog.settings.visual.counter.font.default": "Prestabilit",
-    "dialog.settings.visual.counter.font.directory": "Font directory",
+    "dialog.settings.visual.counter.font.directory": "Director fonturi",
 
     "dialog.settings.visual.counter.style": "Stil",
     "dialog.settings.visual.counter.style.0": "Ultralight MIDI Player",
@@ -188,5 +188,7 @@
     "stats.buffer": "Buffer",
 
     "widget.file.browse": "Răsfoiește...",
-    "general.open": "Deschide"
+    "general.open": "Deschide",
+    "renderer.synthesia.sheet": "Partitură",
+    "renderer.synthesia.keyOctaves": "Etichete octavă"
 }

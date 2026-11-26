@@ -177,7 +177,7 @@
     "dialog.update.error.title": "Σφάλμα ενημέρωσης",
     "dialog.update.error.content": "Παρουσιάστηκε σφάλμα κατά τον έλεγχο για ενημερώσεις.",
 
-    "counter.tick": "Tick",
+    "counter.tick": "Χτύπος",
     "counter.time": "Χρόνος",
     "counter.bpm": "BPM",
     "counter.notes": "Νότες",
@@ -188,5 +188,7 @@
     "stats.buffer": "Προσωρινή μνήμη",
 
     "widget.file.browse": "Αναζήτηση...",
-    "general.open": "Άνοιγμα"
+    "general.open": "Άνοιγμα",
+    "renderer.synthesia.sheet": "Παρτιτούρα",
+    "renderer.synthesia.keyOctaves": "Ετικέτες οκτάβας"
 }

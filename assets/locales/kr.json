@@ -154,5 +154,7 @@
     "stats.fps": "FPS",
     "stats.buffer": "버퍼",
     "widget.file.browse": "찾아보기...",
-    "general.open": "열기"
+    "general.open": "열기",
+    "renderer.synthesia.sheet": "악보",
+    "renderer.synthesia.keyOctaves": "옥타브 라벨"
 }
