@@ -161,7 +161,7 @@ void MIDIRendererChannels::RenderChannelKeys()
 		channelProgram->SetInt("keyLast", keyLast);
 	}
 
-	for (uint8_t key = keyFirst; key <= keyLast; key++)
+	for (int key = keyFirst; key <= keyLast; key++)
 	{
 		NoteSequence& notesNote = notes[key];
 

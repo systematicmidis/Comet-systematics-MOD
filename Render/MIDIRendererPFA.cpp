@@ -337,6 +337,11 @@ void MIDIRendererPFA::Initialize()
 	if (supportsCompute)
 	{
 		notesComputeProgram = ShaderProgram::CreateCompute(notesCompute);
+		if (!notesComputeProgram)
+		{
+			supportsCompute = false;
+			std::cout << "Compute shader unavailable; using the CPU note path." << std::endl;
+		}
 
 		glGenBuffers(1, &rawNotesSSBO);
 		glBindBuffer(GL_SHADER_STORAGE_BUFFER, rawNotesSSBO);
@@ -361,7 +366,7 @@ void MIDIRendererPFA::Initialize()
 	whiteIDs.reserve(75);
 
 	uint8_t keyID = 0;
-	for (uint8_t key = 0; key < MIDI_KEYS; key++)
+	for (int key = 0; key < MIDI_KEYS; key++)
 	{
 		bool black = blackArr[key];
 		if (black) blackIDs.push_back(key);
@@ -446,7 +451,9 @@ void MIDIRendererPFA::GenNoteXTable()
 		notesComputeProgram->SetFloat("notesCY", notesCY);
 		notesComputeProgram->SetFloat("whiteCX", whiteCX);
 		notesComputeProgram->SetFloat("sharpRatio", SharpRatio);
-		for (int k = 0; k < MIDI_KEYS; k++)
+		// The compute shader only receives real MIDI keys; the 256-key display range
+		// above 127 is drawn by the CPU keyboard path and never has notes.
+		for (int k = 0; k < 128; k++)
 		{
 			std::string xName = "noteXTable[" + std::to_string(k) + "]";
 			notesComputeProgram->SetFloat(xName.c_str(), noteXTable[k]);
@@ -623,7 +630,7 @@ void MIDIRendererPFA::RenderKeyboard()
 	float keyGap1 = keyGap - std::floor(keyGap / 2.0f + 0.5f);
 
 	int startRender = (blackArr[keyFirst] ? keyFirst - 1 : keyFirst);
-	int endRender = (blackArr[keyLast] ? keyLast + 1 : keyLast);
+	int endRender = (blackArr[keyLast] && keyLast + 1 < MIDI_KEYS ? keyLast + 1 : keyLast);
 
 	float startX = (blackArr[keyFirst] ? whiteCX * (SharpRatio / 2.0f - 1.0f) : 0.0f);
 	float sharpCY = topCY * 0.67f;
@@ -857,7 +864,7 @@ void MIDIRendererPFA::RenderNotes()
 	auto keyLast = config->render.GetKeyLast();
 
 	int startRender = (blackArr[keyFirst] ? keyFirst - 1 : keyFirst);
-	int endRender = (blackArr[keyLast] ? keyLast + 1 : keyLast);
+	int endRender = (blackArr[keyLast] && keyLast + 1 < MIDI_KEYS ? keyLast + 1 : keyLast);
 
 	if (supportsCompute)
 	{

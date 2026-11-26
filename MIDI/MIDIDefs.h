@@ -2,7 +2,9 @@
 
 #include <cstddef>
 
-#define MIDI_KEYS 128
+// 128 real MIDI notes. The extra half exists only for the optional 256-key
+// display range; parsed MIDI bytes can never reach it.
+#define MIDI_KEYS 256
 #define TIME_BASED_MULTIPLIER 100000
 
 static inline bool IsSharp(size_t key)

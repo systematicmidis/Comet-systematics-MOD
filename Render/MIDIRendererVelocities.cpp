@@ -150,7 +150,7 @@ void MIDIRendererVelocities::RenderChannelKeys()
 	size_t notesPassed = 0;
 	size_t polyphony = 0;
 
-	for (uint8_t key = 0; key < MIDI_KEYS; key++)
+	for (int key = 0; key < MIDI_KEYS; key++)
 	{
 		NoteSequence& notesNote = notes[key];
 

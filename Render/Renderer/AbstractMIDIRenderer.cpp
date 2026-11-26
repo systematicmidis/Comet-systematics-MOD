@@ -69,6 +69,10 @@ void AbstractMIDIRenderer::RenderSettings()
 				{
 					previewText = "128 Keys";
 				}
+				else if (keyFirst == 0 && keyLast == MIDI_KEYS - 1)
+				{
+					previewText = "256 Keys";
+				}
 				else
 				{
 					previewText = "Custom";
@@ -86,6 +90,12 @@ void AbstractMIDIRenderer::RenderSettings()
 					{
 						config->render.SetKeyFirst(0);
 						config->render.SetKeyLast(127);
+					}
+
+					if (ImGui::Selectable("256 Keys", keyFirst == 0 && keyLast == MIDI_KEYS - 1))
+					{
+						config->render.SetKeyFirst(0);
+						config->render.SetKeyLast(MIDI_KEYS - 1);
 					}
 
 					ImGui::EndCombo();

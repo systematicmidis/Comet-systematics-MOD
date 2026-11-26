@@ -403,7 +403,7 @@ void MIDIRendererSynthesia::Initialize()
 	whiteIDs.reserve(75);
 
 	uint8_t keyID = 0;
-	for (uint8_t key = 0; key < MIDI_KEYS; key++)
+	for (int key = 0; key < MIDI_KEYS; key++)
 	{
 		bool black = IS_BLACK(key);
 		if (black) blackIDs.push_back(key);
@@ -610,7 +610,7 @@ void MIDIRendererSynthesia::GenerateKeyLayoutArrays()
 			continue;
 		}
 
-		int _i = i + 1;
+		int _i = std::min(i + 1, (int)MIDI_KEYS - 1);
 		wdth = blackKeyScale;
 		int bknum = keyNum[i] % 5;
 		float offset = wdth * 0.5f;

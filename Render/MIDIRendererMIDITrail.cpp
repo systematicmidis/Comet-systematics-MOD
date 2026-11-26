@@ -306,7 +306,7 @@ void MIDIRendererMIDITrail::Initialize()
 
 	std::vector<uint8_t> blackIDs;
 	std::vector<uint8_t> whiteIDs;
-	for (uint8_t key = 0; key < MIDI_KEYS; key++)
+	for (int key = 0; key < MIDI_KEYS; key++)
 	{
 		bool black = KEY_IS_BLACK(key);
 		if (black) blackIDs.push_back(key);

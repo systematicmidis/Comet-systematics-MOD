@@ -39,7 +39,7 @@ void MIDIRendererCounter::Render(double deltaTime)
 	size_t notesPassed = 0;
 	size_t polyphony = 0;
 
-	for (uint8_t id = 0; id < MIDI_KEYS; id++)
+	for (int id = 0; id < MIDI_KEYS; id++)
 	{
 		const NoteSequence& notesNote = notes[id];
 		const std::vector<NoteBlock>& blocks = seq->noteBlocks[id];
