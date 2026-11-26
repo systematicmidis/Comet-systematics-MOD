@@ -132,6 +132,10 @@ std::shared_ptr<MIDISequence> MIDILoader::Load(bool timeBasedLoading)
 		{
 			seq->timeSignatures.emplace_back(0, 4, 4);
 		}
+		if (!results.keySignatures.empty())
+		{
+			seq->keySignatures.insert(seq->keySignatures.end(), results.keySignatures.begin(), results.keySignatures.end());
+		}
 		if (results.multiChannel) illegalTracks.push_back(trk);
 		seq->length = std::max(seq->length, results.length);
 	}
@@ -154,8 +158,10 @@ std::shared_ptr<MIDISequence> MIDILoader::Load(bool timeBasedLoading)
 	SetName("Starting event preprocessing");
 	auto& tempos = seq->tempos;
 	auto& timeSignatures = seq->timeSignatures;
+	auto& keySignatures = seq->keySignatures;
 	std::sort(tempos.begin(), tempos.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
 	std::sort(timeSignatures.begin(), timeSignatures.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
+	std::sort(keySignatures.begin(), keySignatures.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
 
 	prog = -1;
 
@@ -176,6 +182,15 @@ std::shared_ptr<MIDISequence> MIDILoader::Load(bool timeBasedLoading)
 	else if (timeSignatures.front().tick > 0)
 	{
 		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
+	}
+
+	if (keySignatures.empty())
+	{
+		keySignatures.emplace_back(0, 0, false);
+	}
+	else if (keySignatures.front().tick > 0)
+	{
+		keySignatures.insert(keySignatures.begin(), KeySignatureEvent(0, 0, false));
 	}
 
 	seq->tracks.shrink_to_fit();
@@ -356,6 +371,14 @@ AbstractMIDILoader::ParsedTrack MIDILoader::LoadTrack(std::shared_ptr<InputStrea
 							uint8_t denominator = (1 << p[1]);
 							// 3 and 4 are omitted until it's actually needed
 							midiTrack.timeSignatures.emplace_back(tick, numerator, denominator);
+						}
+						p += len;
+						continue;
+					case 0x59:
+						// Key signature: one signed byte of sharps/flats, one byte major/minor.
+						if (len >= 2)
+						{
+							midiTrack.keySignatures.emplace_back(tick, (int8_t)p[0], p[1] != 0);
 						}
 						p += len;
 						continue;

@@ -621,6 +621,20 @@ void SettingsDialog::DrawVisualTab()
 
 				ImGui::Spacing();
 
+				// The score view is shared by every renderer, so it lives outside the
+				// per-renderer settings rather than in the Synthesia tab.
+				BEGIN_SECTION("##scoreView")
+				{
+					SETUP_SECTION;
+					SECTION_ENTRY(SECTION_LABEL(localization->Get("renderer.synthesia.sheet", "Sheet music").c_str()),
+						{
+							ImGui::Checkbox("##showScore", &config->render.showScore);
+						});
+					END_SECTION;
+				}
+
+				ImGui::Spacing();
+
 				if (ImGui::CollapsingHeader("Renderer Settings", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					app->GetRenderer()->RenderSettings();

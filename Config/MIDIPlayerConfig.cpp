@@ -232,6 +232,7 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 
 			render.showCounter = renderSec->GetBoolean("showCounter", true);
 			render.showStats = renderSec->GetBoolean("showStats", true);
+			render.showScore = renderSec->GetBoolean("showScore", false);
 
 			this->render = render;
 		}
@@ -349,6 +350,7 @@ void MIDIPlayerConfig::SaveConfig()
 
 	config["render"]["showCounter"] = render.showCounter;
 	config["render"]["showStats"] = render.showStats;
+	config["render"]["showScore"] = render.showScore;
 
 	if (audioSettings.IsDefined())
 	{

@@ -21,6 +21,7 @@ class NavigationBar;
 class NoteCounterInfo;
 class NoteCounterRenderer;
 class BannerRenderer;
+class ScoreOverlay;
 class TrackNoteCounter;
 class BlurredQuadRenderer;
 class ResourcePackList;
@@ -181,6 +182,7 @@ private:
 	std::shared_ptr<MIDISequence> pendingRendererSequence;
 	std::vector<std::unique_ptr<AbstractOverlayRenderer>> overlays;
 	std::unique_ptr<BannerRenderer> bannerRenderer;
+	std::unique_ptr<ScoreOverlay> scoreOverlay;
 	std::unique_ptr<NavigationBar> navigationBar;
 	std::shared_ptr<NoteCounterInfo> noteCounterInfo;
 	// Owns the per-track cursors behind GetPlain*(); updated once per frame by UpdateOverlayRates().

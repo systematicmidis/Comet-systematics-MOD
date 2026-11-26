@@ -554,6 +554,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 		{
 			seq->timeSignatures.emplace_back(0, 4, 4);
 		}
+		if (!trackRes.keySignatures.empty())
+		{
+			seq->keySignatures.insert(seq->keySignatures.end(), trackRes.keySignatures.begin(), trackRes.keySignatures.end());
+		}
 
 		trackIdx++;
 	}
@@ -568,10 +572,12 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	SetName("Starting event preprocessing");
 	auto& tempos = seq->tempos;
 	auto& timeSignatures = seq->timeSignatures;
+	auto& keySignatures = seq->keySignatures;
 	// These hold one entry per tempo/time-signature change, so they are tiny. Sorting them in
 	// parallel costs more in thread-pool setup than the sort itself on every single load.
 	std::sort(tempos.begin(), tempos.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
 	std::sort(timeSignatures.begin(), timeSignatures.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
+	std::sort(keySignatures.begin(), keySignatures.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
 
 	// handle edge cases for tempos
 	if (tempos.empty())
@@ -590,6 +596,15 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::Load(bool timeBasedLoadin
 	else if (timeSignatures.front().tick > 0)
 	{
 		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
+	}
+
+	if (keySignatures.empty())
+	{
+		keySignatures.emplace_back(0, 0, false);
+	}
+	else if (keySignatures.front().tick > 0)
+	{
+		keySignatures.insert(keySignatures.begin(), KeySignatureEvent(0, 0, false));
 	}
 
 	std::cout << "  Parsing finished! Merging events..." << std::endl;
@@ -1133,6 +1148,9 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 				seq->timeSignatures.insert(seq->timeSignatures.end(), trackRes.timeSignatures.begin(), trackRes.timeSignatures.end());
 			else
 				seq->timeSignatures.emplace_back(0, 4, 4);
+
+			if (!trackRes.keySignatures.empty())
+				seq->keySignatures.insert(seq->keySignatures.end(), trackRes.keySignatures.begin(), trackRes.keySignatures.end());
 		}
 
 		trackIdx++;
@@ -1145,8 +1163,10 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 	SetName("Starting event preprocessing");
 	auto& tempos = seq->tempos;
 	auto& timeSignatures = seq->timeSignatures;
+	auto& keySignatures = seq->keySignatures;
 	std::sort(tempos.begin(), tempos.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
 	std::sort(timeSignatures.begin(), timeSignatures.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
+	std::sort(keySignatures.begin(), keySignatures.end(), [](auto& a, auto& b) { return a.tick < b.tick; });
 
 	if (tempos.empty())
 		tempos.emplace_back(0, 120.0);
@@ -1157,6 +1177,11 @@ std::shared_ptr<MIDISequence> MultithreadedMIDILoader::LoadStreamed(std::unique_
 		timeSignatures.emplace_back(0, 4, 4);
 	else if (timeSignatures.front().tick > 0)
 		timeSignatures.insert(timeSignatures.begin(), TimeSignatureEvent(0, 4, 4));
+
+	if (keySignatures.empty())
+		keySignatures.emplace_back(0, 0, false);
+	else if (keySignatures.front().tick > 0)
+		keySignatures.insert(keySignatures.begin(), KeySignatureEvent(0, 0, false));
 
 	SetName("Parsing finished! Merging events...");
 	constexpr size_t PACKED_NOTE_THRESHOLD = 4'000'000;
@@ -1540,6 +1565,20 @@ AbstractMIDILoader::ParsedTrack MultithreadedMIDILoader::ParseTrackData(const Ra
 								const uint8_t denominator = (uint8_t)(1 << cursor.Byte());
 								cursor.Skip(2);
 								midiTrack.timeSignatures.emplace_back(currTick, numerator, denominator);
+							}
+							else
+							{
+								cursor.Skip(len);
+							}
+							continue;
+						case 0x59:
+							// Key signature: one signed byte of sharps/flats, one byte major/minor.
+							if (len >= 2 && cursor.Remaining() >= 2)
+							{
+								const int8_t sharpsFlats = (int8_t)cursor.Byte();
+								const bool minor = cursor.Byte() != 0;
+								cursor.Skip(len - 2);
+								midiTrack.keySignatures.emplace_back(currTick, sharpsFlats, minor);
 							}
 							else
 							{

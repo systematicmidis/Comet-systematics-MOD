@@ -340,6 +340,8 @@ struct MIDIPlayerConfig
 
 		bool showCounter = true;
 		bool showStats = true;
+		// Global score view, available to every renderer.
+		bool showScore = false;
 		bool loopColors = true;
 		bool shuffleColors = false;
 		int shuffleSeed = 0;

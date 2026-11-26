@@ -108,6 +108,7 @@ protected:
 		std::vector<MIDIMessageEvent> messages;
 		std::vector<TempoEvent> tempos;
 		std::vector<TimeSignatureEvent> timeSignatures;
+		std::vector<KeySignatureEvent> keySignatures;
 		std::string name;
 		long length = 0;
 		uint32_t maxGate = 0;

@@ -39,6 +39,7 @@
 #include "Render/NoteCounter/BannerRenderer.h"
 #include "Render/NoteCounter/StatsOverlayRenderer.h"
 #include "Render/NoteCounter/GraphOverlayRenderer.h"
+#include "Render/ScoreOverlay.h"
 #include "Render/NoteCounter/TrackNoteCounter.h"
 #include "MIDI/MIDIDefs.h"
 #include "MIDI/MIDISequence.h"
@@ -155,6 +156,7 @@ MIDIApp::MIDIApp(MainWindow* mainWindow)
 	overlays.emplace_back(std::make_unique<NoteCounterRenderer>(noteCounterInfo, this));
 	overlays.emplace_back(std::make_unique<StatsOverlayRenderer>(this));
 	bannerRenderer = std::make_unique<BannerRenderer>(this);
+	scoreOverlay = std::make_unique<ScoreOverlay>(this);
 	overlays.emplace_back(std::make_unique<GraphOverlayRenderer>(this));
 	Models::LoadModels();
 
@@ -841,6 +843,9 @@ void MIDIApp::Update()
 
 	for (auto& overlay : overlays)
 	{
+		// The score page is the focus when it is on; the counter/stats panels would sit on
+		// top of the notation as dark patches, so they are hidden for the score view.
+		if (config.render.showScore) continue;
 		if (!overlay->IsShown()) continue;
 
 		glm::vec2 counterResolution = overlay->GetOverlaySize();
@@ -852,6 +857,10 @@ void MIDIApp::Update()
 
 		overlay->Render(heightOffset);
 	}
+
+	// The score is shared by every renderer. The counter/stats panels are skipped while it is
+	// on, so nothing dark is left sitting on top of the notation.
+	if (scoreOverlay) scoreOverlay->Render();
 
 	// The opening banner draws after the overlays. It uses ImGui's background list, so menus and
 	// dialogs still render above it.

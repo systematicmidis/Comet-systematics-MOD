@@ -6,6 +6,7 @@
 #include "Events/TempoEvent.h"
 #include "Events/NoteEvent.h"
 #include "Events/TimeSignatureEvent.h"
+#include "Events/KeySignatureEvent.h"
 #include <fstream>
 #include <memory>
 #include <future>
@@ -29,6 +30,7 @@ public:
 	std::vector<std::string> noteTrackNames{};
 	std::vector<TempoEvent> tempos{};
 	std::vector<TimeSignatureEvent> timeSignatures{};
+	std::vector<KeySignatureEvent> keySignatures{};
 	std::vector<NoteSequence> mergedNotes{};
 	// Large files keep the parse output as tick-ordered tracks instead of building the 128
 	// per-key render arrays. MIDITrail and the audio event builders can walk these directly;
@@ -83,7 +85,7 @@ private:
 public:
 	MIDISequence() : MIDISequence("Unnamed") {}
 	MIDISequence(const char* name)
-		: name(name), tracks({}), tempos({}), timeSignatures({}) {}
+		: name(name), tracks({}), tempos({}), timeSignatures({}), keySignatures({}) {}
 	~MIDISequence()
 	{
 		// A renderer switch may still be converting packed tracks. Do not destroy the vector it
@@ -93,6 +95,7 @@ public:
 		tempos.clear();
 		mergedNotes.clear();
 		timeSignatures.clear();
+		keySignatures.clear();
 		if (tempoMap) tempoMap.reset();
 	}
 
