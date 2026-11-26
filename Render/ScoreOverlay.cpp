@@ -56,6 +56,7 @@ namespace
 		float y = 0.0f;
 		uint32_t tick = 0;
 		uint32_t gate = 0;
+		uint32_t value = 0;
 		uint32_t key = 0;
 		bool treble = true;
 		bool active = false;
@@ -68,6 +69,8 @@ namespace
 		float x = 0.0f;
 		uint32_t maxGate = 0;
 		uint32_t minGate = UINT32_MAX;
+		uint32_t rhythm = 0;
+		uint32_t value = 0;
 		std::vector<size_t> glyphs;
 	};
 }
@@ -75,16 +78,27 @@ namespace
 void ScoreOverlay::LoadTextures()
 {
 	texturesLoaded = true;
-	sheetTreble = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/treble.png"));
-	sheetBass = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/bass.png"));
-	sheetSharp = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/sharp.png"));
-	sheetFlat = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/flat.png"));
-	sheetNatural = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/natural.png"));
-	noteBlack = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/notehead-black.png"));
-	noteHalf = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/notehead-white.png"));
-	noteWhole = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/notehead-whole.png"));
-	flagUp = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/flag-up.png"));
-	flagDown = std::make_unique<GPUImage>(Utils::TryGetStream("./assets/textures/synthesia/sheet/flag-down.png"));
+	const char* base = "./assets/textures/synthesia/bravura/";
+	sheetTreble = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "clef-treble.png"));
+	sheetBass = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "clef-bass.png"));
+	sheetSharp = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "accidental-sharp.png"));
+	sheetFlat = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "accidental-flat.png"));
+	sheetNatural = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "accidental-natural.png"));
+	sheetBrace = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "brace.png"));
+	noteBlack = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "notehead-black.png"));
+	noteHalf = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "notehead-half.png"));
+	noteWhole = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "notehead-whole.png"));
+	sheetRestWhole = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "rest-whole.png"));
+	flagUp = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-up-8.png"));
+	flagDown = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-down-8.png"));
+	flagUp16 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-up-16.png"));
+	flagDown16 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-down-16.png"));
+	flagUp32 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-up-32.png"));
+	flagDown32 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-down-32.png"));
+	flagUp64 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-up-64.png"));
+	flagDown64 = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "flag-down-64.png"));
+	for (int i = 0; i < 10; ++i)
+		sheetTime[i] = std::make_unique<GPUImage>(Utils::TryGetStream(std::string(base) + "time-" + std::to_string(i) + ".png"));
 }
 
 void ScoreOverlay::DrawGlyph(GPUImage* image, float centerX, float centerY, float glyphHeight, uint32_t tint)
@@ -97,8 +111,7 @@ void ScoreOverlay::DrawGlyph(GPUImage* image, float centerX, float centerY, floa
 		(ImTextureID)(intptr_t)image->GetTextureID(),
 		ImVec2(centerX - glyphWidth * 0.5f, centerY - glyphHeight * 0.5f),
 		ImVec2(centerX + glyphWidth * 0.5f, centerY + glyphHeight * 0.5f),
-		// GPUImage uploads the first PNG row as the OpenGL bottom row.
-		ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), (ImU32)tint);
+		ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), (ImU32)tint);
 }
 
 void ScoreOverlay::DrawGlyphAnchored(GPUImage* image, float left, float top, float glyphHeight, uint32_t tint)
@@ -111,7 +124,7 @@ void ScoreOverlay::DrawGlyphAnchored(GPUImage* image, float left, float top, flo
 		(ImTextureID)(intptr_t)image->GetTextureID(),
 		ImVec2(left, top),
 		ImVec2(left + glyphWidth, top + glyphHeight),
-		ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), (ImU32)tint);
+		ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), (ImU32)tint);
 }
 
 void ScoreOverlay::Render()
@@ -148,44 +161,48 @@ void ScoreOverlay::Render()
 	}
 
 	const long measureTicks = std::max(1L, (long)seq->resolution * 4L * numerator / denominator);
-	const long windowTicks = measureTicks * 4L;
-	// Keep the playhead near the middle of the four visible measures, like a score that scrolls
-	// under a fixed cursor. At the start the window is clamped so the first notes are visible.
-	long windowStart = std::max(0L, currentTick - windowTicks / 2);
-	const long windowEnd = windowStart + windowTicks;
+	const long pageTicks = measureTicks * 4L;
+	// Plus2 lays the score out as fixed four-measure pages: the cursor sweeps across a page
+	// and the page turns when it reaches the right edge. It does not slide continuously.
+	const long windowStart = (currentTick / pageTicks) * pageTicks;
+	const long windowEnd = windowStart + pageTicks;
 
-	// The navigation bar is chrome above the renderer; live previews start the page below it.
-	// Video renders have no navigation bar and use the full frame.
-	float panelTop = 0.0f;
+	// The score is a panel over the top half of the window, leaving the piano roll visible
+	// underneath instead of covering the complete frame.
+	float pageTop = 0.0f;
 	if (!app->IsRendering())
 	{
 		if (NavigationBar* navigationBar = app->GetNavigationBar())
-			panelTop = std::max(0.0f, navigationBar->GetPosition().y + navigationBar->GetResolution().y);
+			pageTop = std::max(0.0f, navigationBar->GetPosition().y + navigationBar->GetResolution().y);
 	}
+	const float availableHeight = std::max(160.0f, uiHeight - pageTop);
+	const float pageHeight = availableHeight * 0.5f;
+	const float pageBottom = pageTop + pageHeight;
 
-	const float availableHeight = std::max(150.0f, uiHeight - panelTop);
-	const float panelHeight = std::clamp(availableHeight * 0.38f, 200.0f, 500.0f);
-	const float panelBottom = panelTop + panelHeight;
-
-	// The reference score uses a large staff: the two five-line staves together fill most of the
-	// page. Scale the spacing from the panel height, then shrink it if the grand staff would not
-	// fit with margins.
-	float space = std::clamp(panelHeight / 15.0f, 4.0f, 30.0f);
-	float staffBlock = space * 8.9f;
-	const float maxBlock = panelHeight * 0.84f;
-	if (staffBlock > maxBlock)
+	// Plus2 draws one staff for treble-only MIDI and a grand staff for piano MIDI. Use the
+	// same rule so the test-file layout and Bad Apple's two-staff layout both match.
+	bool hasBassNotes = false;
+	for (int key = 0; key < 60 && !hasBassNotes; ++key)
 	{
-		space = maxBlock / 8.9f;
-		staffBlock = space * 8.9f;
+		if (!seq->mergedNotes[key].Empty())
+			hasBassNotes = true;
 	}
 
-	const float trebleTop = panelTop + (panelHeight - staffBlock) * 0.5f + space * 0.35f;
+	// Plus2's staff spacing is about 1.1% of the window height, and the grand staff leaves
+	// roughly six staff spaces between the treble and bass staves.
+	const float space = std::clamp(uiHeight * 0.0110f, 4.0f, 24.0f);
+	const float staffGap = space * 5.9f;
+	// Even a treble-only score keeps the treble staff where it sits in a grand staff, so the
+	// page position matches Plus2's single-staff view.
+	const float staffBlock = space * 13.9f;
+	const float blockTop = pageTop + pageHeight * 0.5f - staffBlock * 0.5f;
+	const float trebleTop = blockTop;
 	const float trebleBottom = trebleTop + space * 4.0f;
-	const float bassTop = trebleBottom + space * 0.9f;
+	const float bassTop = trebleBottom + staffGap;
 	const float bassBottom = bassTop + space * 4.0f;
 
-	const float staffLeft = std::max(8.0f, uiWidth * 0.018f);
-	const float staffRight = uiWidth - std::max(8.0f, uiWidth * 0.018f);
+	const float staffLeft = std::max(8.0f, uiWidth * 0.023f);
+	const float staffRight = uiWidth - std::max(6.0f, uiWidth * 0.003f);
 
 	// Key signature at the visible start. MIDI carries the number of sharps/flats directly.
 	int keySharpsFlats = 0;
@@ -214,26 +231,33 @@ void ScoreOverlay::Render()
 			inKey[(SHARP_PCS[i] + 1) % 12] = true;
 	}
 
-	const float keyX = staffLeft + space * 4.6f;
-	const float keyStep = space * 0.95f;
-	const float timeX = keyX + accidentalCount * keyStep + (accidentalCount > 0 ? space * 0.35f : 0.0f);
-	const float contentLeft = std::max(staffLeft + space * 7.0f, timeX + space * 2.5f);
+	const float keyX = staffLeft + space * 3.0f;
+	const float keyStep = space * 1.5f;
+	float timeX = staffLeft + space * 10.4f;
+	if (accidentalCount > 0)
+		timeX = std::max(timeX, keyX + (accidentalCount - 1) * keyStep + space * 1.0f);
+	const float contentLeft = std::max(staffLeft + space * 13.6f, timeX + space * 2.6f);
 	const float contentWidth = std::max(1.0f, staffRight - contentLeft);
+	// Plus2 insets the notes from the measure grid: barlines sit at the grid, while the first
+	// notehead of each measure sits about three staff spaces to its right.
+	const float noteInset = std::min(space * 3.0f, contentWidth * 0.25f);
+	const float noteLeft = contentLeft + noteInset;
+	const float noteWidth = std::max(1.0f, contentWidth - noteInset);
+	const float cursorX = noteLeft + (float)((double)(currentTick - windowStart) / (double)pageTicks) * noteWidth;
 
-	const ImU32 paper = IM_COL32(252, 252, 250, 255);
-	const ImU32 paperEdge = IM_COL32(203, 203, 198, 255);
-	const ImU32 ink = IM_COL32(25, 25, 25, 255);
-	const ImU32 staffInk = IM_COL32(38, 38, 38, 255);
-	const ImU32 cursorInk = IM_COL32(28, 28, 28, 210);
-	const ImU32 activeInk = IM_COL32(216, 38, 38, 255);
+	const ImU32 paper = IM_COL32(255, 255, 255, 255);
+	const ImU32 ink = IM_COL32(0, 0, 0, 255);
+	const ImU32 staffInk = IM_COL32(0, 0, 0, 255);
+	const ImU32 cursorInk = IM_COL32(0, 0, 0, 255);
+	const ImU32 activeInk = IM_COL32(255, 0, 0, 255);
 	const ImU32 glyphTint = 0xFFFFFFFFu;
 
 	ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
-	draw->AddRectFilled(ImVec2(0.0f, panelTop), ImVec2(uiWidth, panelBottom), paper);
-	draw->AddLine(ImVec2(0.0f, panelBottom), ImVec2(uiWidth, panelBottom), paperEdge, 1.0f);
+	draw->AddRectFilled(ImVec2(0.0f, pageTop), ImVec2(uiWidth, pageBottom), paper);
+	draw->AddLine(ImVec2(0.0f, pageBottom), ImVec2(uiWidth, pageBottom), IM_COL32(120, 120, 120, 90), 1.0f);
 
-	draw->PushClipRect(ImVec2(0.0f, panelTop), ImVec2(uiWidth, panelBottom), true);
+	draw->PushClipRect(ImVec2(0.0f, pageTop), ImVec2(uiWidth, pageBottom), true);
 
 	auto staffLines = [&](float top, float bottom)
 		{
@@ -245,41 +269,62 @@ void ScoreOverlay::Render()
 		};
 
 	staffLines(trebleTop, trebleBottom);
-	staffLines(bassTop, bassBottom);
+	if (hasBassNotes)
+		staffLines(bassTop, bassBottom);
 
-	// Grand staff bracket.
-	draw->AddLine(ImVec2(staffLeft, trebleTop), ImVec2(staffLeft, bassBottom), staffInk, std::max(1.0f, space * 0.11f));
+	// Plus2 joins the grand staff with a curly brace. The Bravura brace is a scalable SMuFL glyph.
+	if (hasBassNotes)
+	{
+		const float braceHeight = space * 20.0f;
+		const float braceTop = trebleTop - space * 3.0f;
+		DrawGlyphAnchored(sheetBrace.get(), staffLeft - space * 1.9f, braceTop, braceHeight, glyphTint);
+	}
 
-	// Clefs are the Wikimedia Commons GClef/FClef glyphs, scaled to the staff.
-	DrawGlyph(sheetTreble.get(), staffLeft + space * 1.0f, trebleTop + space * 1.8f, space * 5.6f, glyphTint);
-	DrawGlyph(sheetBass.get(), staffLeft + space * 1.7f, bassTop + space * 2.0f, space * 3.9f, glyphTint);
+	// Bravura clefs, the same font Plus2 engraves with.
+	DrawGlyph(sheetTreble.get(), staffLeft + space * 0.4f, trebleTop + space * 2.0f, space * 6.4f, glyphTint);
+	if (hasBassNotes)
+		DrawGlyph(sheetBass.get(), staffLeft + space * 0.4f, bassTop + space * 2.0f, space * 3.2f, glyphTint);
 
-	// Key signature on both staves.
+	// Key signature on every shown staff.
 	if (accidentalCount > 0)
 	{
 		GPUImage* accidental = flatKey ? sheetFlat.get() : sheetSharp.get();
 		const int* trebleSteps = flatKey ? TREBLE_FLAT_STEPS : TREBLE_SHARP_STEPS;
 		const int* bassSteps = flatKey ? BASS_FLAT_STEPS : BASS_SHARP_STEPS;
-		const float accidentalHeight = space * 2.0f;
+		const float accidentalHeight = space * 2.5f;
 
 		for (int i = 0; i < accidentalCount; ++i)
 		{
 			const float x = keyX + i * keyStep;
 			DrawGlyph(accidental, x, trebleBottom - trebleSteps[i] * space * 0.5f, accidentalHeight, glyphTint);
-			DrawGlyph(accidental, x, bassBottom - bassSteps[i] * space * 0.5f, accidentalHeight, glyphTint);
+			if (hasBassNotes)
+				DrawGlyph(accidental, x, bassBottom - bassSteps[i] * space * 0.5f, accidentalHeight, glyphTint);
 		}
 	}
 
-	// Time signature, after the key signature.
-	ImFont* font = Fonts::DefaultFont != nullptr ? Fonts::DefaultFont : ImGui::GetFont();
-	if (font != nullptr)
-	{
-		const float signatureSize = space * 1.9f;
-		const std::string numeratorText = std::to_string(numerator);
-		const std::string denominatorText = std::to_string(denominator);
-		draw->AddText(font, signatureSize, ImVec2(timeX, trebleTop - space * 0.15f), ink, numeratorText.c_str());
-		draw->AddText(font, signatureSize, ImVec2(timeX, trebleTop + space * 1.85f), ink, denominatorText.c_str());
-	}
+	// Time signature uses Bravura's music digits, not the UI font.
+	const std::string numeratorText = std::to_string(numerator);
+	const std::string denominatorText = std::to_string(denominator);
+	auto drawTimeDigits = [&](const std::string& text, float x, float top, float height)
+		{
+			float cursor = x;
+			for (char c : text)
+			{
+				if (c < '0' || c > '9') continue;
+				GPUImage* digit = sheetTime[c - '0'].get();
+				DrawGlyphAnchored(digit, cursor, top, height, glyphTint);
+				if (digit && digit->height > 0)
+					cursor += height * (float)digit->width / (float)digit->height + space * 0.06f;
+			}
+		};
+	auto drawTimeSignature = [&](float staffTop)
+		{
+			drawTimeDigits(numeratorText, timeX, staffTop - space * 0.9f, space * 2.7f);
+			drawTimeDigits(denominatorText, timeX, staffTop + space * 2.5f, space * 2.7f);
+		};
+	drawTimeSignature(trebleTop);
+	if (hasBassNotes)
+		drawTimeSignature(bassTop);
 
 	// Barlines follow the real measure grid, so an anacrusis or a time-signature change does not
 	// get an evenly divided but wrong measure width.
@@ -290,19 +335,22 @@ void ScoreOverlay::Render()
 		if (measureStart > windowEnd) break;
 		if (measureStart <= windowStart) continue;
 
-		const float x = contentLeft + (float)((double)(measureStart - windowStart) / (double)windowTicks) * contentWidth;
+		const float x = contentLeft + (float)((double)(measureStart - windowStart) / (double)pageTicks) * contentWidth;
 		if (x < staffLeft || x > staffRight) continue;
 
 		draw->AddLine(ImVec2(x, trebleTop), ImVec2(x, trebleBottom), staffInk, std::max(1.0f, space * 0.085f));
-		draw->AddLine(ImVec2(x, bassTop), ImVec2(x, bassBottom), staffInk, std::max(1.0f, space * 0.085f));
+		if (hasBassNotes)
+			draw->AddLine(ImVec2(x, bassTop), ImVec2(x, bassBottom), staffInk, std::max(1.0f, space * 0.085f));
 	}
 
 	// Notes, grouped per key by the loader, are flattened into one tick-ordered list so chords
 	// can share a stem and runs can share beams.
 	const long quarterTicks = std::max(1L, (long)seq->resolution);
 	std::vector<NoteGlyph> glyphs;
-	glyphs.reserve(1024);
-	constexpr size_t MAX_SHEET_NOTES = 2400;
+	glyphs.reserve(4096);
+	// A dense four-measure page can hold thousands of notes. Keep enough headroom that the
+	// visible page is complete instead of silently truncating the right-hand measures.
+	constexpr size_t MAX_SHEET_NOTES = 20000;
 
 	for (int key = 0; key < 128 && glyphs.size() < MAX_SHEET_NOTES; ++key)
 	{
@@ -317,17 +365,24 @@ void ScoreOverlay::Render()
 		auto begin = std::lower_bound(notes.tick.begin(), notes.tick.end(), (uint32_t)windowStart);
 		size_t index = (size_t)std::distance(notes.tick.begin(), begin);
 		uint32_t previousTick = UINT32_MAX;
-		uint32_t previousGate = UINT32_MAX;
 
 		for (; index < notes.Size() && glyphs.size() < MAX_SHEET_NOTES; ++index)
 		{
 			const uint32_t tick = notes.tick[index];
 			if (tick >= (uint32_t)windowEnd) break;
-			if (tick == previousTick && notes.gate[index] == previousGate) continue;
-			previousTick = tick;
-			previousGate = notes.gate[index];
 
-			const float x = contentLeft + (float)((double)((long)tick - windowStart) / (double)windowTicks) * contentWidth;
+			// Bad Apple carries the same piano part on several tracks. The loader merges them
+			// into one per-key list, so skip repeated tick/key pairs (keeping the longest gate)
+			// or the score grows double noteheads, stems, flags, and beams.
+			if (tick == previousTick)
+			{
+				if (!glyphs.empty() && glyphs.back().key == (uint32_t)key)
+					glyphs.back().gate = std::max(glyphs.back().gate, (uint32_t)std::max<uint32_t>(1, notes.gate[index]));
+				continue;
+			}
+			previousTick = tick;
+
+			const float x = noteLeft + (float)((double)((long)tick - windowStart) / (double)pageTicks) * noteWidth;
 			if (x < staffLeft || x > staffRight) continue;
 
 			const uint32_t gate = std::max<uint32_t>(1, notes.gate[index]);
@@ -336,9 +391,14 @@ void ScoreOverlay::Render()
 			glyph.y = staffBottom - (float)diatonicStep * space * 0.5f;
 			glyph.tick = tick;
 			glyph.gate = gate;
+			glyph.value = gate;
 			glyph.key = (uint32_t)key;
 			glyph.treble = treble;
-			glyph.active = (long)tick <= currentTick && currentTick < (long)tick + (long)gate;
+			// Plus2's red dot rides the cursor, not every sustained note on the page.
+			const bool recentAttack = currentTick - (long)tick <= std::max(1L, quarterTicks / 8);
+			const bool underCursor = std::abs(x - cursorX) <= space * 0.8f;
+			glyph.active = currentTick > windowStart && (long)tick <= currentTick && currentTick < (long)tick + (long)gate
+				&& (recentAttack || underCursor);
 			glyphs.push_back(glyph);
 		}
 	}
@@ -349,6 +409,34 @@ void ScoreOverlay::Render()
 			if (a.treble != b.treble) return a.treble > b.treble;
 			return a.key < b.key;
 		});
+
+	// Plus2 engraves a whole rest in every empty measure of each shown staff.
+	bool measureHasTreble[4] = { false, false, false, false };
+	bool measureHasBass[4] = { false, false, false, false };
+	for (const NoteGlyph& glyph : glyphs)
+	{
+		const long measure = ((long)glyph.tick - windowStart) / measureTicks;
+		if (measure < 0 || measure >= 4) continue;
+		if (glyph.treble)
+			measureHasTreble[measure] = true;
+		else
+			measureHasBass[measure] = true;
+	}
+
+	auto drawWholeRest = [&](float staffTop, int measure)
+		{
+			const float centerX = contentLeft + ((float)measure + 0.5f) / 4.0f * contentWidth;
+			// A whole rest hangs from the fourth line, not from the second.
+			DrawGlyph(sheetRestWhole.get(), centerX, staffTop + space * 3.55f, space * 0.58f, glyphTint);
+		};
+
+	for (int measure = 0; measure < 4; ++measure)
+	{
+		if (!measureHasTreble[measure])
+			drawWholeRest(trebleTop, measure);
+		if (hasBassNotes && !measureHasBass[measure])
+			drawWholeRest(bassTop, measure);
+	}
 
 	std::vector<Onset> onsets;
 	for (size_t i = 0; i < glyphs.size(); ++i)
@@ -368,127 +456,590 @@ void ScoreOverlay::Render()
 		onset.minGate = std::min(onset.minGate, glyphs[i].gate);
 	}
 
-	const float headRX = space * 0.50f;
-	const float stemWidth = std::max(1.0f, space * 0.075f);
-	const float cursorX = contentLeft + (float)((double)(currentTick - windowStart) / (double)windowTicks) * contentWidth;
+	// Beam and tuplet runs are per staff. In piano music both hands often attack at the same
+	// tick, so walking the globally interleaved onset list would break every run at the other
+	// hand's onset.
+	std::vector<size_t> trebleOnsets;
+	std::vector<size_t> bassOnsets;
+	for (size_t i = 0; i < onsets.size(); ++i)
+		(onsets[i].treble ? trebleOnsets : bassOnsets).push_back(i);
+	const std::vector<size_t> onsetSequences[2] = { trebleOnsets, bassOnsets };
 
-	// Playback cursor, like the vertical line in the reference score.
-	if (cursorX >= staffLeft && cursorX <= staffRight)
+	// A MIDI note's gate is how long it is held, not how the note is written. Legato playing
+	// often holds an eighth note for a whole quarter, which used to suppress its beam and leave
+	// it looking like a long note. Use the distance to the next onset on the same staff as the
+	// notated value, which is what a score reader expects to see.
+	for (const std::vector<size_t>& sequence : onsetSequences)
 	{
-		draw->AddLine(ImVec2(cursorX, trebleTop - space * 1.7f), ImVec2(cursorX, bassBottom + space * 1.7f),
-			cursorInk, std::max(1.0f, space * 0.07f));
+		for (size_t p = 0; p < sequence.size(); ++p)
+		{
+			Onset& onset = onsets[sequence[p]];
+			uint32_t rhythm = onset.minGate;
+			if (p + 1 < sequence.size())
+				rhythm = onsets[sequence[p + 1]].tick - onset.tick;
+			if (rhythm == 0 || rhythm == UINT32_MAX)
+				rhythm = std::max<uint32_t>(1, onset.minGate == UINT32_MAX ? 1 : onset.minGate);
+			onset.rhythm = rhythm;
+			onset.minGate = rhythm;
+			onset.maxGate = rhythm;
+			onset.value = rhythm;
+			for (size_t glyphIndex : onset.glyphs)
+			{
+				glyphs[glyphIndex].gate = rhythm;
+				glyphs[glyphIndex].value = rhythm;
+			}
+		}
+	}
+
+	const float headRX = space * 0.6f;
+	const float stemWidth = std::max(1.0f, space * 0.075f);
+
+	// Number of beams/flags a note value needs: 8th = 1, 16th = 2, 32nd = 3, 64th = 4.
+	auto beamLevel = [&](uint32_t gate)
+		{
+			if (gate < (uint32_t)std::max(1L, quarterTicks / 8)) return 4;
+			if (gate < (uint32_t)std::max(1L, quarterTicks / 4)) return 3;
+			if (gate < (uint32_t)std::max(1L, quarterTicks / 2)) return 2;
+			if (gate < (uint32_t)quarterTicks) return 1;
+			return 0;
+		};
+
+	// Traditional stem direction: the note farthest from the middle line decides the chord.
+	auto onsetStemUp = [&](const Onset& onset, float staffCenter)
+		{
+			float farthest = -1.0f;
+			bool below = false;
+			for (size_t glyphIndex : onset.glyphs)
+			{
+				const float distance = std::abs(glyphs[glyphIndex].y - staffCenter);
+				if (distance > farthest)
+				{
+					farthest = distance;
+					below = glyphs[glyphIndex].y > staffCenter;
+				}
+			}
+			return below;
+		};
+
+	// Plus2's cursor is a thin black line down the whole page.
+	if (currentTick > windowStart && cursorX >= staffLeft && cursorX <= staffRight)
+	{
+		draw->AddLine(ImVec2(cursorX, pageTop), ImVec2(cursorX, pageBottom),
+			cursorInk, std::max(1.0f, space * 0.12f));
 	}
 
 	// A run of short notes inside one beat is beamed. This is what makes sixteenth-note
 	// passages read like the reference instead of a row of separate flags.
 	struct BeamSpan
 	{
-		size_t firstOnset = 0;
-		size_t lastOnset = 0;
+		std::vector<size_t> members;   // onsets in rhythm order, one staff only
+		float firstX = 0.0f;
+		float slope = 0.0f;
+		float beamStartY = 0.0f;
+		float beamEndY = 0.0f;
 		bool stemUp = true;
-		float beamY = 0.0f;
 		int beamCount = 1;
 	};
 
 	std::vector<BeamSpan> beams;
 	std::vector<bool> beamed(glyphs.size(), false);
+	std::vector<int> onsetBeam(onsets.size(), -1);
 
 	const float trebleCenter = (trebleTop + trebleBottom) * 0.5f;
 	const float bassCenter = (bassTop + bassBottom) * 0.5f;
 
-	for (size_t i = 0; i < onsets.size(); )
-	{
-		const float staffCenter = onsets[i].treble ? trebleCenter : bassCenter;
-		size_t j = i;
-		float ySum = 0.0f;
-		int yCount = 0;
-		bool shortNotes = true;
+	auto onsetOuterY = [&](size_t onsetIndex, bool stemUp)
+		{
+			float y = stemUp ? FLT_MAX : -FLT_MAX;
+			for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+				y = stemUp ? std::min(y, glyphs[glyphIndex].y) : std::max(y, glyphs[glyphIndex].y);
+			return y;
+		};
 
-		auto accumulate = [&](size_t onsetIndex)
+	// Tuplets are inferred from timing before anything is beamed. MIDI has no tuplet flag,
+	// so three equal-spaced notes whose combined span equals two normal notes are read as a
+	// triplet. A triplet is written with the value it replaces (an eighth triplet takes one
+	// beam), not with the shorter value its sounding gap suggests.
+	struct TupletSpan
+	{
+		size_t first = 0;
+		size_t second = 0;
+		size_t third = 0;
+		bool treble = true;
+	};
+	std::vector<TupletSpan> tuplets;
+	const long tupletTolerance = std::max(2L, quarterTicks / 24);
+	const long tupletUnits[4] = { quarterTicks / 2, quarterTicks, quarterTicks * 2, quarterTicks * 4 };
+
+	for (const std::vector<size_t>& sequence : onsetSequences)
+	{
+		for (size_t p = 0; p + 2 < sequence.size(); )
+		{
+			const size_t i0 = sequence[p];
+			const size_t i1 = sequence[p + 1];
+			const size_t i2 = sequence[p + 2];
+			const long firstGap = (long)onsets[i1].tick - (long)onsets[i0].tick;
+			const long secondGap = (long)onsets[i2].tick - (long)onsets[i1].tick;
+			bool valid = firstGap > 0 && std::abs(firstGap - secondGap) <= tupletTolerance;
+
+			if (valid)
+			{
+				const long unit = firstGap * 3;
+				bool unitMatches = false;
+				for (long candidate : tupletUnits)
+					if (candidate > 0 && std::abs(unit - candidate) <= tupletTolerance * 2)
+						unitMatches = true;
+				valid = unitMatches;
+			}
+
+			if (!valid)
+			{
+				++p;
+				continue;
+			}
+
+			// Exactly three notes per bracket. A longer triplet-spaced run is engraved as
+			// consecutive triplets instead of one bracket over six or nine notes.
+			TupletSpan span;
+			span.first = i0;
+			span.second = i1;
+			span.third = i2;
+			span.treble = onsets[i0].treble;
+			tuplets.push_back(span);
+
+			const uint32_t written = std::max<uint32_t>(1, (uint32_t)((firstGap * 3 + 1) / 2));
+			for (size_t k = p; k < p + 3; ++k)
+			{
+				onsets[sequence[k]].value = written;
+				for (size_t glyphIndex : onsets[sequence[k]].glyphs)
+					glyphs[glyphIndex].value = written;
+			}
+			p += 3;
+		}
+	}
+
+	for (const std::vector<size_t>& sequence : onsetSequences)
+	{
+		for (size_t pos = 0; pos < sequence.size(); )
+		{
+			const size_t firstIndex = sequence[pos];
+			if (beamLevel(onsets[firstIndex].value) == 0)
+			{
+				++pos;
+				continue;
+			}
+
+			// Collect one beat of short notes from this staff only. Walking the global onset
+			// table here used to pull in the other hand's notes, and every one of them grew a
+			// long stem across the staff, fusing whole measures into black bars.
+			std::vector<size_t> members;
+			members.push_back(firstIndex);
+			while (pos + 1 < sequence.size() && members.size() < 8)
+			{
+				const size_t nextIndex = sequence[pos + 1];
+				const Onset& previous = onsets[members.back()];
+				const Onset& next = onsets[nextIndex];
+				if (beamLevel(next.value) == 0) break;
+				if (next.tick - previous.tick > (uint32_t)quarterTicks) break;
+				if (next.tick / (uint32_t)quarterTicks != onsets[firstIndex].tick / (uint32_t)quarterTicks) break;
+				members.push_back(nextIndex);
+				++pos;
+			}
+
+			if (members.size() < 2)
+			{
+				++pos;
+				continue;
+			}
+
+			const float staffCenter = onsets[firstIndex].treble ? trebleCenter : bassCenter;
+			BeamSpan span;
+			span.members = members;
+			float farthest = -1.0f;
+			bool below = false;
+			for (size_t onsetIndex : members)
 			{
 				for (size_t glyphIndex : onsets[onsetIndex].glyphs)
 				{
-					ySum += glyphs[glyphIndex].y;
-					++yCount;
-				}
-				if (onsets[onsetIndex].maxGate >= (uint32_t)quarterTicks)
-					shortNotes = false;
-			};
-
-		accumulate(i);
-		while (j + 1 < onsets.size() && shortNotes)
-		{
-			const Onset& next = onsets[j + 1];
-			if (next.treble != onsets[i].treble) break;
-			if (next.tick - onsets[j].tick > (uint32_t)quarterTicks) break;
-			if (next.tick / (uint32_t)quarterTicks != onsets[i].tick / (uint32_t)quarterTicks) break;
-			if (j - i >= 7) break;
-
-			accumulate(j + 1);
-			++j;
-		}
-
-		if (j > i && shortNotes && yCount > 0)
-		{
-			BeamSpan span;
-			span.firstOnset = i;
-			span.lastOnset = j;
-			const float averageY = ySum / (float)yCount;
-			span.stemUp = averageY > staffCenter;
-
-			float beamY = span.stemUp ? FLT_MAX : -FLT_MAX;
-			int beamCount = 1;
-			for (size_t k = i; k <= j; ++k)
-			{
-				for (size_t glyphIndex : onsets[k].glyphs)
-				{
-					const NoteGlyph& glyph = glyphs[glyphIndex];
-					beamY = span.stemUp ? std::min(beamY, glyph.y) : std::max(beamY, glyph.y);
-					if (glyph.gate < (uint32_t)(quarterTicks / 2)) beamCount = 2;
+					const float distance = std::abs(glyphs[glyphIndex].y - staffCenter);
+					if (distance > farthest)
+					{
+						farthest = distance;
+						below = glyphs[glyphIndex].y > staffCenter;
+					}
 				}
 			}
-			span.beamY = span.stemUp ? beamY - space * 3.0f : beamY + space * 3.0f;
+			span.stemUp = below;
+
+			const size_t lastIndex = members.back();
+			const float firstOuter = onsetOuterY(firstIndex, span.stemUp);
+			const float lastOuter = onsetOuterY(lastIndex, span.stemUp);
+			const float dx = std::max(1.0f, onsets[lastIndex].x - onsets[firstIndex].x);
+			// Keep the beam nearly level. A slope taken from a wide leap turns a dense trill
+			// into a diagonal black wedge.
+			const float slope = std::clamp((lastOuter - firstOuter) / dx, -0.12f, 0.12f);
+			span.firstX = onsets[firstIndex].x;
+			span.slope = slope;
+			span.beamStartY = span.stemUp ? firstOuter - space * 3.0f : firstOuter + space * 3.0f;
+			span.beamEndY = span.beamStartY + slope * dx;
+
+			int beamCount = 1;
+			for (size_t onsetIndex : members)
+				beamCount = std::max(beamCount, beamLevel(onsets[onsetIndex].value));
 			span.beamCount = beamCount;
+
+			// Lift the whole beam until every note in this group clears it.
+			for (size_t onsetIndex : members)
+			{
+				const float at = span.beamStartY + slope * (onsets[onsetIndex].x - span.firstX);
+				const float outer = onsetOuterY(onsetIndex, span.stemUp);
+				if (span.stemUp && outer - space * 2.8f < at)
+				{
+					const float lift = at - (outer - space * 2.8f);
+					span.beamStartY -= lift;
+					span.beamEndY -= lift;
+				}
+				else if (!span.stemUp && outer + space * 2.8f > at)
+				{
+					const float lift = (outer + space * 2.8f) - at;
+					span.beamStartY += lift;
+					span.beamEndY += lift;
+				}
+			}
+
+			// Keep an inward-pointing beam inside its own staff. Treble stems-down beams and
+			// bass stems-up beams otherwise meet in the gap between the staves and read as one
+			// cross-staff black bar.
+			if (!span.stemUp && onsets[firstIndex].treble)
+			{
+				const float limit = trebleBottom + space * 2.2f;
+				bool safe = true;
+				for (size_t onsetIndex : members)
+					if (onsetOuterY(onsetIndex, false) > limit)
+						safe = false;
+				if (safe)
+				{
+					span.beamStartY = std::min(span.beamStartY, limit);
+					span.beamEndY = std::min(span.beamEndY, limit);
+				}
+			}
+			else if (span.stemUp && !onsets[firstIndex].treble)
+			{
+				const float limit = bassTop - space * 2.2f;
+				bool safe = true;
+				for (size_t onsetIndex : members)
+					if (onsetOuterY(onsetIndex, true) < limit)
+						safe = false;
+				if (safe)
+				{
+					span.beamStartY = std::max(span.beamStartY, limit);
+					span.beamEndY = std::max(span.beamEndY, limit);
+				}
+			}
+
+			const int beamIndex = (int)beams.size();
 			beams.push_back(span);
-
-			for (size_t k = i; k <= j; ++k)
-				for (size_t glyphIndex : onsets[k].glyphs)
+			for (size_t onsetIndex : members)
+			{
+				onsetBeam[onsetIndex] = beamIndex;
+				for (size_t glyphIndex : onsets[onsetIndex].glyphs)
 					beamed[glyphIndex] = true;
+			}
 
-			i = j + 1;
-		}
-		else
-		{
-			++i;
+			++pos;
 		}
 	}
 
 	for (const BeamSpan& beam : beams)
 	{
-		const Onset& first = onsets[beam.firstOnset];
-		const Onset& last = onsets[beam.lastOnset];
+		auto beamYAt = [&](float x) { return beam.beamStartY + beam.slope * (x - beam.firstX); };
+		const Onset& first = onsets[beam.members.front()];
+		const Onset& last = onsets[beam.members.back()];
 
-		for (size_t k = beam.firstOnset; k <= beam.lastOnset; ++k)
+		for (size_t onsetIndex : beam.members)
 		{
-			const Onset& onset = onsets[k];
-			float attachY = beam.stemUp ? FLT_MAX : -FLT_MAX;
-			for (size_t glyphIndex : onset.glyphs)
-			{
-				const NoteGlyph& glyph = glyphs[glyphIndex];
-				attachY = beam.stemUp ? std::min(attachY, glyph.y) : std::max(attachY, glyph.y);
-			}
-
+			const Onset& onset = onsets[onsetIndex];
+			const float attachY = onsetOuterY(onsetIndex, beam.stemUp);
 			const float stemX = onset.x + (beam.stemUp ? headRX : -headRX);
-			draw->AddLine(ImVec2(stemX, attachY), ImVec2(stemX, beam.beamY), ink, stemWidth);
+			draw->AddLine(ImVec2(stemX, attachY), ImVec2(stemX, beamYAt(stemX)), ink, stemWidth);
 		}
 
+		const float beamThickness = std::max(1.0f, space * 0.20f);
+		const float beamGap = std::max(1.0f, space * 0.40f);
 		for (int line = 0; line < beam.beamCount; ++line)
 		{
-			const float y = beam.beamY + (beam.stemUp ? -1.0f : 1.0f) * (float)line * space * 0.34f;
-			const float startX = first.x + (beam.stemUp ? headRX : -headRX);
-			const float endX = last.x + (beam.stemUp ? headRX : -headRX);
-			draw->AddLine(ImVec2(startX, y), ImVec2(endX, y), ink, std::max(1.0f, space * 0.13f));
+			const float offset = (float)line * beamGap;
+			auto drawBeamSegment = [&](float startX, float endX)
+				{
+					const float y0 = beamYAt(startX) + (beam.stemUp ? offset : -offset);
+					const float y1 = beamYAt(endX) + (beam.stemUp ? offset : -offset);
+					draw->AddQuadFilled(ImVec2(startX, y0), ImVec2(endX, y1),
+						ImVec2(endX, y1 + beamThickness), ImVec2(startX, y0 + beamThickness), ink);
+				};
+
+			if (line == 0)
+			{
+				drawBeamSegment(first.x + (beam.stemUp ? headRX : -headRX),
+					last.x + (beam.stemUp ? headRX : -headRX));
+				continue;
+			}
+
+			// Extra beams only cover the notes that need them, and only the notes in this
+			// group: an eighth inside a sixteenth group keeps one beam.
+			for (size_t m = 0; m < beam.members.size(); )
+			{
+				if (beamLevel(onsets[beam.members[m]].value) <= line)
+				{
+					++m;
+					continue;
+				}
+
+				const size_t runStart = m;
+				while (m + 1 < beam.members.size() && beamLevel(onsets[beam.members[m + 1]].value) > line)
+					++m;
+				const size_t runEnd = m;
+
+				float startX = onsets[beam.members[runStart]].x + (beam.stemUp ? headRX : -headRX);
+				float endX = onsets[beam.members[runEnd]].x + (beam.stemUp ? headRX : -headRX);
+				if (runEnd == runStart)
+				{
+					const float stub = space * 0.9f;
+					if (runStart + 1 < beam.members.size())
+						endX = startX + stub;
+					else
+						endX = startX - stub;
+				}
+				drawBeamSegment(startX, endX);
+				++m;
+			}
 		}
+	}
+
+	// Phrase slurs. MIDI has no phrase marks, so each staff's continuous melodic motion is
+	// grouped into phrases: a rest longer than a half note, a page-long run or a very wide
+	// leap ends the phrase. The slur sits on the notehead side, opposite the stems.
+	struct PhraseSpan
+	{
+		std::vector<size_t> members;
+		bool above = true;
+	};
+	std::vector<PhraseSpan> phrases;
+
+	auto onsetAverageY = [&](size_t onsetIndex)
+		{
+			float sum = 0.0f;
+			for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+				sum += glyphs[glyphIndex].y;
+			return sum / (float)onsets[onsetIndex].glyphs.size();
+		};
+	auto onsetTopBottom = [&](size_t onsetIndex, float& top, float& bottom)
+		{
+			top = FLT_MAX;
+			bottom = -FLT_MAX;
+			for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+			{
+				top = std::min(top, glyphs[glyphIndex].y);
+				bottom = std::max(bottom, glyphs[glyphIndex].y);
+			}
+		};
+
+	for (const std::vector<size_t>& sequence : onsetSequences)
+	{
+		for (size_t pos = 0; pos < sequence.size(); )
+		{
+			std::vector<size_t> members;
+			members.push_back(sequence[pos]);
+			float rangeTop = FLT_MAX;
+			float rangeBottom = -FLT_MAX;
+			onsetTopBottom(sequence[pos], rangeTop, rangeBottom);
+			while (pos + 1 < sequence.size() && members.size() < 10)
+			{
+				const Onset& previous = onsets[members.back()];
+				const Onset& next = onsets[sequence[pos + 1]];
+				if (next.tick - previous.tick > (uint32_t)quarterTicks * 2) break;
+				if (next.tick - onsets[members.front()].tick > (uint32_t)measureTicks) break;
+				if (std::abs(onsetAverageY(sequence[pos + 1]) - onsetAverageY(members.back())) > space * 5.0f)
+					break;
+
+				// A phrase mark follows a melodic line, not a run that sweeps across the whole
+				// staff; keep the slur close enough to arch over its own notes.
+				float nextTop = FLT_MAX;
+				float nextBottom = -FLT_MAX;
+				onsetTopBottom(sequence[pos + 1], nextTop, nextBottom);
+				if (std::max(rangeBottom, nextBottom) - std::min(rangeTop, nextTop) > space * 4.0f)
+					break;
+
+				rangeTop = std::min(rangeTop, nextTop);
+				rangeBottom = std::max(rangeBottom, nextBottom);
+				members.push_back(sequence[pos + 1]);
+				++pos;
+			}
+			++pos;
+
+			if (members.size() < 4)
+				continue;
+			const float phraseWidth = onsets[members.back()].x - onsets[members.front()].x;
+			if (phraseWidth < space * 3.5f)
+				continue;
+
+			// Fast scalar and trill runs are beamed figures, not lyrical phrases. Slurring
+			// them only produces a long diagonal through the staff.
+			const float averageGap = (float)(onsets[members.back()].tick - onsets[members.front()].tick)
+				/ (float)(members.size() - 1);
+			if (averageGap < (float)quarterTicks * 0.25f)
+				continue;
+
+			// A phrase is a melodic line, not a chordal accompaniment or a repeated-note
+			// trill (which is normally marked "tr" rather than slurred).
+			size_t singleNotes = 0;
+			float sumY = 0.0f;
+			size_t noteCount = 0;
+			for (size_t onsetIndex : members)
+			{
+				if (onsets[onsetIndex].glyphs.size() == 1)
+					++singleNotes;
+				for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+				{
+					sumY += glyphs[glyphIndex].y;
+					++noteCount;
+				}
+			}
+			if (singleNotes * 5 < members.size() * 3)
+				continue;
+			if (members.size() >= 8 && rangeBottom - rangeTop < space * 1.6f)
+				continue;
+
+			int stemsUp = 0;
+			int stemsDown = 0;
+			for (size_t onsetIndex : members)
+			{
+				if (onsetBeam[onsetIndex] < 0)
+					continue;
+				if (beams[onsetBeam[onsetIndex]].stemUp)
+					++stemsUp;
+				else
+					++stemsDown;
+			}
+
+			const float staffCenter = onsets[members.front()].treble ? trebleCenter : bassCenter;
+			PhraseSpan phrase;
+			phrase.members = members;
+			// More stems down means the slur is engraved above, and vice versa.
+			phrase.above = stemsUp != stemsDown
+				? stemsDown > stemsUp
+				: (sumY / (float)std::max<size_t>(1, noteCount)) <= staffCenter;
+			phrases.push_back(phrase);
+		}
+	}
+
+	for (const PhraseSpan& phrase : phrases)
+	{
+		const Onset& firstOnset = onsets[phrase.members.front()];
+		const Onset& lastOnset = onsets[phrase.members.back()];
+		float firstTop = FLT_MAX;
+		float firstBottom = -FLT_MAX;
+		float lastTop = FLT_MAX;
+		float lastBottom = -FLT_MAX;
+		for (size_t glyphIndex : firstOnset.glyphs)
+		{
+			firstTop = std::min(firstTop, glyphs[glyphIndex].y);
+			firstBottom = std::max(firstBottom, glyphs[glyphIndex].y);
+		}
+		for (size_t glyphIndex : lastOnset.glyphs)
+		{
+			lastTop = std::min(lastTop, glyphs[glyphIndex].y);
+			lastBottom = std::max(lastBottom, glyphs[glyphIndex].y);
+		}
+
+		const float startX = firstOnset.x;
+		const float endX = lastOnset.x;
+		const float span = std::max(space * 1.0f, endX - startX);
+		const float arch = std::clamp(span * 0.055f, space * 1.3f, space * 2.8f);
+		bool above = phrase.above;
+		float startY = above ? firstTop - space * 0.9f : firstBottom + space * 0.9f;
+		float endY = above ? lastTop - space * 0.9f : lastBottom + space * 0.9f;
+		// Do not let a wide phrase turn the slur into a straight diagonal.
+		endY = std::clamp(endY, startY - space * 2.0f, startY + space * 2.0f);
+
+		// Keep the arc inside the page; flip it only when it would be clipped.
+		if (above && std::min(startY, endY) - arch < pageTop + space)
+		{
+			above = false;
+			startY = firstBottom + space * 0.9f;
+			endY = lastBottom + space * 0.9f;
+		}
+		else if (!above && std::max(startY, endY) + arch > pageBottom - space)
+		{
+			above = true;
+			startY = firstTop - space * 0.9f;
+			endY = lastTop - space * 0.9f;
+		}
+
+		const float direction = above ? -arch : arch;
+		draw->AddBezierCubic(
+			ImVec2(startX, startY),
+			ImVec2(startX + span * 0.25f, startY + direction),
+			ImVec2(endX - span * 0.25f, endY + direction),
+			ImVec2(endX, endY), ink, std::max(1.0f, space * 0.10f));
+	}
+
+	// Each bracket spans exactly the three notes detected above, and sits clear of the beam.
+	for (const TupletSpan& tuplet : tuplets)
+	{
+		const size_t members[3] = { tuplet.first, tuplet.second, tuplet.third };
+		float topY = FLT_MAX;
+		float bottomY = -FLT_MAX;
+		for (size_t onsetIndex : members)
+		{
+			for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+			{
+				topY = std::min(topY, glyphs[glyphIndex].y);
+				bottomY = std::max(bottomY, glyphs[glyphIndex].y);
+			}
+
+			const int beamIndex = onsetBeam[onsetIndex];
+			if (beamIndex < 0)
+				continue;
+			const BeamSpan& beam = beams[beamIndex];
+			const float beamY = beam.beamStartY + beam.slope * (onsets[onsetIndex].x - beam.firstX);
+			if (beam.stemUp)
+				topY = std::min(topY, beamY);
+			else
+				bottomY = std::max(bottomY, beamY + space * 0.20f);
+		}
+
+		// Brackets stay outside their own staff: above the treble, below the bass. The other
+		// staff's ledger lines and notes are then never crossed.
+		bool above = tuplet.treble;
+		float y = above ? topY - space * 2.4f : bottomY + space * 2.4f;
+		if (above && y < pageTop + space * 2.0f)
+		{
+			above = false;
+			y = bottomY + space * 2.4f;
+		}
+		else if (!above && y > pageBottom - space * 2.0f)
+		{
+			above = true;
+			y = topY - space * 2.4f;
+		}
+
+		const Onset& first = onsets[tuplet.first];
+		const Onset& last = onsets[tuplet.third];
+		const float leftX = first.x - headRX * 0.9f;
+		const float rightX = last.x + headRX * 0.9f;
+		const float center = (leftX + rightX) * 0.5f;
+		const float numberWidth = space * 1.15f;
+		const float numberHeight = space * 1.45f;
+		const float gapLeft = center - numberWidth * 0.6f;
+		const float gapRight = center + numberWidth * 0.6f;
+		const float hook = above ? space * 0.55f : -space * 0.55f;
+
+		draw->AddLine(ImVec2(leftX, y), ImVec2(gapLeft, y), ink, std::max(1.0f, space * 0.08f));
+		draw->AddLine(ImVec2(gapRight, y), ImVec2(rightX, y), ink, std::max(1.0f, space * 0.08f));
+		draw->AddLine(ImVec2(leftX, y), ImVec2(leftX, y + hook), ink, std::max(1.0f, space * 0.08f));
+		draw->AddLine(ImVec2(rightX, y), ImVec2(rightX, y + hook), ink, std::max(1.0f, space * 0.08f));
+		DrawGlyphAnchored(sheetTime[3].get(), center - numberWidth * 0.5f, y - numberHeight * 0.5f,
+			numberHeight, glyphTint);
 	}
 
 	// Unbeamed onsets share one stem and one flag, including chords. Drawing a stem per
@@ -508,39 +1059,38 @@ void ScoreOverlay::Render()
 			topY = std::min(topY, glyph.y);
 			bottomY = std::max(bottomY, glyph.y);
 			ySum += glyph.y;
-			if (glyph.gate < (uint32_t)quarterTicks * 4)
+			if (glyph.value < (uint32_t)quarterTicks * 4)
 				anyStemmed = true;
 		}
 		if (!anyStemmed)
 			continue;
 
-		const float averageY = ySum / (float)onset.glyphs.size();
-		const bool stemUp = averageY > (onset.treble ? trebleCenter : bassCenter);
+		const bool stemUp = onsetStemUp(onset, onset.treble ? trebleCenter : bassCenter);
 		const float stemX = onset.x + (stemUp ? headRX : -headRX);
 		const float attachY = stemUp ? topY : bottomY;
 		const float stemTip = attachY + (stemUp ? -space * 3.0f : space * 3.0f);
 		draw->AddLine(ImVec2(stemX, attachY), ImVec2(stemX, stemTip), ink, stemWidth);
 
-		if (onset.minGate < (uint32_t)quarterTicks)
+		const int flags = beamLevel(onset.value);
+		if (flags > 0)
 		{
-			const int flags = onset.minGate < (uint32_t)(quarterTicks / 2) ? 2 : 1;
-			const float flagHeight = space * 2.0f;
-			for (int flag = 0; flag < flags; ++flag)
-			{
-				const float offset = (float)flag * space * 0.42f;
-				if (stemUp)
-					DrawGlyphAnchored(flagUp.get(), stemX, stemTip + offset, flagHeight, glyphTint);
-				else
-					DrawGlyphAnchored(flagDown.get(), stemX, stemTip - flagHeight - offset, flagHeight, glyphTint);
-			}
+			GPUImage* flag = flags >= 4 ? (stemUp ? flagUp64.get() : flagDown64.get())
+				: flags == 3 ? (stemUp ? flagUp32.get() : flagDown32.get())
+				: flags == 2 ? (stemUp ? flagUp16.get() : flagDown16.get())
+				: (stemUp ? flagUp.get() : flagDown.get());
+			const float flagHeight = space * (flags >= 4 ? 4.64f : flags == 3 ? 3.85f : 3.28f);
+			if (stemUp)
+				DrawGlyphAnchored(flag, stemX, stemTip, flagHeight, glyphTint);
+			else
+				DrawGlyphAnchored(flag, stemX, stemTip - flagHeight, flagHeight, glyphTint);
 		}
 	}
 
 	for (size_t i = 0; i < glyphs.size(); ++i)
 	{
 		const NoteGlyph& glyph = glyphs[i];
-		const bool openHead = glyph.gate >= (uint32_t)quarterTicks * 2;
-		const bool wholeHead = glyph.gate >= (uint32_t)quarterTicks * 4;
+		const bool openHead = glyph.value >= (uint32_t)quarterTicks * 2;
+		const bool wholeHead = glyph.value >= (uint32_t)quarterTicks * 4;
 		const ImVec2 center(glyph.x, glyph.y);
 
 		const int trebleBase = 4 * 7 + 2;
@@ -578,7 +1128,7 @@ void ScoreOverlay::Render()
 		const bool altered = sharpNote && !inKey[pitchClass];
 		if (altered || naturalSign)
 		{
-			const float accidentalHeight = space * 2.2f;
+			const float accidentalHeight = space * 2.9f;
 			GPUImage* accidental = naturalSign ? sheetNatural.get() : (flatKey ? sheetFlat.get() : sheetSharp.get());
 			const float accidentalWidth = accidental && accidental->height > 0
 				? accidentalHeight * (float)accidental->width / (float)accidental->height
@@ -587,13 +1137,25 @@ void ScoreOverlay::Render()
 				accidentalHeight, glyphTint);
 		}
 
-		const float noteheadHeight = space * 0.92f;
+		const float noteheadHeight = space * 1.0f;
 		GPUImage* notehead = wholeHead ? noteWhole.get() : (openHead ? noteHalf.get() : noteBlack.get());
 		DrawGlyph(notehead, glyph.x, glyph.y, noteheadHeight, glyphTint);
 
+		// A dot lengthens a note by half. Use the notated rhythm (inter-onset spacing), so a
+		// held eighth does not turn into a dotted note just because its gate is long.
+		const long dottedTolerance = std::max(2L, quarterTicks / 16);
+		const bool dotted = std::abs((long)glyph.gate - quarterTicks * 3 / 2) <= dottedTolerance
+			|| std::abs((long)glyph.gate - quarterTicks * 3 / 4) <= dottedTolerance;
+		if (dotted)
+		{
+			const float dotY = glyph.y + (diatonicStep % 2 == 0 ? space * 0.5f : 0.0f);
+			draw->AddCircleFilled(ImVec2(glyph.x + headRX + space * 0.62f, dotY),
+				std::max(1.5f, space * 0.14f), ink, 12);
+		}
+
 		// The reference marks sounding notes with a red dot at the cursor.
 		if (glyph.active)
-			draw->AddEllipseFilled(center, ImVec2(space * 0.17f, space * 0.17f), activeInk, 0.0f, 12);
+			draw->AddEllipseFilled(center, ImVec2(space * 0.33f, space * 0.33f), activeInk, 0.0f, 12);
 	}
 
 	draw->PopClipRect();

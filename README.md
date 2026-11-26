@@ -8,11 +8,11 @@
 
 ## Current release
 
-**v1.11.18b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.18b)
+**v1.11.19b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.19b)
 
 | Asset | Use it for |
 | --- | --- |
-| `Comet-Systematics-MOD-windows-x64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
+| `Comet-Systematics-MOD-v1.11.19b-win64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
 | `Comet-Release.exe` | Normal use and large MIDI files if you already have a Comet folder. |
 | `Comet-Debug.exe` | Debugging and diagnostics. It is much slower on large files. |
 
