@@ -80,7 +80,7 @@ The Ziggy comparison is a parse-vs-load comparison on the 100M file. On an 8,000
 
 - **MIDI tab → Remember settings per file:** stores the active renderer's options, key range, and audio settings for the exact file path. Off by default; copying or moving a file starts a fresh preset.
 - **Mod tab → note multiplier:** purely cosmetic. It changes the counter and optionally the graph, never the actual notes, rendering, or audio.
-- **Visual → Banner → Opening animation / Artwork:** choose an instant, fade, center-reveal, or slide-down entrance, set its length, and add a PNG, JPEG, BMP, TGA, or GIF with left/center/right placement, scale, and X/Y offset. The UMP and Synthesia banners share these settings.
+- **Visual → Counter → Opening banner:** choose an instant, fade, center-reveal, or slide-down entrance, set its length, and add a PNG, JPEG, BMP, TGA, or GIF with left/center/right placement, scale, and X/Y offset. The UMP and Synthesia banners share these settings.
 - **Visual → MIDITrail → Aura size:** the value is the visual scale; stacked notes add a small logarithmic boost rather than drawing one aura per note.
 - **Audio → Audio engine:** choose Prerendered (renders the song ahead of playback) or Maestro (synthesises its notes live).
 
