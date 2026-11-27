@@ -2,7 +2,6 @@
 #include "App/MainWindow.h"
 #include "Telemetry/CometLog.h"
 #include "Telemetry/CrashReporter.h"
-#include "MIDI/Audio/MIDIOut.h"
 #include "UpdateBuilder.h"
 #include <cstring>
 #include <cstdlib>
@@ -44,15 +43,6 @@ int main(int argc, char** argv)
 		if (ec) std::cerr << "Failed to set working directory: " << ec.message() << std::endl;
 	}
 
-	// After a crash Comet relaunches itself with this flag to upload the queued report. That
-	// helper must not open a window, load a config or install crash handlers of its own.
-#ifdef _WIN32
-	// The isolated OmniMIDI helper is this same executable without a window, GL context or config.
-	if (HasArgument(argc, argv, "--midi-host"))
-		return MIDIOut::RunHostMode();
-#endif
-
-	const bool senderMode = HasArgument(argc, argv, "--send-crash-reports");
 	if (HasArgument(argc, argv, "--safe-mode"))
 	{
 #if defined(_WIN32)
@@ -72,22 +62,19 @@ int main(int argc, char** argv)
 		break;
 	}
 
-	if (!senderMode)
-	{
-		// An update installed earlier left the previous exe behind; this is the first moment it is
-		// no longer running.
-		UpdateBuilder::RemoveStaleInstall();
+	// An update installed earlier left the previous exe behind; this is the first moment it is
+	// no longer running.
+	UpdateBuilder::RemoveStaleInstall();
 
-		CrashReporter::Install();
+	CrashReporter::Install();
 
 #ifdef _DEBUG
-		const char* buildType = "Debug";
+	const char* buildType = "Debug";
 #else
-		const char* buildType = "Release";
+	const char* buildType = "Release";
 #endif
 
-		CrashReporter::SetAppInfo(COMET_VERSION, buildType, COMET_BUILD_CONFIG);
-	}
+	CrashReporter::SetAppInfo(COMET_VERSION, buildType, COMET_BUILD_CONFIG);
 
 	CURLcode curlResult = curl_global_init(CURL_GLOBAL_DEFAULT);
 	if (curlResult != CURLE_OK)
@@ -97,14 +84,6 @@ int main(int argc, char** argv)
 
 		CometLog::Uninstall();
 		return 1;
-	}
-
-	if (senderMode)
-	{
-		const int code = CrashReporter::RunSenderMode();
-		curl_global_cleanup();
-		CometLog::Uninstall();
-		return code;
 	}
 
 	curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
@@ -125,11 +104,8 @@ int main(int argc, char** argv)
 
 	MainWindow mainWindow((std::string("Comet v")+cometVersion+versionSuffix).c_str());
 
-	// Retry anything a previous run couldn't deliver.
-	CrashReporter::FlushPendingInBackground();
-
 	if (!startupMIDI.empty())
-		mainWindow.LoadMIDIFile(startupMIDI, std::string(), false);
+		mainWindow.LoadMIDIFile(startupMIDI, std::string());
 
 	mainWindow.Run();
 

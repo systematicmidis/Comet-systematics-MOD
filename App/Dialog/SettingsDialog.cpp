@@ -208,28 +208,6 @@ void SettingsDialog::DrawAppTab()
 			{
 			case General:
 			{
-				SECTION_HEADER(TRANSLATE("dialog.settings.app.general.language").c_str());
-
-				BEGIN_SECTION("##languageSec")
-				{
-					SETUP_SECTION;
-					SECTION_ENTRY(
-						SECTION_LABEL(TRANSLATE("dialog.settings.app.general.language").c_str()),
-						{
-							auto* current = localization->GetCurrentLanguage();
-							if (ImGui::BeginCombo("##languageCombo", current ? current->label.c_str() : ""))
-							{
-								for (const auto& lang : localization->GetLanguageList())
-								{
-									if (ImGui::Selectable(lang.label.c_str(), current && lang.id == current->id))
-										app->SetLanguage(lang.id);
-								}
-								ImGui::EndCombo();
-							}
-						});
-				}
-				END_SECTION;
-
 				SECTION_HEADER("Rendering");
 
 				BEGIN_SECTION("##renderSec")
@@ -399,9 +377,8 @@ void SettingsDialog::ApplyCrashConfiguration(bool saveNow)
 {
 	app->UpdateCrashContext();
 
-	// Crash-report settings are saved immediately: if Comet dies, the usual save on exit never
-	// happens, and the helper that uploads the report reads the on/off switch back out of
-	// config.yml.
+	// Crash-log settings are saved immediately: if Comet dies, the usual save on exit never
+	// happens, so the switch must already be on disk.
 	if (saveNow)
 		app->GetConfig()->SaveConfig();
 }
@@ -410,141 +387,62 @@ void SettingsDialog::DrawCrashReportsTab()
 {
 	auto config = app->GetConfig();
 
-	SECTION_HEADER("Crash reports");
-
-	const std::string webhook = CrashReporter::WebhookUrl();
-	const bool hasWebhook = !webhook.empty();
+	SECTION_HEADER("Crash logs");
 
 	ImGui::TextWrapped(
-		"When Comet crashes it can send a report so the failure can be looked at without having to "
-		"reproduce it. Reporting is off until you turn it on.");
-
-	if (!hasWebhook)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-			"No crash endpoint is configured in this build; reports will stay in the queue folder.");
-	}
+		"When Comet crashes it can write a .log file with the exception, call stack and recent "
+		"console output. Nothing is uploaded: send the file in the Systematics Discord when you "
+		"report the crash. Logging is off until you turn it on.");
 
 	ImGui::Spacing();
 
 	bool enabled = config->crashReports.enabled;
-	if (ImGui::Checkbox("Send a crash report when Comet crashes", &enabled))
+	if (ImGui::Checkbox("Write a crash log when Comet crashes", &enabled))
 	{
 		config->crashReports.enabled = enabled;
 		ApplyCrashConfiguration(true);
 	}
 
-	ImGui::SetItemTooltip(
-		"Reports go only to the endpoint configured at build time or through COMET_CRASH_WEBHOOK. "
-		"Nothing is uploaded while this is off.");
+	ImGui::SetItemTooltip("The log is written to the folder below. Nothing is captured while this is off.");
 
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	// The destination is intentionally not editable here. Configure it with the
-	// COMET_CRASH_WEBHOOK build setting or the environment variable of the same name.
-	ImGui::BeginDisabled(crashTest->inFlight.load() || !hasWebhook);
-	if (ImGui::Button("Send test report"))
+	if (ImGui::Button("Write test log"))
 	{
-		const auto state = crashTest;
-		state->inFlight.store(true);
-		state->succeeded.store(false);
-
-		// Off the UI thread: an unreachable webhook would otherwise freeze the window for the
-		// whole connect timeout.
-		std::thread([state, webhook]()
-		{
-			const std::string report = CrashReporter::BuildReport(CrashReporter::KIND_TEST,
-				"Test report sent from the Settings dialog.");
-
-			std::string error;
-			const bool ok = CrashReporter::SendOrQueue(report, webhook, &error);
-
-			{
-				std::lock_guard<std::mutex> lock(state->mutex);
-				state->message = ok ? std::string("Sent. Check your Discord channel.") : error;
-			}
-
-			state->succeeded.store(ok);
-			state->inFlight.store(false);
-		}).detach();
-	}
-	ImGui::EndDisabled();
-
-	if (!hasWebhook)
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("Upload disabled");
+		const std::string path = CrashReporter::WriteLog(CrashReporter::KIND_TEST,
+			"Test log written from the Settings dialog.");
+		crashLogMessage = path.empty()
+			? "Could not write a log file. Check that the folder is writable."
+			: "Wrote " + path;
 	}
 
 	ImGui::SameLine();
-	if (ImGui::Button("Copy report to clipboard"))
-	{
-		const std::string report = CrashReporter::BuildReport(CrashReporter::KIND_TEST,
-			"Copied from the Settings dialog; this report was not sent anywhere.");
-		ImGui::SetClipboardText(report.c_str());
-	}
-
-	if (crashTest->inFlight.load())
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("sending...");
-	}
-	else
-	{
-		std::lock_guard<std::mutex> lock(crashTest->mutex);
-		if (!crashTest->message.empty())
-		{
-			if (crashTest->succeeded.load())
-				ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "%s", crashTest->message.c_str());
-			else
-				ImGui::TextWrapped("Could not send: %s", crashTest->message.c_str());
-		}
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	SECTION_HEADER("Queued reports");
-
-	const int pending = CrashReporter::CountPending();
-	ImGui::Text("Waiting to be sent: %d", pending);
-	ImGui::TextWrapped("Folder: %s", CrashReporter::ReportDirectory().c_str());
-
-	if (ImGui::Button("Open folder"))
-		Utils::OpenFolder(CrashReporter::ReportDirectory());
+	if (ImGui::Button("Open log folder"))
+		Utils::OpenFolder(CrashReporter::LogDirectory());
 
 	ImGui::SameLine();
-	ImGui::BeginDisabled(pending == 0);
-	if (ImGui::Button("Delete queued reports"))
-		CrashReporter::DeletePending();
-	ImGui::EndDisabled();
+	if (ImGui::Button("Copy folder path"))
+		ImGui::SetClipboardText(CrashReporter::LogDirectory().c_str());
 
-	ImGui::TextDisabled(
-		"A crash is captured by a fresh helper process, not by Comet itself, so a crash inside the "
-		"network stack can still be reported. Anything the helper can't deliver waits here and is "
-		"retried on the next launch.");
+	if (!crashLogMessage.empty())
+		ImGui::TextWrapped("%s", crashLogMessage.c_str());
 
 	ImGui::Spacing();
+	ImGui::TextWrapped("Folder: %s", CrashReporter::LogDirectory().c_str());
 
-	if (ImGui::CollapsingHeader("What exactly gets sent?"))
+	ImGui::Spacing();
+	if (ImGui::CollapsingHeader("What is in the log?"))
 	{
 		ImGui::BulletText("Comet version, build type and compiler");
-		ImGui::BulletText("Windows version, architecture, CPU, RAM, locale and timezone");
+		ImGui::BulletText("Windows version, architecture, CPU, memory, locale and timezone");
 		ImGui::BulletText("GPU vendor, renderer and OpenGL version");
 		ImGui::BulletText("Exception code, faulting module and address");
 		ImGui::BulletText("A symbolised call stack, with file and line where a .pdb is available");
 		ImGui::BulletText("The loaded MIDI's path, note count, track count and length");
 		ImGui::BulletText("Playback and render state, plus a snapshot of the settings");
 		ImGui::BulletText("The last %d lines Comet printed to the console", (int)CometLog::MAX_LINES);
-		ImGui::BulletText("The webhook URL is stripped out before anything is uploaded");
-
-		ImGui::Spacing();
-		ImGui::TextWrapped(
-			"Use \"Copy report to clipboard\" above to see the exact JSON that would be sent, without "
-			"sending it.");
 	}
 }
 
@@ -629,6 +527,14 @@ void SettingsDialog::DrawVisualTab()
 					SECTION_ENTRY(SECTION_LABEL(localization->Get("renderer.synthesia.sheet", "Sheet music").c_str()),
 						{
 							ImGui::Checkbox("##showScore", &config->render.showScore);
+						});
+
+					// Height of the score page as a share of the window. The notation is engraved
+					// from this height, so the slider also controls how large the staff is.
+					SECTION_ENTRY(SECTION_LABEL(localization->Get("renderer.synthesia.sheetSize", "Sheet music size").c_str()),
+						{
+							ImGui::SetNextItemWidth(-1.0f);
+							ImGui::SliderInt("##scoreScale", &config->render.scoreScale, 15, 100, "%d%% of screen");
 						});
 					END_SECTION;
 				}
@@ -1227,9 +1133,9 @@ void SettingsDialog::DrawAudioTab()
 
 		SECTION_ENTRY(
 			TABLE_LABEL_TOOLTIP(
-				"MIDI out",
-				"Where the song is played. Realtime sends notes to OmniMIDI (v2 or newer), Prerendered "
-				"and Maestro synthesise them inside Comet."
+				"Audio engine",
+				"Prerendered renders the song ahead of playback; Maestro synthesises its notes live "
+				"inside Comet."
 			),
 			{
 				AudioEngineList& engineList = midiAudio->GetEngineList();
@@ -1303,6 +1209,15 @@ void SettingsDialog::DrawMIDITab()
 		SECTION_ENTRY(
 			SECTION_LABEL("Time-based loading"),
 			{ ImGui::Checkbox("##timebasedLoading", &config->midi.timeBasedLoading); }
+		);
+
+		SECTION_ENTRY(
+			TABLE_LABEL_TOOLTIP(
+				"Deduplicate layers and tracks",
+				"Repeated layers and repeated tracks are decoded once while every represented note is "
+				"still loaded, so the song is unchanged and large layered files open faster."
+			),
+			{ ImGui::Checkbox("##deduplicateLayers", &config->midi.deduplicateLayers); }
 		);
 
 		SECTION_ENTRY(
@@ -1405,44 +1320,6 @@ void SettingsDialog::DrawModTab()
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		ImGui::Spacing();
-
-		SECTION_HEADER("Layered DeDupe");
-		ImGui::TextWrapped(
-			"Files that store the same layer or track more than once - repeated layers, or a layer "
-			"copied verbatim into the file - are read once. Every note is still loaded; only the "
-			"repeated decoding is skipped, so the song itself is unchanged."
-		);
-		ImGui::Spacing();
-
-		ImGui::Checkbox(
-			"Deduplicate repeated tracks (also in layered compressed files: repeats read once)",
-			&config->layeredDedupe.deduplicateRepeatedTracks
-		);
-
-		ImGui::Indent(24.0f);
-		ImGui::BeginDisabled(!config->layeredDedupe.deduplicateRepeatedTracks);
-		ImGui::Checkbox(
-			"Assume the rest of a layer repeats when its size fits (fast; exact unless sizes collide)",
-			&config->layeredDedupe.assumeLayerRepeats
-		);
-
-		ImGui::Checkbox(
-			"Risky fast dedup: stop decoding a layer once its first tile repeats",
-			&config->layeredDedupe.riskyFastDedupe
-		);
-		ImGui::SetItemTooltip(
-			"A tile is one archive member repeated back to back, or a run of up to 64 members "
-			"repeated as a whole. When the rest of the layer is an exact multiple of the tile's "
-			"size it is assumed to be that tile, so the bytes are never decoded. Off at every start "
-			"and never saved: silently wrong on layers made of different tiles that happen to fit."
-		);
-		ImGui::EndDisabled();
-		ImGui::Unindent(24.0f);
-
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::Spacing();
 		ImGui::Spacing();
 
 		BEGIN_SECTION("##multiplierSettings")

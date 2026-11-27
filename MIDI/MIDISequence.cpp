@@ -24,7 +24,7 @@ void MIDISequence::StartMergedNotesPreparation()
 		return;
 
 	mergeProgress.store(0.02f, std::memory_order_relaxed);
-	std::cout << "Building per-key render store for the selected renderer..." << std::endl;
+	std::cout << "Processing visuals for the selected renderer..." << std::endl;
 
 	try
 	{

@@ -48,7 +48,7 @@ public:
 	// path passed on the command line. The overload with an entry name is used by the archive
 	// picker when the container holds more than one MIDI.
 	void LoadMIDIFile(const std::string& path);
-	void LoadMIDIFile(const std::string& path, const std::string& archiveEntry, bool preflight = true);
+	void LoadMIDIFile(const std::string& path, const std::string& archiveEntry);
 	GLFWwindow* GetInternalWindow() { return window; }
 
 	bool IsGLReady() const { return isGLReady; }

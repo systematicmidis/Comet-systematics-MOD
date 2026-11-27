@@ -123,7 +123,7 @@ void MainWindow::LoadMIDIFile(const std::string& path)
 	LoadMIDIFile(path, std::string());
 }
 
-void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiveEntry, bool preflight)
+void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiveEntry)
 {
 	if (path.empty() || !midiApp) return;
 
@@ -147,34 +147,6 @@ void MainWindow::LoadMIDIFile(const std::string& path, const std::string& archiv
 		else if (entries.size() == 1)
 		{
 			entry = entries.front().name;
-		}
-	}
-
-	// Preflight before a multi-hundred-megabyte load. This is deliberately a confirmation, not
-	// an automatic refusal: the packed loader can handle files that would exhaust other players.
-	std::error_code sizeError;
-	const uint64_t bytes = std::filesystem::file_size(path, sizeError);
-	constexpr uint64_t LARGE_FILE_BYTES = 512ull << 20;
-	if (preflight && !sizeError && bytes >= LARGE_FILE_BYTES)
-	{
-		std::ostringstream message;
-		message << "This file is " << (bytes / (1024.0 * 1024.0)) << " MB.\n\n"
-			<< "Large files use the packed track store. Your selected renderer builds its per-key data "
-			<< "in the background and may use several GB of RAM; MIDITrail can draw the packed file "
-			<< "immediately.\n\n"
-			<< "Continue loading?";
-
-		if (auto* messageDialog = dialogManager.GetDialog<MessageDialog>())
-		{
-			messageDialog->Open("Large MIDI file", message.str(), MessageDialog::ButtonType::YesNo,
-				[this, path, entry](MessageDialog::Result result)
-				{
-					if (result != MessageDialog::Result::Yes) return;
-					this->midiApp->LoadMIDI(path.c_str(), entry);
-					if (auto* loading = this->dialogManager.GetDialog<LoadingDialog>())
-						loading->Open();
-				});
-			return;
 		}
 	}
 
@@ -395,14 +367,6 @@ void MainWindow::Run()
 					if (messageDialog)
 						messageDialog->Open("Could not load MIDI", loadError);
 				}
-
-				std::string driverNotice;
-				if (midiApp->ConsumeNotice(driverNotice))
-				{
-					auto* messageDialog = dialogManager.GetDialog<MessageDialog>();
-					if (messageDialog)
-						messageDialog->Open("MIDI output unavailable", driverNotice);
-				}
 			}
 
 			RenderUI();
@@ -540,17 +504,17 @@ void MainWindow::RenderUI()
 {
 	if (CanShowNavigationBar()) menuBuilder.Draw();
 
-	// Converting a packed track store to per-key arrays runs on a worker. Keep the old renderer
-	// usable and show why note density may look different for a few moments.
-	if (midiApp && midiApp->IsPreparingPerKeyData())
+	// A renderer switch can convert a packed track store to per-key arrays on a worker. Keep the
+	// old renderer usable and show why note density may look different for a few moments.
+	if (midiApp && midiApp->IsProcessingVisuals() && !midiApp->IsFileVisualProcessing())
 	{
 		ImGui::SetNextWindowPos(ImVec2(18.0f, 18.0f), ImGuiCond_Always);
 		ImGui::SetNextWindowBgAlpha(0.88f);
 		ImGui::Begin("##per_key_preparation", nullptr,
 			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
 			ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-		ImGui::Text("Preparing per-key render data...");
-		ImGui::ProgressBar(midiApp->GetPerKeyPreparationProgress(), ImVec2(260.0f, 0.0f));
+		ImGui::Text("Processing Visuals...");
+		ImGui::ProgressBar(midiApp->GetVisualProcessingProgress(), ImVec2(260.0f, 0.0f));
 		ImGui::TextDisabled("The current renderer stays active until this finishes.");
 		ImGui::End();
 	}

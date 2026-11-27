@@ -8,22 +8,21 @@
 
 ## Current release
 
-**v1.11.19b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.19b)
+**v1.11.20b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.20b)
 
 | Asset | Use it for |
 | --- | --- |
-| `Comet-Systematics-MOD-v1.11.19b-win64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
+| `Comet-Systematics-MOD-v1.11.20b-win64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
 | `Comet-Release.exe` | Normal use and large MIDI files if you already have a Comet folder. |
 | `Comet-Debug.exe` | Debugging and diagnostics. It is much slower on large files. |
 
-The standalone EXEs are **not complete portable packages**. Keep them beside your existing Comet files: `assets/`, `config.yml`, `bass.dll`, `bassmidi.dll`, the Visual C++ runtime DLLs, and `OmniMIDI.dll` if you use MIDI out. Do not replace a whole Comet folder with only the EXE. The portable ZIP includes the required application files; extract it to a new folder.
+The standalone EXEs are **not complete portable packages**. Keep them beside your existing Comet files: `assets/`, `config.yml`, `bass.dll`, `bassmidi.dll`, and the Visual C++ runtime DLLs. Do not replace a whole Comet folder with only the EXE. The portable ZIP includes the required application files; extract it to a new folder.
 
 ## Requirements
 
 - 64-bit Windows (the published builds are x64).
 - An OpenGL-capable graphics card.
 - The Visual C++ runtime files that ship with Comet.
-- **OmniMIDI v2 or newer** only for real-time MIDI output. Prerendered and Maestro audio can be used without it.
 - A soundfont for the internal synthesizers. The repository's `assets/soundfonts/` contains GeneralUser-GS by default.
 
 ## Quick start
@@ -44,18 +43,18 @@ This table compares this MOD with the upstream [MrCHB1/Comet](https://github.com
 
 | Area | Normal Comet (upstream) | Comet Systematics MOD |
 | --- | --- | --- |
-| **Interface and playback** | English UI at a fixed tempo. | 17 interface languages from the upstream beta, selectable in **Settings → App → General**, with system-font fallbacks for non-Latin scripts. The navigation bar adds a **0.25x–3.00x playback speed** slider that also drives the audio engines and is saved with the configuration. **Visual → Renderer → Key range** offers 88, 128 and 256-key display ranges. |
+| **Interface** | English UI at a fixed tempo. | **Visual → Renderer → Key range** offers 88, 128 and 256-key display ranges. |
 | **Startup compatibility** | Requires an OpenGL 4.3 context. | Tries OpenGL 4.3, 4.2, 4.1, 4.0 and then 3.3, so the app also opens on older integrated GPUs. |
-| **Very large MIDI loading** | Builds the per-key render store while loading. Large files can be slow and memory-heavy. | Files above roughly 4 million unique notes use a packed per-track store. MIDITrail and audio walk that store directly; legacy per-key data is built lazily on a background worker only when another renderer needs it. A confirmation appears before files of 512 MB or more are opened from the UI. |
+| **Very large MIDI loading** | Builds the per-key render store while loading. Large files can be slow and memory-heavy. | Files above roughly 4 million unique notes use a packed per-track store. MIDITrail and audio walk that store directly; legacy per-key data is built lazily on a background worker only when another renderer needs it. |
 | **Note totals** | Large files can be limited by the loader's storage and count path. | Keeps the complete non-deduplicated note count, including repeated tracks and repeated note-ons. Tested with a 100,000,000-note file and a 35-trillion-note archive. |
 | **Compressed files and archives** | Plain MIDI files are the normal input path. | Nested archive support, streaming `.xz` chains, repeated-cycle proof, and a picker when an archive contains more than one named MIDI. |
-| **Repeated layers/tracks** | No Mod-tab dedupe controls. | **Layered DeDupe** can detect repeated tracks and layered archive repeats, while still counting every represented note. Optional fast modes trade certainty for speed. |
+| **Repeated layers/tracks** | No dedupe controls. | **MIDI → Deduplicate layers and tracks** reads repeated tracks and layered archive repeats once, while still counting every represented note. |
 | **Note counter** | Shows the loaded note values and rates. | Adds a display-only **note multiplier**, a target-count solver, melody-note protection, per-track exclusions, NPS/polyphony thresholds, and an optional multiplied graph. |
 | **MIDITrail auras** | Basic held-note aura sizing. | Auras follow the configured `auraSize` instead of being multiplied to twice the requested size. Repeated/stacked notes increase the aura weight; compressed archives carry the same stack weight as their raw equivalent. |
-| **MIDI output** | KDMAPI/OmniMIDI path. | Targets OmniMIDI v2+ and runs the DLL in a small isolated helper process, so a driver fault stops the helper instead of Comet. The old guarded in-process path remains available with `COMET_MIDI_ISOLATION=0`. |
+| **Audio** | KDMAPI/OmniMIDI path. | Prerendered and Maestro synthesise the song inside Comet; the OmniMIDI path is not included. |
 | **Updates** | Checks the official project release. | **Help → Check for Updates** can check either the official `MrCHB1/Comet` branch or this MOD's branch, with a source-build update path. |
 | **Diagnostics** | Console-oriented error reporting. | Adds crash reporting and diagnostic logging so driver/load failures can be investigated after the app closes. |
-| **MIDI tab / Mod tab** | Standard settings tabs. | Adds a **Mod** tab for dedupe and note-farming display controls, plus optional per-file presets for renderer options, key range, and audio settings. |
+| **MIDI tab / Mod tab** | Standard settings tabs. | Adds a **Mod** tab for note-farming display controls, plus optional per-file presets for renderer options, key range, and audio settings. Dedupe lives in the **MIDI** tab. |
 
 ## Large MIDI and archive notes
 
@@ -81,16 +80,14 @@ The Ziggy comparison is a parse-vs-load comparison on the 100M file. On an 8,000
 
 - **MIDI tab → Remember settings per file:** stores the active renderer's options, key range, and audio settings for the exact file path. Off by default; copying or moving a file starts a fresh preset.
 - **Mod tab → note multiplier:** purely cosmetic. It changes the counter and optionally the graph, never the actual notes, rendering, or audio.
-- **Mod tab → Layered DeDupe:** skips decoding repeated tracks/layers while preserving the represented note count.
 - **Visual → MIDITrail → Aura size:** the value is the visual scale; stacked notes add a small logarithmic boost rather than drawing one aura per note.
-- **Audio → MIDI out:** choose OmniMIDI for real-time MIDI out, or an internal Prerendered/Maestro mode. OmniMIDI is hosted in a separate `Comet.exe --midi-host` process by default; set `COMET_MIDI_ISOLATION=0` only when troubleshooting the old in-process path.
+- **Audio → Audio engine:** choose Prerendered (renders the song ahead of playback) or Maestro (synthesises its notes live).
 
-## Crash reports and private configuration
+## Crash logs and private configuration
 
-- Crash reporting is **off by default**. When enabled, reports are queued under the user's local app data and uploaded to the endpoint configured for the build.
-- The endpoint is a deployment secret, not a source constant. Set `COMET_CRASH_WEBHOOK` with `-D` at configure time or in the environment at runtime. A build without it still captures reports locally but disables the **Send test report** button and leaves queued reports on disk.
-- Never commit a webhook URL, token, or `.env` file containing one. Treat a leaked endpoint as compromised and rotate it in the service that owns it.
-- `config.yml` contains no crash endpoint, so it cannot redirect reports.
+- Crash logging is **off by default**. When enabled, a crash writes a plain-text `.log` file to the `logs` folder beside the executable.
+- The file contains the exception, a symbolised call stack, system and GPU details, the loaded MIDI, the settings snapshot and the last console lines. Nothing is uploaded.
+- Send that `.log` file in the Systematics Discord when reporting the crash. **Settings → App → Crash Reports** has a test button and opens the folder.
 
 ## Portable package
 
@@ -118,12 +115,10 @@ The archive regression test builds its own synthetic archives, including a many-
 
 ## Troubleshooting
 
-- **OmniMIDI warning:** install OmniMIDI v2 or newer, or switch the MIDI output mode to an internal renderer. If the isolated helper stops, playback continues silently; restart or set `COMET_MIDI_ISOLATION=0` to compare with the legacy path.
 - **A huge file is slow in a non-MIDITrail renderer:** switch to MIDITrail or wait for the lazy per-key build to finish.
-- **App does not start:** verify that `assets/` and the Visual C++ runtime DLLs are beside the executable, and check the diagnostic log/crash report.
+- **App does not start:** verify that `assets/` and the Visual C++ runtime DLLs are beside the executable, and check the diagnostic log or the crash log.
 - **Archive load fails:** try extracting the MIDI first. Nested or malformed archives can fall back to a full decode or be rejected.
 - **Settings look wrong after a crash:** edit or restore `config.yml`, or start once with `--safe-mode`; the **Apply & Close** button writes settings immediately. The previous good file is `config.yml.bak`.
-- **Crash test button is disabled:** this build has no `COMET_CRASH_WEBHOOK` configured, or the environment variable is empty. Reports are still written locally.
 
 ## Credits and license
 

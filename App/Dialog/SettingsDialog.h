@@ -41,15 +41,6 @@ private:
 	char multiplierTargetInput[512] = "";
 	bool multiplierTargetActive = false;
 
-	// The test send runs on a worker so an unreachable webhook can't stall the frame. Shared
-	// ownership keeps its state alive even if the reply lands after the dialog is gone.
-	struct CrashTestState
-	{
-		std::atomic_bool inFlight{ false };
-		std::atomic_bool succeeded{ false };
-		std::mutex mutex;
-		std::string message;
-	};
-	std::shared_ptr<CrashTestState> crashTest = std::make_shared<CrashTestState>();
+	std::string crashLogMessage;
 
 };

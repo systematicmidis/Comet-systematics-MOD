@@ -176,7 +176,11 @@ void ScoreOverlay::Render()
 			pageTop = std::max(0.0f, navigationBar->GetPosition().y + navigationBar->GetResolution().y);
 	}
 	const float availableHeight = std::max(160.0f, uiHeight - pageTop);
-	const float pageHeight = availableHeight * 0.5f;
+	// The panel height is configurable (Settings > Visual > Renderer > Sheet music size).
+	// The notation is derived from it below, so a taller panel engraves a larger page
+	// instead of adding blank paper around a fixed-size staff.
+	const float scoreFraction = (float)std::clamp(config->render.scoreScale, 15, 100) / 100.0f;
+	const float pageHeight = availableHeight * scoreFraction;
 	const float pageBottom = pageTop + pageHeight;
 
 	// Plus2 draws one staff for treble-only MIDI and a grand staff for piano MIDI. Use the
@@ -188,9 +192,9 @@ void ScoreOverlay::Render()
 			hasBassNotes = true;
 	}
 
-	// Plus2's staff spacing is about 1.1% of the window height, and the grand staff leaves
-	// roughly six staff spaces between the treble and bass staves.
-	const float space = std::clamp(uiHeight * 0.0110f, 4.0f, 24.0f);
+	// Plus2's staff spacing is about 1.1% of the window height at the default half-screen
+	// panel, and the grand staff leaves roughly six staff spaces between its two staves.
+	const float space = std::clamp(pageHeight * 0.0220f, 3.0f, 30.0f);
 	const float staffGap = space * 5.9f;
 	// Even a treble-only score keeps the treble staff where it sits in a grand staff, so the
 	// page position matches Plus2's single-staff view.
@@ -556,6 +560,17 @@ void ScoreOverlay::Render()
 			return y;
 		};
 
+	// The end of the stem opposite its tip. A chord is engraved with one stem that runs
+	// through every notehead, so the line starts at this note and extends past the outer
+	// one. Attaching it to the outer note instead left the other chord tones floating.
+	auto onsetAnchorY = [&](size_t onsetIndex, bool stemUp)
+		{
+			float y = stemUp ? -FLT_MAX : FLT_MAX;
+			for (size_t glyphIndex : onsets[onsetIndex].glyphs)
+				y = stemUp ? std::max(y, glyphs[glyphIndex].y) : std::min(y, glyphs[glyphIndex].y);
+			return y;
+		};
+
 	// Tuplets are inferred from timing before anything is beamed. MIDI has no tuplet flag,
 	// so three equal-spaced notes whose combined span equals two normal notes are read as a
 	// triplet. A triplet is written with the value it replaces (an eighth triplet takes one
@@ -680,7 +695,7 @@ void ScoreOverlay::Render()
 			const float slope = std::clamp((lastOuter - firstOuter) / dx, -0.12f, 0.12f);
 			span.firstX = onsets[firstIndex].x;
 			span.slope = slope;
-			span.beamStartY = span.stemUp ? firstOuter - space * 3.0f : firstOuter + space * 3.0f;
+			span.beamStartY = span.stemUp ? firstOuter - space * 3.3f : firstOuter + space * 3.3f;
 			span.beamEndY = span.beamStartY + slope * dx;
 
 			int beamCount = 1;
@@ -759,16 +774,18 @@ void ScoreOverlay::Render()
 		for (size_t onsetIndex : beam.members)
 		{
 			const Onset& onset = onsets[onsetIndex];
-			const float attachY = onsetOuterY(onsetIndex, beam.stemUp);
+			const float attachY = onsetAnchorY(onsetIndex, beam.stemUp);
 			const float stemX = onset.x + (beam.stemUp ? headRX : -headRX);
 			draw->AddLine(ImVec2(stemX, attachY), ImVec2(stemX, beamYAt(stemX)), ink, stemWidth);
 		}
 
-		const float beamThickness = std::max(1.0f, space * 0.20f);
-		const float beamGap = std::max(1.0f, space * 0.40f);
+		// Engraving thickness: half a staff space per beam, a quarter space between beams.
+		// The old thin bars with a wide gap read as separate lines instead of one beam.
+		const float beamThickness = std::max(1.5f, space * 0.5f);
+		const float beamStep = std::max(2.0f, space * 0.75f);
 		for (int line = 0; line < beam.beamCount; ++line)
 		{
-			const float offset = (float)line * beamGap;
+			const float offset = (float)line * beamStep;
 			auto drawBeamSegment = [&](float startX, float endX)
 				{
 					const float y0 = beamYAt(startX) + (beam.stemUp ? offset : -offset);
@@ -1067,8 +1084,10 @@ void ScoreOverlay::Render()
 
 		const bool stemUp = onsetStemUp(onset, onset.treble ? trebleCenter : bassCenter);
 		const float stemX = onset.x + (stemUp ? headRX : -headRX);
-		const float attachY = stemUp ? topY : bottomY;
-		const float stemTip = attachY + (stemUp ? -space * 3.0f : space * 3.0f);
+		// Run one stem through the whole chord: start at the note opposite the stem tip and
+		// finish past the outer notehead.
+		const float attachY = stemUp ? bottomY : topY;
+		const float stemTip = (stemUp ? topY : bottomY) + (stemUp ? -space * 3.25f : space * 3.25f);
 		draw->AddLine(ImVec2(stemX, attachY), ImVec2(stemX, stemTip), ink, stemWidth);
 
 		const int flags = beamLevel(onset.value);
@@ -1099,10 +1118,12 @@ void ScoreOverlay::Render()
 		const float staffBottom = glyph.treble ? trebleBottom : bassBottom;
 		const int diatonicStep = StaffStep((int)glyph.key, base, flatKey);
 
-		// Ledger lines only on line positions, never in the space next to the staff.
+		// Ledger lines only on line positions, never in the space next to the staff, and only
+		// between the staff and the note (a note in a space gets the line below it, not a
+		// stray one on its far side).
 		if (diatonicStep <= -2)
 		{
-			for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep - 1; step < 0; step += 2)
+			for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep + 1; step < 0; step += 2)
 			{
 				const float ledgerY = staffBottom - (float)step * space * 0.5f;
 				draw->AddLine(ImVec2(glyph.x - headRX * 1.6f, ledgerY), ImVec2(glyph.x + headRX * 1.6f, ledgerY),
@@ -1111,7 +1132,7 @@ void ScoreOverlay::Render()
 		}
 		else if (diatonicStep >= 10)
 		{
-			for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep + 1; step > 8; step -= 2)
+			for (int step = (diatonicStep % 2 == 0) ? diatonicStep : diatonicStep - 1; step > 8; step -= 2)
 			{
 				const float ledgerY = staffBottom - (float)step * space * 0.5f;
 				draw->AddLine(ImVec2(glyph.x - headRX * 1.6f, ledgerY), ImVec2(glyph.x + headRX * 1.6f, ledgerY),

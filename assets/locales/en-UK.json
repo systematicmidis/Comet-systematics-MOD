@@ -190,5 +190,6 @@
     "widget.file.browse": "Browse...",
     "general.open": "Open",
     "renderer.synthesia.sheet": "Sheet music",
+    "renderer.synthesia.sheetSize": "Sheet music size",
     "renderer.synthesia.keyOctaves": "Key octave labels"
 }

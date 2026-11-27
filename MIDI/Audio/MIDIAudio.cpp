@@ -1,5 +1,4 @@
 #include "MIDIAudio.h"
-#include "AudioThread.h"
 
 #define MAESTRO_INCLUDE
 #include "MaestroEngine.h"
@@ -12,8 +11,6 @@
 
 MIDIAudio::MIDIAudio()
 {
-	midiOut = std::make_shared<MIDIOut>();
-	audioEngines[AUDIO_ENGINE_INDEX(Realtime)] = std::make_unique<AudioThread>(midiOut);
 	audioEngines[AUDIO_ENGINE_INDEX(Prerendered)] = std::make_unique<PrerenderedEngine>();
 	audioEngines[AUDIO_ENGINE_INDEX(Maestro)] = std::make_unique<MaestroEngine>();
 }
@@ -74,7 +71,7 @@ void MIDIAudio::LoadSettings(const YAML::Node& node)
 		// A config written before the GPU engines were removed can still name one of them.
 		int saved = node["currentEngine"].as<int>();
 		if (saved < 0 || saved >= (int)AudioEngineType::Count)
-			saved = (int)AudioEngineType::Realtime;
+			saved = (int)AudioEngineType::Prerendered;
 
 		currentEngine = static_cast<AudioEngineType>(saved);
 	}

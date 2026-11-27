@@ -187,20 +187,6 @@ void NavigationBar::Draw()
 			{
 				ImGui::SetTooltip("%s", TRANSLATE("nav.notesize").c_str());
 			}
-
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(120);
-			float playbackSpeed = config->midi.playSpeed;
-			if (ThinSlider::Draw<float>("##navPlaybackSpeed", &playbackSpeed, 0.25f, 3.0f, "%.2fx"))
-			{
-				config->midi.playSpeed = std::clamp(playbackSpeed, 0.25f, 3.0f);
-				timer->ChangeSpeed(config->midi.playSpeed);
-			}
-
-			if (ImGui::IsItemHovered())
-			{
-				ImGui::SetTooltip("%s", localization->Get("nav.playspeed", "Playback speed").c_str());
-			}
 		}
 
 		// time bar

@@ -4,10 +4,6 @@
 
 #include "Comet.h"
 
-#ifndef COMET_CRASH_WEBHOOK
-#define COMET_CRASH_WEBHOOK ""
-#endif
-
 // Platform headers first: <windows.h> defines macros that break the C++ headers if it lands after
 // them. NOMINMAX keeps its min/max macros out of the way.
 #if defined(_WIN32)
@@ -38,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -45,31 +42,18 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
-
-#include <curl/curl.h>
-#include <nlohmann/json.hpp>
+#include <vector>
 
 namespace CrashReporter
 {
 	namespace
 	{
-		using json = nlohmann::json;
-
-		constexpr int SCHEMA_VERSION = 1;
 		constexpr int MAX_STACK_FRAMES = 64;
-		constexpr int LOG_LINES_IN_REPORT = 150;
-		// Discord truncates longer descriptions outright, so cut it ourselves and say so.
-		constexpr size_t EMBED_DESCRIPTION_LIMIT = 3900;
-		constexpr size_t EMBED_FIELD_LIMIT = 960;
-		constexpr size_t MAX_ATTACHMENT_BYTES = 7u * 1024u * 1024u;
-		// A single run shouldn't hammer a webhook that is rate limiting us.
-		constexpr int MAX_UPLOADS_PER_FLUSH = 10;
-		constexpr int CURL_TIMEOUT_SECONDS = 15;
-		constexpr int CURL_CONNECT_TIMEOUT_SECONDS = 8;
+		constexpr int LOG_LINES_IN_REPORT = 200;
 
 		// ---------------------------------------------------------------------------------------
 		// App-supplied context. Guarded by a mutex, but the crash handler uses try_lock: if another
-		// thread died holding it, the report simply goes out with fewer fields.
+		// thread died holding it, the log simply goes out with fewer fields.
 		// ---------------------------------------------------------------------------------------
 		std::mutex g_contextMutex;
 		MidiInfo g_midi;
@@ -82,14 +66,11 @@ namespace CrashReporter
 		std::string g_version = COMET_VERSION;
 		std::string g_buildType = "Unknown";
 		std::string g_buildConfig = "";
-		// Defaults to the build/environment endpoint; only the test harness overrides it via
-		// SetWebhookUrl.
-		std::string g_webhookUrl = DefaultWebhookUrl();
 		bool g_enabled = false;
 
 		bool g_installed = false;
 		std::chrono::steady_clock::time_point g_startTime;
-		// Set before any report is written; a second fatal error while reporting just dies.
+		// Set before any log is written; a second fatal error while reporting just dies.
 		std::atomic<bool> g_reporting{ false };
 		std::terminate_handler g_previousTerminate = nullptr;
 
@@ -114,11 +95,11 @@ namespace CrashReporter
 			const auto now = std::chrono::system_clock::now();
 			const std::time_t asTime = std::chrono::system_clock::to_time_t(now);
 			std::tm tm{};
-		#if defined(_WIN32)
+#if defined(_WIN32)
 			gmtime_s(&tm, &asTime);
-		#else
+#else
 			gmtime_r(&asTime, &tm);
-		#endif
+#endif
 			std::ostringstream out;
 			out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
 			return out.str();
@@ -129,11 +110,11 @@ namespace CrashReporter
 			const auto now = std::chrono::system_clock::now();
 			const std::time_t asTime = std::chrono::system_clock::to_time_t(now);
 			std::tm tm{};
-		#if defined(_WIN32)
+#if defined(_WIN32)
 			localtime_s(&tm, &asTime);
-		#else
+#else
 			localtime_r(&asTime, &tm);
-		#endif
+#endif
 			std::ostringstream out;
 			out << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
 			return out.str();
@@ -144,47 +125,14 @@ namespace CrashReporter
 			const auto now = std::chrono::system_clock::now();
 			const std::time_t asTime = std::chrono::system_clock::to_time_t(now);
 			std::tm tm{};
-		#if defined(_WIN32)
+#if defined(_WIN32)
 			gmtime_s(&tm, &asTime);
-		#else
+#else
 			gmtime_r(&asTime, &tm);
-		#endif
+#endif
 			std::ostringstream out;
 			out << std::put_time(&tm, "%Y%m%d-%H%M%S");
 			return out.str();
-		}
-
-		std::string Truncate(const std::string& text, size_t limit)
-		{
-			if (text.size() <= limit)
-				return text;
-
-			const std::string suffix = "\n... (truncated)";
-			if (limit <= suffix.size())
-				return text.substr(0, limit);
-
-			return text.substr(0, limit - suffix.size()) + suffix;
-		}
-
-		// Discord renders this inside a ``` fence, so a stray fence in the payload would end the
-		// code block early and mangle the message.
-		std::string SanitizeForCodeBlock(const std::string& text)
-		{
-			std::string out = text;
-			for (char& c : out)
-			{
-				if (c == '`')
-					c = '\'';
-			}
-			return out;
-		}
-
-		// An embed field may not be empty, and a zero-length value is rejected by Discord.
-		std::string FieldValue(const std::string& value)
-		{
-			if (value.empty())
-				return "(unknown)";
-			return Truncate(value, EMBED_FIELD_LIMIT);
 		}
 
 		double UptimeSeconds()
@@ -206,6 +154,15 @@ namespace CrashReporter
 			return out.str();
 		}
 
+		std::string ProcessIdText()
+		{
+#if defined(_WIN32)
+			return std::to_string(GetCurrentProcessId());
+#else
+			return std::to_string(static_cast<long long>(getpid()));
+#endif
+		}
+
 #if defined(_WIN32)
 		std::string Utf8FromWide(const std::wstring& wide)
 		{
@@ -220,22 +177,6 @@ namespace CrashReporter
 			std::string out(static_cast<size_t>(size), '\0');
 			WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
 				out.data(), size, nullptr, nullptr);
-			return out;
-		}
-
-		std::wstring WideFromUtf8(const std::string& text)
-		{
-			if (text.empty())
-				return {};
-
-			const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
-				nullptr, 0);
-			if (size <= 0)
-				return {};
-
-			std::wstring out(static_cast<size_t>(size), L'\0');
-			MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
-				out.data(), size);
 			return out;
 		}
 
@@ -314,7 +255,6 @@ namespace CrashReporter
 				return "<unknown>";
 
 			path.resize(written);
-			std::error_code ec;
 			const std::filesystem::path asPath(path);
 			return Utf8FromWide(asPath.filename().wstring());
 		}
@@ -387,13 +327,13 @@ namespace CrashReporter
 					out = { "STATUS_FAIL_FAST_EXCEPTION", "The process was fast-failed on purpose.", nullptr };
 					return true;
 				case 0xC0000135:
-					out = { "STATUS_DLL_NOT_FOUND", "A DLL required to start or continue could not be found.", "A dependency (bass.dll, bassmidi.dll, the MSVC runtime, a resource pack plugin) is missing next to Comet.exe." };
+					out = { "STATUS_DLL_NOT_FOUND", "A DLL required to start or continue could not be found.", "A dependency (bass.dll, bassmidi.dll, the MSVC runtime) is missing next to Comet.exe." };
 					return true;
 				case 0xC0000139:
 					out = { "STATUS_ENTRYPOINT_NOT_FOUND", "A DLL was found but does not export a procedure that was called.", "A stale or mixed-version DLL is next to the executable." };
 					return true;
 				case 0xC0000142:
-					out = { "STATUS_DLL_INIT_FAILED", "A DLL failed to initialise.", "Often a missing runtime or a driver DLL refusing to load. Check what changed most recently." };
+					out = { "STATUS_DLL_INIT_FAILED", "A DLL failed to initialise.", "Often a missing runtime or a driver DLL refusing to load." };
 					return true;
 				case 0x80000003:
 					out = { "EXCEPTION_BREAKPOINT", "A breakpoint was hit with no debugger attached.", nullptr };
@@ -406,7 +346,7 @@ namespace CrashReporter
 			}
 		}
 
-		// One frame as a report line: index, address, owning module, then the symbol and source
+		// One frame as a log line: index, address, owning module, then the symbol and source
 		// location when a .pdb could be found.
 		std::string FormatFrame(int index, uint64_t address)
 		{
@@ -452,9 +392,7 @@ namespace CrashReporter
 			return line.str();
 		}
 
-		// Walks the faulting thread's stack from the exception's own instruction pointer. This is
-		// what puts the crashing function at frame #00; capturing from here instead would make the
-		// top of the trace this handler, which is exactly the frame nobody cares about.
+		// Walks the faulting thread's stack from the exception's own instruction pointer.
 		std::vector<std::string> CaptureStackTraceFromException(EXCEPTION_POINTERS* info, int maxFrames)
 		{
 			std::vector<std::string> frames;
@@ -465,17 +403,17 @@ namespace CrashReporter
 			CONTEXT context = *info->ContextRecord;
 			STACKFRAME64 frame{};
 
-		#if defined(_M_IX86)
+#if defined(_M_IX86)
 			const DWORD machine = IMAGE_FILE_MACHINE_I386;
 			frame.AddrPC.Offset = context.Eip;
 			frame.AddrFrame.Offset = context.Ebp;
 			frame.AddrStack.Offset = context.Esp;
-		#else
+#else
 			const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
 			frame.AddrPC.Offset = context.Rip;
 			frame.AddrFrame.Offset = context.Rbp;
 			frame.AddrStack.Offset = context.Rsp;
-		#endif
+#endif
 
 			frame.AddrPC.Mode = AddrModeFlat;
 			frame.AddrFrame.Mode = AddrModeFlat;
@@ -499,8 +437,6 @@ namespace CrashReporter
 			return frames;
 		}
 
-		// Fallback for reports that are requested rather than caused by a crash, where there is no
-		// exception record to walk from.
 		std::vector<std::string> CaptureStackTrace(int maxFrames)
 		{
 			std::vector<std::string> frames;
@@ -523,7 +459,7 @@ namespace CrashReporter
 		{
 			std::vector<std::string> frames;
 
-		#if defined(COMET_HAS_EXECINFO)
+#if defined(COMET_HAS_EXECINFO)
 			void* addresses[MAX_STACK_FRAMES] = {};
 			const int limit = maxFrames < MAX_STACK_FRAMES ? maxFrames : MAX_STACK_FRAMES;
 			const int captured = backtrace(addresses, limit);
@@ -533,7 +469,7 @@ namespace CrashReporter
 				line << "#" << std::setw(2) << std::setfill('0') << i << " " << addresses[i];
 				frames.push_back(line.str());
 			}
-		#endif
+#endif
 
 			if (frames.empty())
 				frames.push_back("(no frames captured)");
@@ -543,50 +479,31 @@ namespace CrashReporter
 #endif
 
 		// ---------------------------------------------------------------------------------------
-		// Where reports live
+		// Where logs live
 		// ---------------------------------------------------------------------------------------
 #if defined(_WIN32)
-		std::wstring ReportDirectoryW()
+		std::filesystem::path LogDirectoryPath()
 		{
-			std::wstring override;
-			if (ReadEnvWide(L"COMET_CRASH_REPORT_DIR", override) && !override.empty())
-				return override;
+			std::wstring overrideDir;
+			if (ReadEnvWide(L"COMET_CRASH_LOG_DIR", overrideDir) && !overrideDir.empty())
+				return std::filesystem::path(overrideDir);
 
-			std::wstring localAppData;
-			if (ReadEnvWide(L"LOCALAPPDATA", localAppData) && !localAppData.empty())
-			{
-				std::filesystem::path dir(localAppData);
-				dir /= L"Comet";
-				dir /= L"crash_reports";
-				return dir.wstring();
-			}
-
-			// Last resort: beside the executable. May be read-only under Program Files, in which
-			// case the report simply fails to write and we fall back to the log.
-			std::filesystem::path exeDir(ExecutablePathW());
-			exeDir = exeDir.parent_path();
-			exeDir /= L"crash_reports";
-			return exeDir.wstring();
+			const std::filesystem::path exeDir =
+				std::filesystem::path(ExecutablePathW()).parent_path();
+			return exeDir / L"logs";
 		}
-#endif
-
-		std::filesystem::path ReportDirectoryPath()
+#else
+		std::filesystem::path LogDirectoryPath()
 		{
-		#if defined(_WIN32)
-			return std::filesystem::path(ReportDirectoryW());
-		#else
-			if (const char* overrideDir = std::getenv("COMET_CRASH_REPORT_DIR"))
+			if (const char* overrideDir = std::getenv("COMET_CRASH_LOG_DIR"))
 			{
 				if (*overrideDir != '\0')
 					return std::filesystem::path(overrideDir);
 			}
 
-			if (const char* home = std::getenv("HOME"))
-				return std::filesystem::path(home) / ".local" / "share" / "Comet" / "crash_reports";
-
-			return std::filesystem::current_path() / "crash_reports";
-		#endif
+			return std::filesystem::current_path() / "logs";
 		}
+#endif
 
 		bool EnsureDirectory(const std::filesystem::path& dir)
 		{
@@ -598,30 +515,9 @@ namespace CrashReporter
 			return !ec;
 		}
 
-		std::filesystem::path PendingDirectory() { return ReportDirectoryPath() / "pending"; }
-		std::filesystem::path SentDirectory() { return ReportDirectoryPath() / "sent"; }
-		std::filesystem::path FailedDirectory() { return ReportDirectoryPath() / "failed"; }
-		std::filesystem::path LastErrorPath() { return ReportDirectoryPath() / "last_error.txt"; }
-
-		void WriteLastError(const std::string& message)
-		{
-			if (message.empty())
-				return;
-
-			if (!EnsureDirectory(ReportDirectoryPath()))
-				return;
-
-			std::error_code ec;
-			std::ofstream out(LastErrorPath(), std::ios::binary | std::ios::trunc);
-			if (!out.is_open())
-				return;
-
-			out << "[" << UtcTimestamp() << "] " << message << "\n";
-		}
-
 		bool WriteTextFile(const std::filesystem::path& path, const std::string& contents)
 		{
-		#if defined(_WIN32)
+#if defined(_WIN32)
 			const HANDLE handle = CreateFileW(path.wstring().c_str(), GENERIC_WRITE, 0, nullptr,
 				CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 			if (handle == INVALID_HANDLE_VALUE)
@@ -646,7 +542,7 @@ namespace CrashReporter
 
 			CloseHandle(handle);
 			return true;
-		#else
+#else
 			std::ofstream out(path, std::ios::binary | std::ios::trunc);
 			if (!out.is_open())
 				return false;
@@ -654,29 +550,32 @@ namespace CrashReporter
 			out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
 			out.flush();
 			return out.good();
-		#endif
-		}
-
-		bool ReadTextFile(const std::filesystem::path& path, std::string& out)
-		{
-			std::ifstream in(path, std::ios::binary);
-			if (!in.is_open())
-				return false;
-
-			std::ostringstream buffer;
-			buffer << in.rdbuf();
-			out = buffer.str();
-			return true;
+#endif
 		}
 
 		// ---------------------------------------------------------------------------------------
-		// System information
+		// Human-readable report
 		// ---------------------------------------------------------------------------------------
-		json CollectSystemInfo()
+		struct Fault
 		{
-			json system = json::object();
+			std::string type;        // "seh", "terminate", "signal", "purecall", "invalid-parameter"
+			std::string code;
+			std::string name;
+			std::string description;
+			std::string hint;
+			std::string address;
+			std::string module;
+			std::string threadId;
+			std::string accessType;
+			std::string accessAddress;
+			std::string detail;
+			bool hasFault = false;
+		};
 
-		#if defined(_WIN32)
+		std::string SystemText()
+		{
+			std::ostringstream out;
+#if defined(_WIN32)
 			struct OsVersionInfo
 			{
 				ULONG size;
@@ -696,9 +595,7 @@ namespace CrashReporter
 			{
 				if (auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
 						GetProcAddress(ntdll, "RtlGetVersion")))
-				{
 					rtlGetVersion(&version);
-				}
 			}
 
 			std::string product = "Windows";
@@ -711,12 +608,8 @@ namespace CrashReporter
 			else if (version.build >= 7600)
 				product = "Windows 7";
 
-			std::ostringstream os;
-			os << product << " " << version.major << "." << version.minor << "." << version.build;
-			if (version.csdVersion[0] != L'\0')
-				os << " " << Utf8FromWide(version.csdVersion);
-
-			system["os"] = os.str();
+			out << "OS: " << product << " " << version.major << "." << version.minor << "."
+				<< version.build << "\n";
 
 			SYSTEM_INFO sysInfo{};
 			GetNativeSystemInfo(&sysInfo);
@@ -731,13 +624,12 @@ namespace CrashReporter
 				default: break;
 			}
 
-			system["architecture"] = architecture;
-			system["pointerSize"] = static_cast<int>(sizeof(void*)) * 8;
-			system["logicalCores"] = static_cast<int>(sysInfo.dwNumberOfProcessors);
+			out << "Architecture: " << architecture << " (" << (sizeof(void*) * 8) << "-bit)\n";
+			out << "Logical cores: " << sysInfo.dwNumberOfProcessors << "\n";
 
 			// Processor brand string. Leaves 0x80000002..0x80000004 are exactly three 16-byte
-			// chunks; the buffer size is derived from the leaf count so the copy can never run past
-			// the end, whatever that count is.
+			// chunks; the buffer size is derived from the leaf count so the copy can never run
+			// past the end, whatever that count is.
 			constexpr int BRAND_LEAVES = 3;
 			constexpr int BRAND_BYTES = BRAND_LEAVES * 16;
 
@@ -750,7 +642,6 @@ namespace CrashReporter
 				std::memcpy(brand + leaf * 16, registers, sizeof(registers));
 			}
 
-			// The last leaf is not guaranteed to be zero-padded, so terminate it explicitly.
 			brand[BRAND_BYTES] = '\0';
 
 			std::string brandText = brand;
@@ -759,121 +650,108 @@ namespace CrashReporter
 			while (!brandText.empty() && brandText.back() == ' ')
 				brandText.pop_back();
 
-			system["cpu"] = brandText.empty() ? "(unknown)" : brandText;
+			out << "CPU: " << (brandText.empty() ? "(unknown)" : brandText) << "\n";
 
 			MEMORYSTATUSEX memory{};
 			memory.dwLength = sizeof(memory);
 			if (GlobalMemoryStatusEx(&memory))
 			{
-				system["physicalMemoryMb"] = static_cast<long long>(memory.ullTotalPhys / (1024ull * 1024ull));
-				system["availableMemoryMb"] = static_cast<long long>(memory.ullAvailPhys / (1024ull * 1024ull));
-				system["memoryLoadPercent"] = static_cast<int>(memory.dwMemoryLoad);
+				out << "Memory: " << (memory.ullTotalPhys / (1024ull * 1024ull)) << " MB total, "
+					<< (memory.ullAvailPhys / (1024ull * 1024ull)) << " MB available, "
+					<< memory.dwMemoryLoad << "% load\n";
 			}
 
-			system["screen"] = std::to_string(GetSystemMetrics(SM_CXSCREEN)) + "x" +
-				std::to_string(GetSystemMetrics(SM_CYSCREEN));
+			out << "Screen: " << GetSystemMetrics(SM_CXSCREEN) << "x"
+				<< GetSystemMetrics(SM_CYSCREEN) << "\n";
 
 			wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
 			if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) > 0)
-				system["locale"] = Utf8FromWide(locale);
+				out << "Locale: " << Utf8FromWide(locale) << "\n";
 
 			TIME_ZONE_INFORMATION zone{};
 			if (GetTimeZoneInformation(&zone) != TIME_ZONE_ID_INVALID)
-				system["timezone"] = Utf8FromWide(zone.StandardName);
+				out << "Timezone: " << Utf8FromWide(zone.StandardName) << "\n";
 
-			if (!g_gpuRenderer.empty() || !g_gpuVendor.empty())
+			out << "GPU vendor: " << (g_gpuVendor.empty() ? "(unknown)" : g_gpuVendor) << "\n";
+			out << "GPU renderer: " << (g_gpuRenderer.empty() ? "(unknown)" : g_gpuRenderer) << "\n";
+			out << "GPU driver: " << (g_gpuVersion.empty() ? "(unknown)" : g_gpuVersion) << "\n";
+			out << "OpenGL: " << (g_glVersion.empty() ? "(unknown)" : g_glVersion) << "\n";
+#else
+			out << "OS: Non-Windows\n";
+			out << "Architecture: " << (sizeof(void*) * 8) << "-bit\n";
+			out << "Logical cores: " << std::thread::hardware_concurrency() << "\n";
+#endif
+			return out.str();
+		}
+
+		std::string ApplicationText()
+		{
+			std::ostringstream out;
+			out << "Version: " << g_version << "\n";
+			out << "Build type: " << g_buildType << "\n";
+			out << "Build config: " << (g_buildConfig.empty() ? "(unknown)" : g_buildConfig) << "\n";
+
+#if defined(_MSC_VER)
+			out << "Compiler: MSVC " << _MSC_VER << "\n";
+#elif defined(__clang__)
+			out << "Compiler: Clang " << __clang_version__ << "\n";
+#elif defined(__GNUC__)
+			out << "Compiler: GCC " << __VERSION__ << "\n";
+#else
+			out << "Compiler: Unknown\n";
+#endif
+
+			out << "Build date: " << __DATE__ << " " << __TIME__ << "\n";
+			return out.str();
+		}
+
+		std::string EnvironmentText()
+		{
+			std::ostringstream out;
+			out << "UTC time: " << UtcTimestamp() << "\n";
+			out << "Local time: " << LocalTimestamp() << "\n";
+			out << "Process ID: " << ProcessIdText() << "\n";
+			out << "Process uptime: " << FormatUptime(UptimeSeconds()) << "\n";
+
+#if defined(_WIN32)
+			out << "Executable: " << Utf8FromWide(ExecutablePathW()) << "\n";
+			out << "Working directory: " << Utf8FromWide(CurrentDirectoryW()) << "\n";
+			out << "Current thread: " << GetCurrentThreadId() << "\n";
+#else
+			out << "Working directory: " << std::filesystem::current_path().string() << "\n";
+#endif
+			return out.str();
+		}
+
+		std::string FaultText(const Fault& fault, const std::string& note)
+		{
+			std::ostringstream out;
+
+			if (!note.empty())
+				out << "Note: " << note << "\n\n";
+
+			if (!fault.hasFault)
 			{
-				json gpu = json::object();
-				gpu["vendor"] = g_gpuVendor;
-				gpu["renderer"] = g_gpuRenderer;
-				gpu["driverVersion"] = g_gpuVersion;
-				gpu["openglVersion"] = g_glVersion;
-				system["gpu"] = gpu;
+				out << "No exception: this log was requested from the app rather than produced by a crash.\n";
+				return out.str();
 			}
-		#else
-			system["os"] = "Non-Windows";
-			system["architecture"] = static_cast<int>(sizeof(void*)) * 8 == 64 ? "64-bit" : "32-bit";
-			system["logicalCores"] = static_cast<int>(std::thread::hardware_concurrency());
-			if (!g_gpuRenderer.empty())
-				system["gpu"] = { { "vendor", g_gpuVendor }, { "renderer", g_gpuRenderer } };
-		#endif
 
-			return system;
+			out << "Type: " << fault.type << "\n";
+			if (!fault.code.empty()) out << "Code: " << fault.code << "\n";
+			if (!fault.name.empty()) out << "Name: " << fault.name << "\n";
+			if (!fault.description.empty()) out << "Description: " << fault.description << "\n";
+			if (!fault.hint.empty()) out << "Hint: " << fault.hint << "\n";
+			if (!fault.module.empty()) out << "Module: " << fault.module << "\n";
+			if (!fault.address.empty()) out << "Address: " << fault.address << "\n";
+			if (!fault.threadId.empty()) out << "Thread: " << fault.threadId << "\n";
+			if (!fault.accessType.empty()) out << "Access: " << fault.accessType << "\n";
+			if (!fault.accessAddress.empty()) out << "Access address: " << fault.accessAddress << "\n";
+			if (!fault.detail.empty()) out << "Detail: " << fault.detail << "\n";
+			return out.str();
 		}
 
-		json CollectEnvironment()
+		std::string StateText()
 		{
-			json environment = json::object();
-			environment["utcTime"] = UtcTimestamp();
-			environment["localTime"] = LocalTimestamp();
-			environment["uptimeSeconds"] = UptimeSeconds();
-			environment["uptimePretty"] = FormatUptime(UptimeSeconds());
-
-		#if defined(_WIN32)
-			environment["processId"] = static_cast<long long>(GetCurrentProcessId());
-			environment["threadId"] = static_cast<long long>(GetCurrentThreadId());
-			environment["executablePath"] = Utf8FromWide(ExecutablePathW());
-			environment["workingDirectory"] = Utf8FromWide(CurrentDirectoryW());
-			environment["reportDirectory"] = Utf8FromWide(ReportDirectoryW());
-
-			wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
-			DWORD computerSize = MAX_COMPUTERNAME_LENGTH + 1;
-			if (GetComputerNameW(computer, &computerSize))
-				environment["computerName"] = Utf8FromWide(computer);
-
-			wchar_t user[256] = {};
-			DWORD userSize = 256;
-			if (GetUserNameW(user, &userSize))
-				environment["userName"] = Utf8FromWide(user);
-
-			environment["sessionId"] = static_cast<long long>(0);
-			DWORD sessionId = 0;
-			if (ProcessIdToSessionId(GetCurrentProcessId(), &sessionId))
-				environment["sessionId"] = static_cast<long long>(sessionId);
-		#else
-			environment["processId"] = static_cast<long long>(getpid());
-			environment["workingDirectory"] = std::filesystem::current_path().string();
-		#endif
-
-			return environment;
-		}
-
-		json CollectApplicationInfo()
-		{
-			json application = json::object();
-			application["name"] = "Comet";
-			application["version"] = g_version;
-			application["buildType"] = g_buildType;
-			application["buildConfig"] = g_buildConfig;
-
-		#if defined(_MSC_VER)
-			application["compiler"] = std::string("MSVC ") + std::to_string(_MSC_VER);
-		#elif defined(__clang__)
-			application["compiler"] = std::string("Clang ") + __clang_version__;
-		#elif defined(__GNUC__)
-			application["compiler"] = std::string("GCC ") + __VERSION__;
-		#else
-			application["compiler"] = "Unknown";
-		#endif
-
-			application["buildDate"] = std::string(__DATE__) + " " + __TIME__;
-
-			// A beta suffix (1.9.0b) is what the strings in the About box show.
-			std::string pretty = g_version;
-			if (!pretty.empty() && pretty.back() == 'b')
-			{
-				pretty.pop_back();
-				pretty += "-Beta";
-			}
-			application["versionPretty"] = pretty;
-
-			return application;
-		}
-
-		json CollectState()
-		{
-			json state = json::object();
-
 			MidiInfo midi;
 			RuntimeFlags flags;
 			bool haveContext = false;
@@ -889,31 +767,27 @@ namespace CrashReporter
 				}
 			}
 
-			state["contextAvailable"] = haveContext;
-
+			std::ostringstream out;
+			out << "Context available: " << (haveContext ? "yes" : "no") << "\n";
 			if (haveContext)
 			{
-				json midiJson = json::object();
-				midiJson["path"] = midi.path;
-				midiJson["displayName"] = midi.displayName;
-				midiJson["notes"] = midi.notes;
-				midiJson["lengthTicks"] = midi.lengthTicks;
-				midiJson["trackCount"] = midi.trackCount;
-				midiJson["noteTrackCount"] = midi.noteTrackCount;
-				midiJson["resolution"] = midi.resolution;
-				midiJson["lengthSeconds"] = midi.lengthSeconds;
-				state["midi"] = midiJson;
-
-				state["hasSequence"] = flags.hasSequence;
-				state["playing"] = flags.playing;
-				state["rendering"] = flags.rendering;
-				state["loading"] = flags.loading;
+				out << "MIDI path: " << (midi.path.empty() ? "(none)" : midi.path) << "\n";
+				out << "MIDI name: " << (midi.displayName.empty() ? "(none)" : midi.displayName) << "\n";
+				out << "Notes: " << midi.notes << "\n";
+				out << "Length ticks: " << midi.lengthTicks << "\n";
+				out << "Track count: " << midi.trackCount << "\n";
+				out << "Note tracks: " << midi.noteTrackCount << "\n";
+				out << "Resolution: " << midi.resolution << "\n";
+				out << "Length seconds: " << midi.lengthSeconds << "\n";
+				out << "Sequence loaded: " << (flags.hasSequence ? "yes" : "no") << "\n";
+				out << "Playing: " << (flags.playing ? "yes" : "no") << "\n";
+				out << "Rendering: " << (flags.rendering ? "yes" : "no") << "\n";
+				out << "Loading: " << (flags.loading ? "yes" : "no") << "\n";
 			}
-
-			return state;
+			return out.str();
 		}
 
-		json CollectSettings()
+		std::string SettingsText()
 		{
 			std::string snapshot;
 			{
@@ -923,908 +797,90 @@ namespace CrashReporter
 			}
 
 			if (snapshot.empty())
-				return json::object();
-
-			const json parsed = json::parse(snapshot, nullptr, false);
-			if (parsed.is_discarded())
-				return json::object();
-
-			// The webhook URL is a credential; it must never travel inside the report itself.
-			if (parsed.is_object() && parsed.contains("crashReports"))
-			{
-				json copy = parsed;
-				copy["crashReports"].erase("webhookUrl");
-				return copy;
-			}
-
-			return parsed;
+				return "(unavailable)\n";
+			return snapshot + "\n";
 		}
 
-		json CollectLogs()
-		{
-			json logs = json::object();
-
-			const std::string tail = CometLog::Tail(LOG_LINES_IN_REPORT);
-			json lines = json::array();
-
-			size_t start = 0;
-			while (start <= tail.size())
-			{
-				const size_t newline = tail.find('\n', start);
-				if (newline == std::string::npos)
-					break;
-
-				lines.push_back(tail.substr(start, newline - start));
-				start = newline + 1;
-			}
-
-			logs["lineCount"] = static_cast<int>(lines.size());
-			logs["lines"] = std::move(lines);
-			return logs;
-		}
-
-		std::string MintReportId()
-		{
-		#if defined(_WIN32)
-			std::ostringstream out;
-			out << StampForId() << "-" << std::hex << std::uppercase
-				<< static_cast<unsigned long>(GetCurrentProcessId() & 0xFFFF) << "-"
-				<< static_cast<unsigned long>(GetTickCount64() & 0xFFFF);
-			return out.str();
-		#else
-			std::ostringstream out;
-			out << StampForId() << "-" << static_cast<long long>(getpid());
-			return out.str();
-		#endif
-		}
-
-		// Describes *why* we are reporting; empty for a deliberate test-send.
-		struct Fault
-		{
-			std::string type;        // "seh", "terminate", "signal", "none"
-			std::string code;
-			std::string name;
-			std::string description;
-			std::string hint;
-			std::string address;
-			std::string module;
-			std::string threadId;
-			std::string accessType;
-			std::string accessAddress;
-			std::string detail;
-			bool hasFault = false;
-		};
-
-		json FaultToJson(const Fault& fault)
-		{
-			json out = json::object();
-
-			if (!fault.hasFault)
-			{
-				out["type"] = "none";
-				out["description"] = "No exception: this report was requested from the app rather than produced by a crash.";
-				return out;
-			}
-
-			out["type"] = fault.type;
-			out["code"] = fault.code;
-			out["name"] = fault.name;
-			out["description"] = fault.description;
-			if (!fault.hint.empty())
-				out["hint"] = fault.hint;
-			if (!fault.address.empty())
-				out["address"] = fault.address;
-			if (!fault.module.empty())
-				out["module"] = fault.module;
-			out["threadId"] = fault.threadId;
-			if (!fault.accessType.empty())
-				out["accessType"] = fault.accessType;
-			if (!fault.accessAddress.empty())
-				out["accessAddress"] = fault.accessAddress;
-			if (!fault.detail.empty())
-				out["detail"] = fault.detail;
-
-			return out;
-		}
-
-		std::string BuildReportInternal(const std::string& kind, const Fault& fault,
+		std::string BuildLogText(const std::string& kind, const Fault& fault,
 			const std::vector<std::string>& stackTrace, const std::string& note)
 		{
-			json report = json::object();
-
-			report["schema"] = SCHEMA_VERSION;
-			report["kind"] = kind;
-			report["reportId"] = MintReportId();
-			report["createdUtc"] = UtcTimestamp();
-			report["createdLocal"] = LocalTimestamp();
-			report["application"] = CollectApplicationInfo();
-			report["system"] = CollectSystemInfo();
-			report["environment"] = CollectEnvironment();
-			report["exception"] = FaultToJson(fault);
-			report["stackTrace"] = stackTrace;
-			report["state"] = CollectState();
-			report["settings"] = CollectSettings();
-			report["logs"] = CollectLogs();
-
-			if (!note.empty())
-				report["note"] = note;
-
-			// Consumed and stripped by the sender; never uploaded as part of the report.
-			std::string endpoint;
-			{
-				std::unique_lock<std::mutex> lock(g_contextMutex, std::try_to_lock);
-				if (lock.owns_lock())
-					endpoint = g_webhookUrl;
-			}
-
-			report["_delivery"] = {
-				{ "transport", "discord-webhook" },
-				{ "endpoint", endpoint }
-			};
-
-			return report.dump(2);
-		}
-
-		// ---------------------------------------------------------------------------------------
-		// Delivery
-		// ---------------------------------------------------------------------------------------
-		enum class Delivery
-		{
-			Ok,
-			// The endpoint rejected the report; retrying will never help.
-			Permanent,
-			// Network hiccup or rate limit; keep it queued.
-			Transient
-		};
-
-		size_t CurlWriteCallback(char* data, size_t size, size_t count, void* userData)
-		{
-			auto* out = static_cast<std::string*>(userData);
-			out->append(data, size * count);
-			return size * count;
-		}
-
-		Delivery PostJson(const std::string& url, const std::string& payload,
-			std::string& responseOut, std::string& errorOut)
-		{
-			CURL* curl = curl_easy_init();
-			if (!curl)
-			{
-				errorOut = "could not create a libcurl handle";
-				return Delivery::Transient;
-			}
-
-			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-			curl_easy_setopt(curl, CURLOPT_USERAGENT, "Comet-CrashReporter");
-			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-			curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(CURL_TIMEOUT_SECONDS));
-			curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, static_cast<long>(CURL_CONNECT_TIMEOUT_SECONDS));
-			curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-			curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
-			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &CurlWriteCallback);
-			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseOut);
-
-			curl_slist* headers = nullptr;
-			headers = curl_slist_append(headers, "Content-Type: application/json");
-			curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-			curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.data());
-			curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
-
-			const CURLcode result = curl_easy_perform(curl);
-
-			long httpCode = 0;
-			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-
-			curl_slist_free_all(headers);
-			curl_easy_cleanup(curl);
-
-			if (result != CURLE_OK)
-			{
-				errorOut = std::string("network error: ") + curl_easy_strerror(result);
-				return Delivery::Transient;
-			}
-
-			if (httpCode == 200 || httpCode == 201 || httpCode == 204)
-				return Delivery::Ok;
-
-			if (httpCode == 429 || httpCode >= 500)
-			{
-				errorOut = "server said HTTP " + std::to_string(httpCode) + " (will retry): " +
-					Truncate(responseOut, 300);
-				return Delivery::Transient;
-			}
-
-			if (httpCode >= 400)
-			{
-				errorOut = "endpoint rejected the report with HTTP " + std::to_string(httpCode) + ": " +
-					Truncate(responseOut, 300);
-				return Delivery::Permanent;
-			}
-
-			errorOut = "unexpected HTTP " + std::to_string(httpCode);
-			return Delivery::Transient;
-		}
-
-		// Multipart POST: Discord wants the embed as JSON and the raw report as a file.
-		Delivery PostMultipart(const std::string& url, const std::string& payloadJson,
-			const std::string& attachmentName, const std::string& attachmentBody,
-			std::string& responseOut, std::string& errorOut)
-		{
-			CURL* curl = curl_easy_init();
-			if (!curl)
-			{
-				errorOut = "could not create a libcurl handle";
-				return Delivery::Transient;
-			}
-
-			curl_mime* mime = curl_mime_init(curl);
-
-			curl_mimepart* payloadPart = curl_mime_addpart(mime);
-			curl_mime_name(payloadPart, "payload_json");
-			curl_mime_type(payloadPart, "application/json");
-			curl_mime_data(payloadPart, payloadJson.c_str(), CURL_ZERO_TERMINATED);
-
-			curl_mimepart* filePart = curl_mime_addpart(mime);
-			curl_mime_name(filePart, "files[0]");
-			curl_mime_type(filePart, "application/json");
-			curl_mime_filename(filePart, attachmentName.c_str());
-			curl_mime_data(filePart, attachmentBody.c_str(), CURL_ZERO_TERMINATED);
-
-			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-			curl_easy_setopt(curl, CURLOPT_USERAGENT, "Comet-CrashReporter");
-			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-			curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(CURL_TIMEOUT_SECONDS));
-			curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, static_cast<long>(CURL_CONNECT_TIMEOUT_SECONDS));
-			curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-			curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
-			curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
-			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &CurlWriteCallback);
-			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseOut);
-
-			const CURLcode result = curl_easy_perform(curl);
-
-			long httpCode = 0;
-			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-
-			curl_mime_free(mime);
-			curl_easy_cleanup(curl);
-
-			if (result != CURLE_OK)
-			{
-				errorOut = std::string("network error: ") + curl_easy_strerror(result);
-				return Delivery::Transient;
-			}
-
-			if (httpCode == 200 || httpCode == 201 || httpCode == 204)
-				return Delivery::Ok;
-
-			if (httpCode == 429 || httpCode >= 500)
-			{
-				errorOut = "Discord said HTTP " + std::to_string(httpCode) + " (will retry): " +
-					Truncate(responseOut, 300);
-				return Delivery::Transient;
-			}
-
-			if (httpCode >= 400)
-			{
-				errorOut = "Discord rejected the report with HTTP " + std::to_string(httpCode) + ": " +
-					Truncate(responseOut, 300);
-				return Delivery::Permanent;
-			}
-
-			errorOut = "unexpected HTTP " + std::to_string(httpCode);
-			return Delivery::Transient;
-		}
-
-		// Pulls the endpoint out of a report's "_delivery" block and removes it, so the credential
-		// is never part of what gets uploaded.
-		bool ExtractEndpoint(std::string& reportJson, std::string& endpointOut)
-		{
-			json document = json::parse(reportJson, nullptr, false);
-			if (document.is_discarded() || !document.is_object() || !document.contains("_delivery"))
-				return false;
-
-			const json& delivery = document["_delivery"];
-			if (delivery.is_object() && delivery.contains("endpoint") && delivery["endpoint"].is_string())
-				endpointOut = delivery["endpoint"].get<std::string>();
-
-			document.erase("_delivery");
-			reportJson = document.dump(2);
-			return !endpointOut.empty();
-		}
-
-		std::string StackTraceText(const json& report, size_t limit)
-		{
-			std::string text;
-			if (report.contains("stackTrace") && report["stackTrace"].is_array())
-			{
-				for (const auto& frame : report["stackTrace"])
-				{
-					if (!frame.is_string())
-						continue;
-
-					text += frame.get<std::string>();
-					text += '\n';
-				}
-			}
-
-			if (text.empty())
-				text = "(no stack trace)";
-
-			return Truncate(SanitizeForCodeBlock(text), limit);
-		}
-	}
-
-	// -------------------------------------------------------------------------------------------
-	// Public API
-	// -------------------------------------------------------------------------------------------
-	std::string ReportDirectory()
-	{
-	#if defined(_WIN32)
-		return Utf8FromWide(ReportDirectoryW());
-	#else
-		return ReportDirectoryPath().string();
-	#endif
-	}
-
-	void SetAppInfo(std::string version, std::string buildType, std::string buildConfig)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_version = std::move(version);
-		g_buildType = std::move(buildType);
-		g_buildConfig = std::move(buildConfig);
-	}
-
-	void SetGraphicsInfo(std::string vendor, std::string renderer, std::string version, std::string glVersion)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_gpuVendor = std::move(vendor);
-		g_gpuRenderer = std::move(renderer);
-		g_gpuVersion = std::move(version);
-		g_glVersion = std::move(glVersion);
-	}
-
-	void SetMidiInfo(const MidiInfo& info)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_midi = info;
-	}
-
-	void ClearMidiInfo()
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_midi = MidiInfo{};
-	}
-
-	void SetRuntimeFlags(const RuntimeFlags& flags)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_flags = flags;
-	}
-
-	void SetSettingsSnapshot(std::string json)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_settingsSnapshot = std::move(json);
-	}
-
-	void SetEnabled(bool enabled)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_enabled = enabled;
-	}
-
-	void SetWebhookUrl(std::string url)
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		g_webhookUrl = std::move(url);
-	}
-
-	bool IsEnabled()
-	{
-		std::lock_guard<std::mutex> lock(g_contextMutex);
-		return g_enabled;
-	}
-
-	std::string BuildReport(const std::string& kind, const std::string& note)
-	{
-		Fault fault{};
-		// A requested report still carries this thread's stack, which makes the test send a real
-		// check of the symbolication path.
-		return BuildReportInternal(kind, fault, CaptureStackTrace(32), note);
-	}
-
-	std::string BuildDiscordPayload(const std::string& reportJson)
-	{
-		const json report = json::parse(reportJson, nullptr, false);
-		if (report.is_discarded() || !report.is_object())
-			return "{}";
-
-		const std::string kind = report.value("kind", "crash");
-		const bool isCrash = kind == "crash";
-
-		const json& exception = report.contains("exception") ? report["exception"] : json::object();
-		const json& application = report.contains("application") ? report["application"] : json::object();
-		const json& system = report.contains("system") ? report["system"] : json::object();
-		const json& environment = report.contains("environment") ? report["environment"] : json::object();
-
-		std::string title = "Comet " + application.value("version", "?") + " ";
-		title += isCrash ? "crashed" : "report";
-
-		if (isCrash && exception.is_object() && exception.contains("name"))
-			title += ": " + exception.value("name", "");
-
-		json embed = json::object();
-		// Discord's red, for crashes; amber for requested reports.
-		embed["color"] = isCrash ? 0xED4245 : 0xFEE75C;
-		embed["title"] = Truncate(title, 256);
-
-		const std::string stackText = StackTraceText(report, EMBED_DESCRIPTION_LIMIT);
-		std::string description;
-
-		if (isCrash)
-			description = "```\n" + stackText + "```";
-		else
-			description = report.value("note", std::string("Report requested from the app."));
-
-		if (!isCrash)
-			description += "\n\n**Stack trace**\n```\n" + stackText + "```";
-
-		embed["description"] = Truncate(description, 4050);
-
-		json fields = json::array();
-		auto addField = [&fields](const std::string& name, const std::string& value, bool inlineField)
-		{
-			if (value.empty())
-				return;
-
-			fields.push_back({
-				{ "name", Truncate(name, 250) },
-				{ "value", FieldValue(Truncate(value, EMBED_FIELD_LIMIT)) },
-				{ "inline", inlineField }
-			});
-		};
-
-		if (isCrash && exception.is_object())
-		{
-			addField("Exception", exception.value("code", "") + " " + exception.value("name", ""), true);
-			if (exception.contains("module"))
-				addField("Faulting module", exception["module"].get<std::string>(), true);
-			addField("Thread", exception.value("threadId", ""), true);
-
-			if (exception.contains("hint"))
-				addField("Likely cause", exception["hint"].get<std::string>(), false);
-
-			if (exception.contains("detail"))
-				addField("Detail", exception["detail"].get<std::string>(), false);
-		}
-
-		addField("Version", application.value("versionPretty", "") + "  (" +
-			application.value("buildType", "") + " " + application.value("buildConfig", "") + ")", true);
-		addField("OS", system.value("os", "") + "  " + system.value("architecture", ""), true);
-		addField("Uptime", environment.value("uptimePretty", ""), true);
-
-		if (system.contains("gpu") && system["gpu"].is_object())
-			addField("GPU", system["gpu"].value("renderer", ""), false);
-
-		if (report.contains("state") && report["state"].is_object())
-		{
-			const json& state = report["state"];
-			if (state.contains("midi") && state["midi"].is_object())
-			{
-				const json& midi = state["midi"];
-				std::ostringstream midiText;
-				midiText << midi.value("displayName", "");
-				if (midi.contains("notes"))
-					midiText << "  (" << midi.value("notes", 0LL) << " notes";
-				if (midi.contains("trackCount"))
-					midiText << ", " << midi.value("trackCount", 0) << " tracks";
-
-				std::string text = midiText.str();
-				if (text.find('(') != std::string::npos)
-					text += ")";
-
-				if (!midi.value("path", std::string()).empty())
-					text += "\n`" + midi.value("path", std::string()) + "`";
-
-				addField("Loaded MIDI", text, false);
-			}
-
-			std::ostringstream flagText;
-			flagText << (state.value("playing", false) ? "playing" : "stopped")
-				<< ", " << (state.value("hasSequence", false) ? "sequence loaded" : "no sequence")
-				<< ", " << (state.value("rendering", false) ? "rendering video" : "not rendering");
-
-			addField("State", flagText.str(), false);
-		}
-
-		if (report.contains("logs") && report["logs"].is_object())
-		{
-			// The last few log lines are usually the most useful thing in the whole report.
-			const json& lines = report["logs"].value("lines", json::array());
-			std::string tail;
-			const size_t take = 12;
-			const size_t begin = lines.size() > take ? lines.size() - take : 0;
-			for (size_t i = begin; i < lines.size(); ++i)
-			{
-				if (!lines[i].is_string())
-					continue;
-
-				tail += lines[i].get<std::string>();
-				tail += '\n';
-			}
-
-			if (!tail.empty())
-				addField("Last log lines", "```\n" + SanitizeForCodeBlock(Truncate(tail, EMBED_FIELD_LIMIT - 20)) + "```", false);
-		}
-
-		embed["fields"] = fields;
-		embed["footer"] = { { "text", "report " + report.value("reportId", std::string("?")) } };
-		embed["timestamp"] = report.value("createdUtc", UtcTimestamp());
-
-		json payload = json::object();
-		payload["username"] = "Comet Crash Reporter";
-		payload["embeds"] = json::array({ embed });
-
-		return payload.dump();
-	}
-
-	bool PostToDiscord(const std::string& webhookUrl, const std::string& reportJson, std::string* errorOut)
-	{
-		std::string error;
-
-		if (webhookUrl.empty())
-		{
-			if (errorOut)
-				*errorOut = "no webhook URL is configured";
-
-			return false;
-		}
-
-		if (!webhookUrl.starts_with("https://") && !webhookUrl.starts_with("http://"))
-		{
-			if (errorOut)
-				*errorOut = "the webhook URL must start with https://";
-
-			return false;
-		}
-
-		std::string body = reportJson;
-		std::string ignoredEndpoint;
-		// Strip the credential (and the "_delivery" block) before anything leaves the machine.
-		ExtractEndpoint(body, ignoredEndpoint);
-
-		const std::string payload = BuildDiscordPayload(body);
-
-		const std::string attachmentName = "crash_report.json";
-		const bool attachFile = body.size() < MAX_ATTACHMENT_BYTES;
-
-		std::string response;
-		Delivery delivery = attachFile
-			? PostMultipart(webhookUrl, payload, attachmentName, body, response, error)
-			: PostJson(webhookUrl, payload, response, error);
-
-		if (delivery != Delivery::Ok && errorOut)
-			*errorOut = error;
-
-		return delivery == Delivery::Ok;
-	}
-
-	bool SendOrQueue(const std::string& reportJson, const std::string& webhookUrl, std::string* errorOut)
-	{
-		const json report = json::parse(reportJson, nullptr, false);
-		const std::string reportId = report.is_object()
-			? report.value("reportId", std::string("unknown"))
-			: std::string("unknown");
-
-		// The id is used in the filename; keep it to characters that are safe everywhere.
-		std::string safeId;
-		for (char c : reportId)
-		{
-			if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-				c == '-' || c == '_')
-				safeId += c;
-		}
-
-		if (safeId.empty())
-			safeId = "report";
-
-		const std::filesystem::path target = PendingDirectory() / (safeId + ".json");
-
-		if (PostToDiscord(webhookUrl, reportJson, errorOut))
-		{
-			if (EnsureDirectory(SentDirectory()))
-				WriteTextFile(SentDirectory() / (safeId + ".json"), reportJson);
-
-			return true;
-		}
-
-		if (EnsureDirectory(PendingDirectory()))
-		{
-			if (WriteTextFile(target, reportJson))
-				WriteLastError("queued " + safeId + " for retry: " + (errorOut ? *errorOut : std::string()));
-		}
-
-		return false;
-	}
-
-	FlushResult FlushPending(const std::string& webhookUrlOverride)
-	{
-		FlushResult result{};
-
-		std::error_code ec;
-		if (!std::filesystem::exists(PendingDirectory(), ec))
-			return result;
-
-		std::vector<std::filesystem::path> queued;
-		for (const auto& entry : std::filesystem::directory_iterator(PendingDirectory(), ec))
-		{
-			if (ec)
-				break;
-
-			if (entry.is_regular_file() && entry.path().extension() == ".json")
-				queued.push_back(entry.path());
-		}
-
-		// Oldest first, so reports arrive in the order they happened.
-		std::sort(queued.begin(), queued.end());
-
-		EnsureDirectory(SentDirectory());
-		EnsureDirectory(FailedDirectory());
-
-		int attempts = 0;
-		for (const auto& path : queued)
-		{
-			if (attempts >= MAX_UPLOADS_PER_FLUSH)
-			{
-				++result.remaining;
-				continue;
-			}
-
-			std::string contents;
-			if (!ReadTextFile(path, contents))
-			{
-				++result.remaining;
-				continue;
-			}
-
-			std::string endpoint = webhookUrlOverride;
-			if (endpoint.empty())
-			{
-				std::string fromReport;
-				std::string copy = contents;
-				if (ExtractEndpoint(copy, fromReport))
-					endpoint = fromReport;
-			}
-
-			if (endpoint.empty())
-				endpoint = WebhookUrl();
-
-			if (endpoint.empty())
-			{
-				result.lastError = "no webhook URL available to send the queued reports";
-				++result.remaining;
-				continue;
-			}
-
-			++attempts;
-
-			std::string error;
-			if (PostToDiscord(endpoint, contents, &error))
-			{
-				++result.sent;
-				std::error_code moveEc;
-				std::filesystem::rename(path, SentDirectory() / path.filename(), moveEc);
-				if (moveEc)
-					std::filesystem::remove(path, moveEc);
-			}
+			std::ostringstream out;
+
+			out << "Comet crash log\n";
+			out << "===============\n\n";
+			out << "Kind: " << kind << "\n";
+			out << "Report ID: " << StampForId() << "-" << ProcessIdText() << "\n\n";
+
+			out << "--- Application ---\n" << ApplicationText() << "\n";
+			out << "--- Environment ---\n" << EnvironmentText() << "\n";
+			out << "--- System ---\n" << SystemText() << "\n";
+			out << "--- Exception ---\n" << FaultText(fault, note) << "\n";
+			out << "--- Stack trace ---\n";
+			if (stackTrace.empty())
+				out << "(no frames captured)\n";
 			else
 			{
-				result.lastError = error;
-
-				// A rejected endpoint will never accept it, so stop retrying and keep it locally.
-				if (error.find("rejected the report") != std::string::npos ||
-					error.find("must start with") != std::string::npos)
-				{
-					++result.failed;
-					std::error_code moveEc;
-					std::filesystem::rename(path, FailedDirectory() / path.filename(), moveEc);
-					if (moveEc)
-						std::filesystem::remove(path, moveEc);
-				}
-				else
-				{
-					++result.remaining;
-				}
+				for (const std::string& frame : stackTrace)
+					out << frame << "\n";
 			}
+			out << "\n--- Loaded MIDI and state ---\n" << StateText() << "\n";
+			out << "--- Settings ---\n" << SettingsText() << "\n";
+			out << "--- Console output (last " << LOG_LINES_IN_REPORT << " lines) ---\n";
+			out << CometLog::Tail(LOG_LINES_IN_REPORT) << "\n";
+
+			out << "Send this file in the Systematics Discord when reporting the crash.\n";
+			return out.str();
 		}
 
-		if (!result.lastError.empty())
-			WriteLastError(result.lastError);
-
-		return result;
-	}
-
-	int CountPending()
-	{
-		std::error_code ec;
-		if (!std::filesystem::exists(PendingDirectory(), ec))
-			return 0;
-
-		int count = 0;
-		for (const auto& entry : std::filesystem::directory_iterator(PendingDirectory(), ec))
+		std::filesystem::path WriteLogText(const std::string& kind, const std::string& text)
 		{
-			if (ec)
-				break;
+			const std::filesystem::path directory = LogDirectoryPath();
+			if (!EnsureDirectory(directory))
+				return {};
 
-			if (entry.is_regular_file() && entry.path().extension() == ".json")
-				++count;
+			std::string safeKind = kind;
+			for (char& c : safeKind)
+			{
+				if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+					c == '-' || c == '_'))
+					c = '-';
+			}
+
+			const std::filesystem::path path = directory /
+				("comet-" + safeKind + "-" + StampForId() + "-" + ProcessIdText() + ".log");
+
+			if (!WriteTextFile(path, text))
+				return {};
+			return path;
 		}
 
-		return count;
-	}
-
-	int DeletePending()
-	{
-		std::error_code ec;
-		if (!std::filesystem::exists(PendingDirectory(), ec))
-			return 0;
-
-		int removed = 0;
-		for (const auto& entry : std::filesystem::directory_iterator(PendingDirectory(), ec))
-		{
-			if (ec)
-				break;
-
-			if (!entry.is_regular_file())
-				continue;
-
-			std::error_code removeEc;
-			if (std::filesystem::remove(entry.path(), removeEc) && !removeEc)
-				++removed;
-		}
-
-		return removed;
-	}
-
-	void FlushPendingInBackground()
-	{
-		std::thread([]()
-		{
-			// Nothing to do is the common case; don't even spawn the work.
-			if (CountPending() == 0)
-				return;
-
-			const FlushResult result = FlushPending({});
-			if (result.sent > 0)
-				std::cout << "Crash reporter: sent " << result.sent << " queued report(s)." << std::endl;
-			if (result.remaining > 0 && !result.lastError.empty())
-				std::cerr << "Crash reporter: " << result.remaining
-					<< " report(s) still queued: " << result.lastError << std::endl;
-		}).detach();
-	}
-
-	std::string DefaultWebhookUrl()
-	{
-		if (const char* fromEnv = std::getenv(WEBHOOK_URL_ENV); fromEnv != nullptr && *fromEnv != '\0')
-			return fromEnv;
-
-		return COMET_CRASH_WEBHOOK;
-	}
-
-	std::string WebhookUrl()
-	{
-		return g_webhookUrl;
-	}
-
-	int RunSenderMode()
-	{
-		const FlushResult result = FlushPending({});
-
-		if (result.sent > 0)
-			std::cout << "Crash reporter: sent " << result.sent << " report(s)." << std::endl;
-
-		if (result.remaining > 0)
-		{
-			std::cerr << "Crash reporter: " << result.remaining << " report(s) still queued";
-			if (!result.lastError.empty())
-				std::cerr << " (" << result.lastError << ")";
-			std::cerr << std::endl;
-		}
-
-		return result.remaining == 0 ? 0 : 1;
-	}
-
-	// -------------------------------------------------------------------------------------------
-	// Handlers
-	// -------------------------------------------------------------------------------------------
-	namespace
-	{
-		// Spawns "<Comet.exe> --send-crash-reports" so the upload happens in a healthy process
-		// rather than inside the one that is already dying.
-		void SpawnSenderProcess()
-		{
-	#if defined(_WIN32)
-			const std::wstring exePath = ExecutablePathW();
-			if (exePath.empty())
-				return;
-
-			std::wstring commandLine = L"\"" + exePath + L"\" --send-crash-reports";
-
-			STARTUPINFOW startup{};
-			startup.cb = sizeof(startup);
-			PROCESS_INFORMATION process{};
-
-			// CREATE_NO_WINDOW keeps the helper from flashing a console on screen.
-			const BOOL created = CreateProcessW(exePath.c_str(), commandLine.data(),
-				nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
-
-			if (!created)
-				return;
-
-			CloseHandle(process.hThread);
-			CloseHandle(process.hProcess);
-	#else
-			// Nothing here is safe to run from a signal handler on POSIX, so the report simply waits
-			// in the queue and goes out on the next launch instead.
-		#endif
-		}
-
-		// Writes the report and asks a fresh copy of Comet to upload it. Deliberately does no
-		// network work: the process is already in a bad state, and the one place Comet is known to
-		// fall over is inside libcurl, so the upload must not share this process.
+		// ---------------------------------------------------------------------------------------
+		// Handlers
+		// ---------------------------------------------------------------------------------------
 		void ReportAndTerminate(const std::string& kind, const Fault& fault,
 			const std::vector<std::string>& stackTrace, const std::string& note)
 		{
-			// Re-entrancy guard: if we crash while reporting, just die.
+			// Re-entrancy guard: if we crash while writing the log, just die.
 			bool expected = false;
 			if (!g_reporting.compare_exchange_strong(expected, true))
 				return;
 
-			if (!IsEnabled())
+			if (!g_enabled)
 				return;
 
 			try
 			{
-				const std::string report = BuildReportInternal(kind, fault, stackTrace, note);
+				const std::string text = BuildLogText(kind, fault, stackTrace, note);
+				const std::filesystem::path path = WriteLogText(kind, text);
 
-				const json parsed = json::parse(report, nullptr, false);
-				const std::string reportId = parsed.is_object()
-					? parsed.value("reportId", std::string("crash"))
-					: std::string("crash");
-
-				std::string safeId;
-				for (char c : reportId)
-				{
-					if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-						c == '-' || c == '_')
-						safeId += c;
-				}
-
-				if (safeId.empty())
-					safeId = "crash";
-
-				const std::filesystem::path directory = PendingDirectory();
-
-				bool written = false;
-				if (EnsureDirectory(directory))
-					written = WriteTextFile(directory / (safeId + ".json"), report);
-
-				// Console output goes through the tee, so this also lands in the log tail of any
-				// *next* report, which is a useful breadcrumb.
-				if (written)
-					std::cout << "Crash reporter: wrote " << safeId << ".json" << std::endl;
+				if (!path.empty())
+					std::cout << "Crash reporter: wrote " << path.string() << std::endl;
 				else
-					std::cerr << "Crash reporter: could not write a report to "
-						<< directory.string() << std::endl;
-
-				if (written)
-					SpawnSenderProcess();
+					std::cerr << "Crash reporter: could not write a crash log" << std::endl;
 			}
 			catch (...)
 			{
-				// Reporting is best-effort; never let it mask the original failure.
+				// Logging is best-effort; never let it mask the original failure.
 			}
 		}
 
@@ -1993,7 +1049,7 @@ namespace CrashReporter
 
 		void OpenSymbols()
 		{
-		#if defined(_WIN32)
+#if defined(_WIN32)
 			const HANDLE process = GetCurrentProcess();
 
 			// Undecorated names, load .pdb lazily, resolve file/line, and never pop a dialog about
@@ -2002,13 +1058,12 @@ namespace CrashReporter
 				SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
 
 			// Search next to the executable first so a shipped/CI build finds its own .pdb.
-			std::error_code ec;
 			const std::filesystem::path exeDir =
 				std::filesystem::path(ExecutablePathW()).parent_path();
 			SymSetSearchPathW(process, exeDir.wstring().c_str());
 
 			g_symbolsReady = SymInitializeW(process, exeDir.wstring().c_str(), TRUE) != FALSE;
-		#endif
+#endif
 		}
 	}
 
@@ -2022,14 +1077,14 @@ namespace CrashReporter
 
 		OpenSymbols();
 
-	#if defined(_WIN32)
+#if defined(_WIN32)
 		g_previousFilter = SetUnhandledExceptionFilter(&OnUnhandledException);
 		g_previousTerminate = std::set_terminate(&OnTerminate);
 
 		// Only SIGABRT is hooked here. The CRT already wraps main in a __try that maps an access
 		// violation to SIGSEGV and calls the SIGSEGV handler first, so installing one would beat
 		// the filter above to the punch and discard the exception code, faulting module and access
-		// address - the most useful parts of the report. Leaving SIGSEGV/SIGFPE/SIGILL at SIG_DFL
+		// address - the most useful parts of the log. Leaving SIGSEGV/SIGFPE/SIGILL at SIG_DFL
 		// lets the CRT's filter pass the exception along, and the SEH handler below sees it whole.
 		std::signal(SIGABRT, &OnSignal);
 
@@ -2058,22 +1113,98 @@ namespace CrashReporter
 			if (function)
 				fault.detail = "Function: " + Utf8FromWide(function);
 			if (file)
-			{
 				fault.detail += "\nFile: " + Utf8FromWide(file) + ":" + std::to_string(line);
-			}
 			if (expression)
 				fault.detail += "\nExpression: " + Utf8FromWide(expression);
 
 			ReportAndTerminate(KIND_CRASH, fault, CaptureStackTrace(MAX_STACK_FRAMES), {});
 		});
-	#else
+#else
 		// Without SEH the signals are the only way to catch a fault, so all of them are hooked.
 		g_previousTerminate = std::set_terminate(&OnTerminate);
 		std::signal(SIGABRT, &OnSignal);
 		std::signal(SIGSEGV, &OnSignal);
 		std::signal(SIGFPE, &OnSignal);
 		std::signal(SIGILL, &OnSignal);
-	#endif
+#endif
+	}
+
+	void SetAppInfo(std::string version, std::string buildType, std::string buildConfig)
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_version = std::move(version);
+		g_buildType = std::move(buildType);
+		g_buildConfig = std::move(buildConfig);
+	}
+
+	void SetGraphicsInfo(std::string vendor, std::string renderer, std::string version, std::string glVersion)
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_gpuVendor = std::move(vendor);
+		g_gpuRenderer = std::move(renderer);
+		g_gpuVersion = std::move(version);
+		g_glVersion = std::move(glVersion);
+	}
+
+	void SetMidiInfo(const MidiInfo& info)
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_midi = info;
+	}
+
+	void ClearMidiInfo()
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_midi = MidiInfo{};
+	}
+
+	void SetRuntimeFlags(const RuntimeFlags& flags)
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_flags = flags;
+	}
+
+	void SetSettingsSnapshot(std::string json)
+	{
+		std::lock_guard<std::mutex> lock(g_contextMutex);
+		g_settingsSnapshot = std::move(json);
+	}
+
+	void SetEnabled(bool enabled)
+	{
+		g_enabled = enabled;
+	}
+
+	std::string LogDirectory()
+	{
+		const std::filesystem::path directory = LogDirectoryPath();
+		EnsureDirectory(directory);
+
+#if defined(_WIN32)
+		return Utf8FromWide(directory.wstring());
+#else
+		return directory.string();
+#endif
+	}
+
+	std::string WriteLog(const std::string& kind, const std::string& note)
+	{
+		try
+		{
+			const Fault noFault{};
+			const std::string text = BuildLogText(kind, noFault, CaptureStackTrace(MAX_STACK_FRAMES), note);
+			const std::filesystem::path path = WriteLogText(kind, text);
+
+#if defined(_WIN32)
+			return path.empty() ? std::string() : Utf8FromWide(path.wstring());
+#else
+			return path.empty() ? std::string() : path.string();
+#endif
+		}
+		catch (...)
+		{
+			return {};
+		}
 	}
 
 	void CrashForTesting()

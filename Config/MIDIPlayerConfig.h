@@ -63,7 +63,6 @@ struct MIDIPlayerConfig
 	struct ConfigApp
 	{
 		size_t currThemeID = 0;
-		std::string language = "en-US";
 	};
 
 	struct ConfigOverlayInfo
@@ -135,7 +134,8 @@ struct MIDIPlayerConfig
 	{
 		bool multithreadedLoading = true;
 		bool timeBasedLoading = false;
-		float playSpeed = 1.0f;
+		// Read repeated layers and tracks once while still counting every represented note.
+		bool deduplicateLayers = true;
 		bool loadNotesOnly = false;
 		bool usePlayThread = true;
 		// Path to an optional .CJCMCG chart used as the note counter/graph source. Empty means the
@@ -206,26 +206,8 @@ struct MIDIPlayerConfig
 		}
 	};
 
-	// Layered DeDupe: files that store the same layer/track data more than once. Neither option
-	// changes what the song contains - a repeated track is still fully loaded - it only avoids
-	// decoding the same bytes a second time.
-	struct ConfigLayeredDeDupe
-	{
-		// Parse a repeated track chunk once and copy the parsed result for its repeats.
-		bool deduplicateRepeatedTracks = true;
-		// Skip the byte-for-byte comparison: a chunk whose size matches an earlier one is taken as a
-		// repeat of it. Fast, and exact unless two different tracks happen to be the same size.
-		bool assumeLayerRepeats = true;
-		// Fast dedup of the layers themselves: once the first tile of a layer repeats, the rest of
-		// that layer is assumed to be the same tile when its size divides exactly, so the remaining
-		// bytes are never decoded. Requires deduplicateRepeatedTracks. Never saved: it is silently
-		// wrong on a layer made of different tiles whose sizes happen to add up to a multiple.
-		bool riskyFastDedupe = false;
-	};
-
-	// Crash reporting. The destination comes from the build setting (COMET_CRASH_WEBHOOK) or the
-	// environment, so there is no URL here for a user or a config file to change; only the switch lives in
-	// config. Nothing is captured or sent until the user opts in.
+	// Crash logging. When enabled, a crash writes a .log file the user can send along with a
+	// bug report. Nothing is captured until the user opts in.
 	struct ConfigCrashReports
 	{
 		// Off by default: nothing is captured or sent until the user opts in.
@@ -342,6 +324,9 @@ struct MIDIPlayerConfig
 		bool showStats = true;
 		// Global score view, available to every renderer.
 		bool showScore = false;
+		// How much of the window the score page covers, and therefore how large the engraving
+		// is. 50 keeps Plus2's original top-half layout.
+		int scoreScale = 50;
 		bool loopColors = true;
 		bool shuffleColors = false;
 		int shuffleSeed = 0;
@@ -369,7 +354,6 @@ struct MIDIPlayerConfig
 	};
 
 	int version = 0;
-	std::string language = "en";
 
 	ConfigApp app{};
 	ConfigMIDI midi{};
@@ -379,7 +363,6 @@ struct MIDIPlayerConfig
 	ConfigGraph graph{};
 	ConfigBanner banner{};
 	ConfigMultiplier multiplier{};
-	ConfigLayeredDeDupe layeredDedupe{};
 	ConfigCrashReports crashReports{};
 
 	YAML::Node audioSettings;

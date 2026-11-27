@@ -25,7 +25,7 @@ jobs:
           fi
 
       - name: Configure
-        run: cmake -B build -S . -A x64 -DCOMET_CRASH_WEBHOOK=
+        run: cmake -B build -S . -A x64
 
       - name: Build application
         run: cmake --build build --config ${{ inputs.build_type }} --parallel

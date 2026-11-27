@@ -39,9 +39,9 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		config = ConfigSection(root);
 
 		const int configVersion = config->GetInt("version", 1);
-		if (configVersion < 2)
+		if (configVersion < 3)
 			std::cout << "Migrating config version " << configVersion
-				<< " to 2; unknown fields keep their defaults." << std::endl;
+				<< " to 3; removed features keep their defaults." << std::endl;
 
 		std::optional<ConfigSection> appSec = config->GetSection("app");
 		
@@ -49,7 +49,6 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		{
 			ConfigApp app;
 			app.currThemeID = appSec->GetInt("themeID", 0);
-			app.language = appSec->GetString("language", "en-US");
 			this->app = app;
 		}
 
@@ -119,9 +118,18 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		{
 			ConfigMIDI midi;
 			midi.multithreadedLoading = midiSec->GetBoolean("multithreaded", true);
-			midi.playSpeed = std::clamp(midiSec->GetFloat("playSpeed", 1.0f), 0.1f, 3.0f);
 			midi.timeBasedLoading = midiSec->GetBoolean("timeBased", false);
 			midi.cjcmcgPath = midiSec->GetString("cjcmcgPath", "");
+
+			bool deduplicateLayers = midiSec->GetBoolean("deduplicateLayers", true);
+			if (!(root["midi"] && root["midi"]["deduplicateLayers"]))
+			{
+				// Configs written before the sub-options were merged keep their old main switch.
+				std::optional<ConfigSection> legacyDedupe = config->GetSection("layeredDeDupe");
+				if (legacyDedupe)
+					deduplicateLayers = legacyDedupe->GetBoolean("deduplicateRepeatedTracks", true);
+			}
+			midi.deduplicateLayers = deduplicateLayers;
 
 			this->midi = midi;
 		}
@@ -178,15 +186,6 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			this->multiplier = multiplier;
 		}
 
-		std::optional<ConfigSection> dedupeSec = config->GetSection("layeredDeDupe");
-		if (dedupeSec)
-		{
-			ConfigLayeredDeDupe layeredDedupe;
-			layeredDedupe.deduplicateRepeatedTracks = dedupeSec->GetBoolean("deduplicateRepeatedTracks", true);
-			layeredDedupe.assumeLayerRepeats = dedupeSec->GetBoolean("assumeLayerRepeats", true);
-			this->layeredDedupe = layeredDedupe;
-		}
-
 		std::optional<ConfigSection> crashSec = config->GetSection("crashReports");
 		if (crashSec)
 		{
@@ -233,6 +232,7 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			render.showCounter = renderSec->GetBoolean("showCounter", true);
 			render.showStats = renderSec->GetBoolean("showStats", true);
 			render.showScore = renderSec->GetBoolean("showScore", false);
+			render.scoreScale = std::clamp(renderSec->GetInt("scoreScale", 50), 15, 100);
 
 			this->render = render;
 		}
@@ -240,6 +240,14 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 		if (root["audio"])
 		{
 			audioSettings = root["audio"];
+
+			// Before version 3, index 0 was OmniMIDI, 1 was Prerendered and 2 was Maestro.
+			// OmniMIDI is gone, so keep a saved internal engine instead of resetting it.
+			if (configVersion < 3 && audioSettings["currentEngine"])
+			{
+				const int legacyEngine = audioSettings["currentEngine"].as<int>(-1);
+				audioSettings["currentEngine"] = legacyEngine == 2 ? 1 : 0;
+			}
 		}
 		
 		if (root["renderers"])
@@ -270,10 +278,9 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 void MIDIPlayerConfig::SaveConfig()
 {
 	YAML::Node config;
-	config["version"] = 2;
+	config["version"] = 3;
 
 	config["app"]["themeID"] = app.currThemeID;
-	config["app"]["language"] = app.language;
 
 	config["overlay"]["scale"] = overlayInfo.scale;
 	config["overlay"]["blurBehind"] = overlayInfo.blurBehind;
@@ -299,8 +306,8 @@ void MIDIPlayerConfig::SaveConfig()
 	config["banner"]["synthesiaScale"] = banner.synthesiaScale;
 
 	config["midi"]["multithreaded"] = midi.multithreadedLoading;
-	config["midi"]["playSpeed"] = midi.playSpeed;
 	config["midi"]["timeBased"] = midi.timeBasedLoading;
+	config["midi"]["deduplicateLayers"] = midi.deduplicateLayers;
 	config["midi"]["cjcmcgPath"] = midi.cjcmcgPath;
 
 	config["navigation"]["alwaysHideBar"] = navigation.alwaysHideBar;
@@ -316,9 +323,6 @@ void MIDIPlayerConfig::SaveConfig()
 	config["multiplier"]["unmultipliedTracks"] = YAML::Node(YAML::NodeType::Sequence);
 	for (uint16_t track : multiplier.unmultipliedTracks)
 		config["multiplier"]["unmultipliedTracks"].push_back((int)track);
-
-	config["layeredDeDupe"]["deduplicateRepeatedTracks"] = layeredDedupe.deduplicateRepeatedTracks;
-	config["layeredDeDupe"]["assumeLayerRepeats"] = layeredDedupe.assumeLayerRepeats;
 
 	config["crashReports"]["enabled"] = crashReports.enabled;
 	config["rememberFilePresets"] = rememberFilePresets;
@@ -351,6 +355,7 @@ void MIDIPlayerConfig::SaveConfig()
 	config["render"]["showCounter"] = render.showCounter;
 	config["render"]["showStats"] = render.showStats;
 	config["render"]["showScore"] = render.showScore;
+	config["render"]["scoreScale"] = render.scoreScale;
 
 	if (audioSettings.IsDefined())
 	{

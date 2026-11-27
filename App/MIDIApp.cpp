@@ -68,8 +68,8 @@ namespace
 	// same fall lead puts the first note at 2.82 s while keeping the hit at 5.4 s.
 	constexpr double SYNTHESIA_NOTE_FALL_LEAD_SECONDS = 2.58;
 
-	// A compact view of the settings, so a report says how the app was configured without needing
-	// the whole config.yml. The webhook URL is deliberately left out; the reporter strips it too.
+	// A compact view of the settings, so a crash log says how the app was configured without
+	// needing the whole config.yml.
 	std::string BuildSettingsSnapshot(MIDIPlayerConfig& cfg)
 	{
 		nlohmann::json settings;
@@ -96,6 +96,7 @@ namespace
 
 		settings["midi"]["multithreaded"] = cfg.midi.multithreadedLoading;
 		settings["midi"]["timeBased"] = cfg.midi.timeBasedLoading;
+		settings["midi"]["deduplicateLayers"] = cfg.midi.deduplicateLayers;
 		settings["midi"]["loadNotesOnly"] = cfg.midi.loadNotesOnly;
 		settings["midi"]["cjcmcgPath"] = cfg.midi.cjcmcgPath;
 
@@ -119,7 +120,6 @@ namespace
 void MIDIApp::UpdateCrashContext()
 {
 	CrashReporter::SetEnabled(config.crashReports.enabled);
-	// The endpoint comes from the build setting or COMET_CRASH_WEBHOOK; nothing here stores it.
 	CrashReporter::SetSettingsSnapshot(BuildSettingsSnapshot(config));
 }
 
@@ -141,13 +141,12 @@ MIDIApp::MIDIApp(MainWindow* mainWindow)
 
 	localization = std::make_unique<Localization>();
 	localization->PreloadLanguages();
-	SetLanguage(config.app.language);
+	SetLanguage("en-US");
 
 	UpdateCrashContext();
 
 	renderView = std::make_shared<RenderView>();
 	timer = std::make_shared<MIDITimer>();
-	timer->ChangeSpeed(config.midi.playSpeed);
 	navigationBar = std::make_unique<NavigationBar>(this, renderView.get());
 
 	noteCounterInfo = std::make_shared<NoteCounterInfo>();
@@ -182,8 +181,6 @@ void MIDIApp::SetLanguage(const std::string& id)
 	if (!localization->LoadLanguage(requested))
 		localization->LoadLanguage("en-US");
 
-	const Localization::LanguageKey* current = localization->GetCurrentLanguage();
-	config.app.language = current ? current->id : "en-US";
 	localizationDirty = true;
 }
 
@@ -263,13 +260,11 @@ std::shared_ptr<AbstractMIDILoader> MIDIApp::CreateLoader(const char* path, cons
 	loader->SetWorkerLimit(config.midi.multithreadedLoading ? 0 : 1);
 
 	loader->SetLoadOnlyNotes(config.midi.loadNotesOnly);
-	loader->SetLayeredDedupe(config.layeredDedupe.deduplicateRepeatedTracks,
-		config.layeredDedupe.assumeLayerRepeats,
-		config.layeredDedupe.riskyFastDedupe && config.layeredDedupe.deduplicateRepeatedTracks);
+	loader->SetLayeredDedupe(config.midi.deduplicateLayers, config.midi.deduplicateLayers, false);
 
 	// The archive reader is the only place the layers themselves can be skipped, and it is static
 	// because extraction happens before a loader exists.
-	ArchiveLoader::SetRiskyFastDedupe(config.layeredDedupe.riskyFastDedupe && config.layeredDedupe.deduplicateRepeatedTracks);
+	ArchiveLoader::SetRiskyFastDedupe(false);
 	return loader;
 }
 
@@ -377,11 +372,6 @@ void MIDIApp::SetLoadError(const std::string& message)
 	std::lock_guard<std::mutex> lock(loadErrorMutex);
 	loadError = message;
 	hasLoadError = true;
-}
-
-bool MIDIApp::ConsumeNotice(std::string& message)
-{
-	return MIDIOut::ConsumeFaultNotice(message);
 }
 
 bool MIDIApp::ConsumeLoadError(std::string& message)
@@ -562,12 +552,18 @@ void MIDIApp::SetRenderer()
 	else colorAsset.RestoreColors();
 }
 
-bool MIDIApp::IsPreparingPerKeyData() const
+bool MIDIApp::IsProcessingVisuals() const
 {
-	return pendingRendererSequence && pendingRendererSequence->IsMergedNotesPreparing();
+	return hasPendingSeq.load() ||
+		(pendingRendererSequence && !pendingRendererSequence->IsMergedNotesReady());
 }
 
-float MIDIApp::GetPerKeyPreparationProgress() const
+bool MIDIApp::IsFileVisualProcessing() const
+{
+	return hasPendingSeq.load() || (pendingRendererSequence && pendingRendererStartsPlayback);
+}
+
+float MIDIApp::GetVisualProcessingProgress() const
 {
 	return pendingRendererSequence ? pendingRendererSequence->GetMergedNotesProgress() : 0.0f;
 }

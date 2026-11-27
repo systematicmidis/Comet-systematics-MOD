@@ -3,7 +3,6 @@
 #include <memory>
 #include <yaml-cpp/yaml.h>
 
-#include "MIDIOut.h"
 #include "MIDI/MIDISequence.h"
 #include "MIDI/Timer/MIDITimer.h"
 
@@ -45,7 +44,6 @@ protected:
 
 enum class AudioEngineType
 {
-	Realtime,
 	Prerendered,
 	Maestro,
 	Count
@@ -115,8 +113,7 @@ public:
 	YAML::Node GetSettings();
 	void LoadSettings(const YAML::Node& node);
 private:
-	std::shared_ptr<MIDIOut> midiOut;
-	AudioEngineType currentEngine = AudioEngineType::Realtime;
+	AudioEngineType currentEngine = AudioEngineType::Prerendered;
 	// Remembered so an engine switched in after the song loaded still knows what to render.
 	std::string lastSourcePath;
 
