@@ -4,6 +4,8 @@
 #include "App/MIDIApp.h"
 #include "App/UI/Themes/Themes.h"
 #include "Comet.h"
+#include "Utils.h"
+#include "../GPUImage.h"
 #include "Config/MIDIPlayerConfig.h"
 #include "MIDI/Timer/MIDITimer.h"
 #include "imgui.h"
@@ -171,8 +173,86 @@ namespace
 	}
 }
 
+BannerRenderer::~BannerRenderer() = default;
+
 void BannerRenderer::Reset()
 {
+}
+
+BannerRenderer::Reveal BannerRenderer::GetReveal(float time, int height) const
+{
+	const MIDIPlayerConfig::ConfigBanner& banner = app->GetConfig()->banner;
+	if (banner.animation == BannerAnimation::Instant) return {};
+
+	const float duration = std::clamp(banner.animationSeconds, 0.05f, 3.0f);
+	const float progress = SmoothStep(time / duration);
+
+	Reveal reveal;
+	switch (banner.animation)
+	{
+	case BannerAnimation::Fade:
+		reveal.alpha = progress;
+		break;
+	case BannerAnimation::OpenFromMiddle:
+		reveal.open = progress;
+		break;
+	case BannerAnimation::SlideDown:
+		reveal.alpha = progress;
+		reveal.offsetY = -(1.0f - progress) * (float)height * 0.55f;
+		break;
+	case BannerAnimation::Instant:
+	default:
+		break;
+	}
+
+	return reveal;
+}
+
+void BannerRenderer::EnsureCustomImage()
+{
+	const std::string path = app->GetConfig()->banner.imagePath;
+	if (path == customImagePath) return;
+
+	customImagePath = path;
+	customImage.reset();
+	if (path.empty()) return;
+
+	customImage = std::make_unique<GPUImage>(Utils::TryGetStream(std::filesystem::u8path(path)));
+}
+
+void BannerRenderer::DrawCustomImage(ImDrawList* draw, int width, int height, float bannerTop,
+	float bannerHeight, float offsetY, float alpha) const
+{
+	if (customImage == nullptr || !customImage->IsValidTexture() || customImage->height <= 0)
+		return;
+
+	const MIDIPlayerConfig::ConfigBanner& banner = app->GetConfig()->banner;
+	const float imageScale = std::clamp(banner.imageScale, 0.1f, 1.0f);
+	const float aspect = (float)customImage->width / (float)customImage->height;
+
+	float imageHeight = bannerHeight * imageScale;
+	float imageWidth = imageHeight * aspect;
+	const float maxWidth = (float)width * 0.28f;
+	if (imageWidth > maxWidth && imageWidth > 0.0f)
+	{
+		imageWidth = maxWidth;
+		imageHeight = imageWidth / aspect;
+	}
+
+	const float margin = (float)width * 0.025f;
+	float left = margin;
+	if (banner.imageAlignment == BannerImageAlignment::Center)
+		left = ((float)width - imageWidth) * 0.5f;
+	else if (banner.imageAlignment == BannerImageAlignment::Right)
+		left = (float)width - margin - imageWidth;
+
+	left += banner.imageOffsetX * (float)width;
+	const float top = bannerTop + (bannerHeight - imageHeight) * 0.5f
+		+ banner.imageOffsetY * (float)height + offsetY;
+	const ImU32 tint = WithAlpha(IM_COL32(255, 255, 255, 255), alpha);
+
+	draw->AddImage((ImTextureID)(intptr_t)customImage->GetTextureID(), ImVec2(left, top),
+		ImVec2(left + imageWidth, top + imageHeight), ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
 }
 
 BannerRenderer::Style BannerRenderer::GetStyle() const
@@ -242,66 +322,91 @@ void BannerRenderer::Render()
 
 	if (time >= (float)BANNER_SECONDS) return;
 
+	EnsureCustomImage();
+	const Reveal reveal = GetReveal(time, height);
+	if (reveal.alpha <= 0.0f || reveal.open <= 0.0f) return;
+
 	// Background still sits above the 3D scene, but ImGui windows (the menu bar, dialogs) draw
 	// after it. That keeps the banner behind menus instead of painting over them.
 	ImDrawList* draw = ImGui::GetBackgroundDrawList();
+	const bool clipped = reveal.open < 1.0f;
+	if (clipped)
+	{
+		const float halfWidth = (float)width * 0.5f * reveal.open;
+		draw->PushClipRect(ImVec2((float)width * 0.5f - halfWidth, 0.0f),
+			ImVec2((float)width * 0.5f + halfWidth, (float)height), true);
+	}
+
 	if (GetStyle() == Style::Synthesia)
-		DrawSynthesia(draw, width, height, time);
+		DrawSynthesia(draw, width, height, time, reveal);
 	else
-		DrawUMP(draw, width, height, time);
+		DrawUMP(draw, width, height, time, reveal);
+
+	if (clipped)
+		draw->PopClipRect();
 }
 
-void BannerRenderer::DrawUMP(ImDrawList* draw, int width, int height, float time) const
+void BannerRenderer::DrawUMP(ImDrawList* draw, int width, int height, float time,
+	const Reveal& reveal) const
 {
 	if (time >= (float)UMP_SECONDS) return;
 
 	// The reference card fades as one layer: the white band and its black text lose opacity
-	// together from 2.80 s to 3.00 s.
+	// together from 2.80 s to 3.00 s. The opening animation is applied on top of that fade.
 	float alpha = 1.0f;
 	if (time > (float)UMP_FADE_START_SECONDS)
 		alpha = Clamp01(1.0f - (time - (float)UMP_FADE_START_SECONDS) / (float)UMP_FADE_SECONDS);
+	alpha *= reveal.alpha;
 	if (alpha <= 0.0f) return;
 
-	const ImU32 bandColor = IM_COL32(255, 255, 255, (int)std::lround(alpha * 255.0f));
-	const ImU32 textColor = IM_COL32(0, 0, 0, (int)std::lround(alpha * 255.0f));
+	// UMP card colors are configurable. The color's alpha sets the band's opacity, and the fade
+	// is applied on top of it. Synthesia's banner never reads these fields.
+	const MIDIPlayerConfig::ConfigBanner& banner = app->GetConfig()->banner;
+	const float scale = std::clamp(banner.umpScale, MIN_UMP_BANNER_SCALE, MAX_UMP_BANNER_SCALE);
+	const ImU32 bandColor = WithAlpha(ImGui::ColorConvertFloat4ToU32(banner.umpBackgroundCol), alpha);
+	const ImU32 titleColor = WithAlpha(ImGui::ColorConvertFloat4ToU32(banner.umpTitleCol), alpha);
+	const ImU32 creditColor = WithAlpha(ImGui::ColorConvertFloat4ToU32(banner.umpCreditCol), alpha);
 
 	const std::string title = GetTitle();
 	ImFont* font = GetUMPFont();
 	if (title.empty() || font == nullptr) return;
 
-	// UMP's opening card: a full-width white band across the middle of the frame, with the credit
+	// UMP's opening card: a full-width band across the middle of the frame, with the credit
 	// line above the song title in UMP's card face (or the selected overlay font, when one is set).
-	const float bannerHeight = std::max(1.0f, (float)height * UMP_BAND_HEIGHT_FRACTION);
-	const float bannerTop = ((float)height - bannerHeight) * 0.5f;
+	const float bannerHeight = std::max(1.0f, (float)height * UMP_BAND_HEIGHT_FRACTION * scale);
+	const float bannerTop = ((float)height - bannerHeight) * 0.5f + reveal.offsetY;
 
 	draw->AddRectFilled(ImVec2(0.0f, bannerTop), ImVec2((float)width, bannerTop + bannerHeight),
 		bandColor);
+	DrawCustomImage(draw, width, height, bannerTop, bannerHeight, 0.0f, alpha);
 
-	float titleSize = (float)height * UMP_TITLE_SIZE_FRACTION;
+	float titleSize = (float)height * UMP_TITLE_SIZE_FRACTION * scale;
 	FitFontSize(font, titleSize, title.c_str(), (float)width * 0.92f);
 
-	float creditSize = (float)height * UMP_CREDIT_SIZE_FRACTION;
+	float creditSize = (float)height * UMP_CREDIT_SIZE_FRACTION * scale;
 	const std::string credit = app->IsRendering()
 		? "Rendered on Systematics Comet MOD V" + std::string(COMET_VERSION)
 		: "Now playing";
 	FitFontSize(font, creditSize, credit.c_str(), (float)width * 0.92f);
 
 	// Place the line boxes so the measured ink rows land where the reference has them.
-	const float creditTop = bannerTop + (float)height * UMP_CREDIT_INK_TOP_FRACTION - creditSize * TEXT_INK_OFFSET_FRACTION;
-	const float titleTop = bannerTop + (float)height * UMP_TITLE_INK_TOP_FRACTION - titleSize * TEXT_INK_OFFSET_FRACTION;
+	const float creditTop = bannerTop + (float)height * UMP_CREDIT_INK_TOP_FRACTION * scale - creditSize * TEXT_INK_OFFSET_FRACTION;
+	const float titleTop = bannerTop + (float)height * UMP_TITLE_INK_TOP_FRACTION * scale - titleSize * TEXT_INK_OFFSET_FRACTION;
 
-	AddCenteredText(draw, font, creditSize, (float)width * 0.5f, creditTop, textColor, credit.c_str());
-	AddCenteredText(draw, font, titleSize, (float)width * 0.5f, titleTop, textColor, title.c_str());
+	AddCenteredText(draw, font, creditSize, (float)width * 0.5f, creditTop, creditColor, credit.c_str());
+	AddCenteredText(draw, font, titleSize, (float)width * 0.5f, titleTop, titleColor, title.c_str());
 }
 
-void BannerRenderer::DrawSynthesia(ImDrawList* draw, int width, int height, float time) const
+void BannerRenderer::DrawSynthesia(ImDrawList* draw, int width, int height, float time,
+	const Reveal& reveal) const
 {
 	const std::string title = GetTitle();
 	// Synthesia's own UI typeface is closest to the app's default font.
 	ImFont* font = Fonts::DefaultFont;
 	if (title.empty() || font == nullptr) return;
 
-	const float alpha = FadeOut(time, BANNER_SECONDS, SYNTHESIA_FADE_OUT_START, SYNTHESIA_FADE_OUT_SECONDS);
+	const float alpha = FadeOut(time, BANNER_SECONDS, SYNTHESIA_FADE_OUT_START, SYNTHESIA_FADE_OUT_SECONDS)
+		* reveal.alpha;
 	if (alpha <= 0.0f) return;
 
 	const SynthBarColors colors = GetSynthBarColors(app);
@@ -315,7 +420,7 @@ void BannerRenderer::DrawSynthesia(ImDrawList* draw, int width, int height, floa
 		MIN_SYNTHESIA_BANNER_SCALE, MAX_SYNTHESIA_BANNER_SCALE);
 	const float baseBarTop = (float)height * SYNTHESIA_BAR_TOP_FRACTION;
 	const float baseBarHeight = std::max(1.0f, (float)height * SYNTHESIA_BAR_HEIGHT_FRACTION);
-	const float barCenter = baseBarTop + baseBarHeight * 0.5f;
+	const float barCenter = baseBarTop + baseBarHeight * 0.5f + reveal.offsetY;
 	const float barHeight = std::max(1.0f, baseBarHeight * scale);
 	const float barTop = barCenter - barHeight * 0.5f;
 	const float barBottom = barTop + barHeight;
@@ -332,6 +437,7 @@ void BannerRenderer::DrawSynthesia(ImDrawList* draw, int width, int height, floa
 	draw->AddRectFilled(ImVec2(0.0f, barTop + borderHeight), ImVec2((float)width, fillTop), shadow);
 	draw->AddRectFilled(ImVec2(0.0f, fillBottom), ImVec2((float)width, barBottom - borderHeight), shadow);
 	draw->AddRectFilled(ImVec2(0.0f, barBottom - borderHeight), ImVec2((float)width, barBottom), border);
+	DrawCustomImage(draw, width, height, fillTop, fillBottom - fillTop, 0.0f, alpha);
 
 	if (time >= (float)(SYNTHESIA_TITLE_OUT_START + SYNTHESIA_TITLE_OUT_SECONDS)) return;
 

@@ -5,8 +5,9 @@
 class MIDIApp;
 class GPUImage;
 
-// Shared score view. It draws a full white four-measure page with a grand staff, above the
-// renderer and its overlays, so every visual mode can show it like Plus2's Score View.
+// Shared score view. It draws a white four-measure page with a grand staff over any renderer
+// (half-height by default), and fills the window when the dedicated Sheet Music renderer is
+// selected.
 class ScoreOverlay
 {
 public:

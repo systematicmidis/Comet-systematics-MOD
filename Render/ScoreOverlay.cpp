@@ -58,6 +58,7 @@ namespace
 		uint32_t gate = 0;
 		uint32_t value = 0;
 		uint32_t key = 0;
+		int sharpsFlats = 0;
 		bool treble = true;
 		bool active = false;
 	};
@@ -73,6 +74,147 @@ namespace
 		uint32_t value = 0;
 		std::vector<size_t> glyphs;
 	};
+
+	struct MeterSegment
+	{
+		long tick = 0;
+		int numerator = 4;
+		int denominator = 4;
+		long measureTicks = 1;
+		long firstMeasure = 0;
+	};
+
+	struct MeasureSpan
+	{
+		long startTick = 0;
+		long endTick = 1;
+		int numerator = 4;
+		int denominator = 4;
+		int sharpsFlats = 0;
+		bool keyChanged = false;
+		bool timeChanged = false;
+		float keyWidth = 0.0f;
+		float timeWidth = 0.0f;
+		float left = 0.0f;
+		float right = 0.0f;
+		float noteLeft = 0.0f;
+		float noteRight = 0.0f;
+	};
+
+	// MIDI time signatures are change events, not one global meter. Build a map of meter
+	// segments and their first global measure number so a page can contain, for example,
+	// two 4/4 measures followed by two 3/4 measures.
+	std::vector<MeterSegment> BuildMeterSegments(const MIDISequence* seq)
+	{
+		std::vector<MeterSegment> segments;
+		auto append = [&](long tick, int numerator, int denominator)
+			{
+				if (numerator <= 0) numerator = 4;
+				if (denominator <= 0) denominator = 4;
+				const long measureTicks = std::max(1L, (long)seq->resolution * 4L * numerator / denominator);
+				if (!segments.empty() && segments.back().tick == tick)
+				{
+					segments.back().numerator = numerator;
+					segments.back().denominator = denominator;
+					segments.back().measureTicks = measureTicks;
+					return;
+				}
+				segments.push_back({ tick, numerator, denominator, measureTicks, 0 });
+			};
+
+		if (seq->timeSignatures.empty() || seq->timeSignatures.front().tick > 0)
+			append(0, 4, 4);
+		for (const TimeSignatureEvent& signature : seq->timeSignatures)
+			append(signature.tick, signature.numerator, signature.denominator);
+		if (segments.empty())
+			append(0, 4, 4);
+
+		long measureIndex = 0;
+		for (size_t i = 0; i < segments.size(); ++i)
+		{
+			segments[i].firstMeasure = measureIndex;
+			if (i + 1 < segments.size())
+			{
+				const long span = std::max(0L, segments[i + 1].tick - segments[i].tick);
+				measureIndex += (span + segments[i].measureTicks - 1) / segments[i].measureTicks;
+			}
+		}
+		return segments;
+	}
+
+	const MeterSegment& MeterAtTick(const std::vector<MeterSegment>& segments, long tick)
+	{
+		size_t index = 0;
+		for (size_t i = 0; i < segments.size(); ++i)
+		{
+			if (tick >= segments[i].tick)
+				index = i;
+			else
+				break;
+		}
+		return segments[index];
+	}
+
+	long MeasureIndexAtTick(const std::vector<MeterSegment>& segments, long tick)
+	{
+		for (auto it = segments.rbegin(); it != segments.rend(); ++it)
+		{
+			if (tick >= it->tick)
+				return it->firstMeasure + (tick - it->tick) / it->measureTicks;
+		}
+		return 0;
+	}
+
+	long MeasureStartTick(const std::vector<MeterSegment>& segments, long measureIndex)
+	{
+		if (measureIndex <= 0) return 0;
+		for (size_t i = 0; i < segments.size(); ++i)
+		{
+			if (i + 1 == segments.size() || measureIndex < segments[i + 1].firstMeasure)
+				return segments[i].tick + (measureIndex - segments[i].firstMeasure) * segments[i].measureTicks;
+		}
+		return 0;
+	}
+
+	int KeySharpsFlatsAtTick(const MIDISequence* seq, long tick)
+	{
+		int sharpsFlats = 0;
+		for (const KeySignatureEvent& signature : seq->keySignatures)
+		{
+			if (signature.tick <= tick)
+				sharpsFlats = signature.sharpsFlats;
+			else
+				break;
+		}
+		return std::clamp(sharpsFlats, -7, 7);
+	}
+
+	struct KeyState
+	{
+		bool flatKey = false;
+		bool inKey[12] = { false };
+		bool keyAltered[12] = { false };
+	};
+
+	KeyState MakeKeyState(int sharpsFlats)
+	{
+		KeyState state;
+		sharpsFlats = std::clamp(sharpsFlats, -7, 7);
+		state.flatKey = sharpsFlats < 0;
+		state.inKey[0] = state.inKey[2] = state.inKey[4] = state.inKey[5] = true;
+		state.inKey[7] = state.inKey[9] = state.inKey[11] = true;
+
+		const int accidentalCount = std::abs(sharpsFlats);
+		for (int i = 0; i < accidentalCount; ++i)
+		{
+			state.keyAltered[state.flatKey ? FLAT_PCS[i] : SHARP_PCS[i]] = true;
+			if (state.flatKey)
+				state.inKey[(FLAT_PCS[i] + 11) % 12] = true;
+			else
+				state.inKey[(SHARP_PCS[i] + 1) % 12] = true;
+		}
+		return state;
+	}
 }
 
 void ScoreOverlay::LoadTextures()
@@ -132,7 +274,8 @@ void ScoreOverlay::Render()
 	if (!app) return;
 
 	MIDIPlayerConfig* config = app->GetConfig();
-	if (!config || !config->render.showScore) return;
+	const bool sheetMusicRenderer = config && config->render.GetCurrentRenderer() == RendererType::SheetMusic;
+	if (!config || (!config->render.showScore && !sheetMusicRenderer)) return;
 
 	MIDISequence* seq = app->GetRendererSequence();
 	if (!seq || seq->timeBased || seq->mergedNotes.size() < MIDI_KEYS) return;
@@ -151,24 +294,20 @@ void ScoreOverlay::Render()
 	const double elapsed = std::max(0.0, app->GetTimer()->Elapsed());
 	const long currentTick = tempoMap->SecsToTicksFromMap(seq->resolution, elapsed);
 
-	int numerator = 4;
-	int denominator = 4;
-	if (!seq->timeSignatures.empty())
-	{
-		const TimeSignatureEvent& signature = seq->timeSignatures.front();
-		if (signature.numerator > 0) numerator = signature.numerator;
-		if (signature.denominator > 0) denominator = signature.denominator;
-	}
-
-	const long measureTicks = std::max(1L, (long)seq->resolution * 4L * numerator / denominator);
-	const long pageTicks = measureTicks * 4L;
-	// Plus2 lays the score out as fixed four-measure pages: the cursor sweeps across a page
-	// and the page turns when it reaches the right edge. It does not slide continuously.
-	const long windowStart = (currentTick / pageTicks) * pageTicks;
-	const long windowEnd = windowStart + pageTicks;
+	// A page is four measures, not four copies of the first meter. Build the real measure
+	// map from every time-signature change so mixed-meter files line up with Plus2.
+	const std::vector<MeterSegment> meterSegments = BuildMeterSegments(seq);
+	const long currentMeasure = MeasureIndexAtTick(meterSegments, currentTick);
+	const long pageStartMeasure = (currentMeasure / 4) * 4;
+	const long windowStart = MeasureStartTick(meterSegments, pageStartMeasure);
+	const long windowEnd = MeasureStartTick(meterSegments, pageStartMeasure + 4);
+	const MeterSegment& pageMeter = MeterAtTick(meterSegments, windowStart);
+	const int numerator = pageMeter.numerator;
+	const int denominator = pageMeter.denominator;
 
 	// The score is a panel over the top half of the window, leaving the piano roll visible
-	// underneath instead of covering the complete frame.
+	// underneath instead of covering the complete frame. The dedicated Sheet Music renderer
+	// uses the whole window instead.
 	float pageTop = 0.0f;
 	if (!app->IsRendering())
 	{
@@ -179,7 +318,9 @@ void ScoreOverlay::Render()
 	// The panel height is configurable (Settings > Visual > Renderer > Sheet music size).
 	// The notation is derived from it below, so a taller panel engraves a larger page
 	// instead of adding blank paper around a fixed-size staff.
-	const float scoreFraction = (float)std::clamp(config->render.scoreScale, 15, 100) / 100.0f;
+	const float scoreFraction = sheetMusicRenderer
+		? 1.0f
+		: (float)std::clamp(config->render.scoreScale, 15, 100) / 100.0f;
 	const float pageHeight = availableHeight * scoreFraction;
 	const float pageBottom = pageTop + pageHeight;
 
@@ -208,32 +349,12 @@ void ScoreOverlay::Render()
 	const float staffLeft = std::max(8.0f, uiWidth * 0.023f);
 	const float staffRight = uiWidth - std::max(6.0f, uiWidth * 0.003f);
 
-	// Key signature at the visible start. MIDI carries the number of sharps/flats directly.
-	int keySharpsFlats = 0;
-	for (const KeySignatureEvent& signature : seq->keySignatures)
-	{
-		if (signature.tick <= windowStart)
-			keySharpsFlats = signature.sharpsFlats;
-		else
-			break;
-	}
-	keySharpsFlats = std::clamp(keySharpsFlats, -7, 7);
+	// Key signature at the visible start. MIDI carries the number of sharps/flats directly;
+	// notes later on the page may change key again, so each glyph also records its own key
+	// below instead of reusing this page-start spelling everywhere.
+	const int keySharpsFlats = KeySharpsFlatsAtTick(seq, windowStart);
 	const int accidentalCount = std::abs(keySharpsFlats);
 	const bool flatKey = keySharpsFlats < 0;
-
-	bool inKey[12] = { false };
-	inKey[0] = inKey[2] = inKey[4] = inKey[5] = inKey[7] = inKey[9] = inKey[11] = true;
-	// A natural note whose pitch class the signature alters needs a natural sign when it
-	// appears (B natural in F major, F natural in G major, and so on).
-	bool keyAltered[12] = { false };
-	for (int i = 0; i < accidentalCount; ++i)
-	{
-		keyAltered[flatKey ? FLAT_PCS[i] : SHARP_PCS[i]] = true;
-		if (flatKey)
-			inKey[(FLAT_PCS[i] + 11) % 12] = true;
-		else
-			inKey[(SHARP_PCS[i] + 1) % 12] = true;
-	}
 
 	const float keyX = staffLeft + space * 3.0f;
 	const float keyStep = space * 1.5f;
@@ -245,9 +366,81 @@ void ScoreOverlay::Render()
 	// Plus2 insets the notes from the measure grid: barlines sit at the grid, while the first
 	// notehead of each measure sits about three staff spaces to its right.
 	const float noteInset = std::min(space * 3.0f, contentWidth * 0.25f);
-	const float noteLeft = contentLeft + noteInset;
-	const float noteWidth = std::max(1.0f, contentWidth - noteInset);
-	const float cursorX = noteLeft + (float)((double)(currentTick - windowStart) / (double)pageTicks) * noteWidth;
+
+	// Four equal-width measures per page. Each measure maps its own tick span into its
+	// width, so a 3/4 measure followed by a 4/4 measure stays correct instead of stretching
+	// both to the same tick length.
+	const float measureWidth = contentWidth / 4.0f;
+	std::vector<MeasureSpan> pageMeasures(4);
+	long longestMeasureTicks = 1;
+	for (int i = 0; i < 4; ++i)
+	{
+		MeasureSpan& measure = pageMeasures[i];
+		const long measureIndex = pageStartMeasure + i;
+		measure.startTick = MeasureStartTick(meterSegments, measureIndex);
+		measure.endTick = MeasureStartTick(meterSegments, measureIndex + 1);
+		if (measure.endTick <= measure.startTick)
+			measure.endTick = measure.startTick + 1;
+		const MeterSegment& meter = MeterAtTick(meterSegments, measure.startTick);
+		measure.numerator = meter.numerator;
+		measure.denominator = meter.denominator;
+		measure.sharpsFlats = KeySharpsFlatsAtTick(seq, measure.startTick);
+		measure.left = contentLeft + (float)i * measureWidth;
+		measure.right = measure.left + measureWidth;
+		measure.noteLeft = measure.left + noteInset;
+		measure.noteRight = measure.right;
+		longestMeasureTicks = std::max(longestMeasureTicks, measure.endTick - measure.startTick);
+	}
+
+	// Key and time changes at a measure start consume space inside that measure; shift its
+	// notes so the new signature does not print on top of the first notehead.
+	for (int i = 1; i < 4; ++i)
+	{
+		MeasureSpan& measure = pageMeasures[i];
+		const MeasureSpan& previous = pageMeasures[i - 1];
+		measure.keyChanged = measure.sharpsFlats != previous.sharpsFlats;
+		measure.timeChanged = measure.numerator != previous.numerator ||
+			measure.denominator != previous.denominator;
+		measure.keyWidth = measure.keyChanged && measure.sharpsFlats != 0
+			? (float)std::abs(measure.sharpsFlats) * keyStep + space * 0.8f
+			: 0.0f;
+		measure.timeWidth = measure.timeChanged ? space * 3.0f : 0.0f;
+		measure.noteLeft = measure.left + noteInset + measure.keyWidth + measure.timeWidth;
+	}
+
+	auto tickToX = [&](long tick) -> float
+		{
+			for (const MeasureSpan& measure : pageMeasures)
+			{
+				if (tick >= measure.startTick && tick < measure.endTick)
+				{
+					const double fraction = (double)(tick - measure.startTick)
+						/ (double)std::max(1L, measure.endTick - measure.startTick);
+					return measure.noteLeft + (float)fraction * (measure.noteRight - measure.noteLeft);
+				}
+			}
+			if (tick < pageMeasures.front().startTick)
+				return pageMeasures.front().noteLeft;
+			return pageMeasures.back().noteRight;
+		};
+	// Tempo changes belong over the barline, not over the first notehead after the new
+	// signature. This is the same measure grid without the note inset.
+	auto tickToMeasureX = [&](long tick) -> float
+		{
+			for (const MeasureSpan& measure : pageMeasures)
+			{
+				if (tick >= measure.startTick && tick < measure.endTick)
+				{
+					const double fraction = (double)(tick - measure.startTick)
+						/ (double)std::max(1L, measure.endTick - measure.startTick);
+					return measure.left + (float)fraction * (measure.right - measure.left);
+				}
+			}
+			if (tick < pageMeasures.front().startTick)
+				return pageMeasures.front().left;
+			return pageMeasures.back().right;
+		};
+	const float cursorX = tickToX(currentTick);
 
 	const ImU32 paper = IM_COL32(255, 255, 255, 255);
 	const ImU32 ink = IM_COL32(0, 0, 0, 255);
@@ -289,26 +482,39 @@ void ScoreOverlay::Render()
 	if (hasBassNotes)
 		DrawGlyph(sheetBass.get(), staffLeft + space * 0.4f, bassTop + space * 2.0f, space * 3.2f, glyphTint);
 
-	// Key signature on every shown staff.
-	if (accidentalCount > 0)
-	{
-		GPUImage* accidental = flatKey ? sheetFlat.get() : sheetSharp.get();
-		const int* trebleSteps = flatKey ? TREBLE_FLAT_STEPS : TREBLE_SHARP_STEPS;
-		const int* bassSteps = flatKey ? BASS_FLAT_STEPS : BASS_SHARP_STEPS;
-		const float accidentalHeight = space * 2.5f;
-
-		for (int i = 0; i < accidentalCount; ++i)
+	// Key signature on every shown staff, plus a new signature where the key changes inside
+	// the page. Notes after the change already use that key's spelling.
+	auto drawKeySignatureAt = [&](float x, int sharpsFlats)
 		{
-			const float x = keyX + i * keyStep;
-			DrawGlyph(accidental, x, trebleBottom - trebleSteps[i] * space * 0.5f, accidentalHeight, glyphTint);
-			if (hasBassNotes)
-				DrawGlyph(accidental, x, bassBottom - bassSteps[i] * space * 0.5f, accidentalHeight, glyphTint);
-		}
+			sharpsFlats = std::clamp(sharpsFlats, -7, 7);
+			const int count = std::abs(sharpsFlats);
+			if (count == 0) return;
+
+			const bool flats = sharpsFlats < 0;
+			GPUImage* accidental = flats ? sheetFlat.get() : sheetSharp.get();
+			const int* trebleSteps = flats ? TREBLE_FLAT_STEPS : TREBLE_SHARP_STEPS;
+			const int* bassSteps = flats ? BASS_FLAT_STEPS : BASS_SHARP_STEPS;
+			const float accidentalHeight = space * 2.5f;
+
+			for (int i = 0; i < count; ++i)
+			{
+				const float accidentalX = x + i * keyStep;
+				DrawGlyph(accidental, accidentalX, trebleBottom - trebleSteps[i] * space * 0.5f,
+					accidentalHeight, glyphTint);
+				if (hasBassNotes)
+					DrawGlyph(accidental, accidentalX, bassBottom - bassSteps[i] * space * 0.5f,
+						accidentalHeight, glyphTint);
+			}
+		};
+	drawKeySignatureAt(keyX, keySharpsFlats);
+	for (int i = 1; i < 4; ++i)
+	{
+		if (!pageMeasures[i].keyChanged || pageMeasures[i].sharpsFlats == 0) continue;
+		drawKeySignatureAt(pageMeasures[i].left + space * 0.35f, pageMeasures[i].sharpsFlats);
 	}
 
-	// Time signature uses Bravura's music digits, not the UI font.
-	const std::string numeratorText = std::to_string(numerator);
-	const std::string denominatorText = std::to_string(denominator);
+	// Time signature uses Bravura's music digits, not the UI font. Every meter change inside
+	// the page gets its own signature at the measure where it takes effect.
 	auto drawTimeDigits = [&](const std::string& text, float x, float top, float height)
 		{
 			float cursor = x;
@@ -321,25 +527,80 @@ void ScoreOverlay::Render()
 					cursor += height * (float)digit->width / (float)digit->height + space * 0.06f;
 			}
 		};
-	auto drawTimeSignature = [&](float staffTop)
+	auto drawTimeSignatureAt = [&](float x, int sigNumerator, int sigDenominator, float staffTop)
 		{
-			drawTimeDigits(numeratorText, timeX, staffTop - space * 0.9f, space * 2.7f);
-			drawTimeDigits(denominatorText, timeX, staffTop + space * 2.5f, space * 2.7f);
+			const float digitHeight = space * 2.7f;
+			drawTimeDigits(std::to_string(sigNumerator), x, staffTop - space * 0.9f, digitHeight);
+			drawTimeDigits(std::to_string(sigDenominator), x, staffTop + space * 2.5f, digitHeight);
 		};
-	drawTimeSignature(trebleTop);
+	drawTimeSignatureAt(timeX, numerator, denominator, trebleTop);
 	if (hasBassNotes)
-		drawTimeSignature(bassTop);
+		drawTimeSignatureAt(timeX, numerator, denominator, bassTop);
 
-	// Barlines follow the real measure grid, so an anacrusis or a time-signature change does not
-	// get an evenly divided but wrong measure width.
-	const long firstMeasure = windowStart / measureTicks;
-	for (long m = firstMeasure; ; ++m)
+	for (int i = 1; i < 4; ++i)
 	{
-		const long measureStart = m * measureTicks;
-		if (measureStart > windowEnd) break;
-		if (measureStart <= windowStart) continue;
+		const MeasureSpan& measure = pageMeasures[i];
+		const MeasureSpan& previous = pageMeasures[i - 1];
+		if (measure.numerator == previous.numerator && measure.denominator == previous.denominator)
+			continue;
 
-		const float x = contentLeft + (float)((double)(measureStart - windowStart) / (double)pageTicks) * contentWidth;
+		const float x = measure.left + measure.keyWidth + space * 0.35f;
+		drawTimeSignatureAt(x, measure.numerator, measure.denominator, trebleTop);
+		if (hasBassNotes)
+			drawTimeSignatureAt(x, measure.numerator, measure.denominator, bassTop);
+	}
+
+	// Tempo marks sit above the staff, like Plus2's score view. The page-start mark uses the
+	// tempo in force there; later changes get a mark at the measure or beat where they occur.
+	auto drawTempoMark = [&](float x, double bpm)
+		{
+			if (bpm <= 0.0) return;
+			const int value = std::clamp((int)std::lround(bpm), 1, 9999);
+			const float height = std::max(space * 2.1f, 8.0f);
+			const float top = pageTop + space * 1.9f;
+			const float headHeight = height * 0.62f;
+			const float headCenterX = std::min(x, staffRight - space * 5.5f) + headHeight * 0.62f;
+			const float headCenterY = top + height * 0.62f;
+			DrawGlyph(noteBlack.get(), headCenterX, headCenterY, headHeight, glyphTint);
+
+			const float stemX = headCenterX + headHeight * 0.46f;
+			draw->AddLine(ImVec2(stemX, headCenterY), ImVec2(stemX, top + height * 0.10f),
+				ink, std::max(1.0f, space * 0.065f));
+
+			const float equalsX = headCenterX + headHeight * 0.95f;
+			const float equalsY = top + height * 0.48f;
+			const float equalsLength = space * 0.75f;
+			draw->AddLine(ImVec2(equalsX, equalsY - space * 0.22f),
+				ImVec2(equalsX + equalsLength, equalsY - space * 0.22f), ink, std::max(1.0f, space * 0.08f));
+			draw->AddLine(ImVec2(equalsX, equalsY + space * 0.22f),
+				ImVec2(equalsX + equalsLength, equalsY + space * 0.22f), ink, std::max(1.0f, space * 0.08f));
+
+			float digitX = equalsX + equalsLength + space * 0.35f;
+			const std::string bpmText = std::to_string(value);
+			for (char c : bpmText)
+			{
+				if (c < '0' || c > '9') continue;
+				GPUImage* digit = sheetTime[c - '0'].get();
+				DrawGlyphAnchored(digit, digitX, top + height * 0.10f, height * 0.86f, glyphTint);
+				if (digit && digit->height > 0)
+					digitX += height * 0.86f * (float)digit->width / (float)digit->height + space * 0.06f;
+			}
+		};
+	drawTempoMark(staffLeft, tempoMap->GetBPMAtTick(windowStart));
+	long lastTempoTick = -1;
+	for (const TempoEvent& tempo : seq->tempos)
+	{
+		if (tempo.tick <= windowStart || tempo.tick >= windowEnd) continue;
+		if (tempo.tick == lastTempoTick) continue;
+		lastTempoTick = tempo.tick;
+		drawTempoMark(tickToMeasureX(tempo.tick), tempo.bpm);
+	}
+
+	// Barlines follow the mapped measure grid. The old fixed measureTicks loop drifted as
+	// soon as the file changed meter.
+	for (int i = 1; i < 4; ++i)
+	{
+		const float x = pageMeasures[i].left;
 		if (x < staffLeft || x > staffRight) continue;
 
 		draw->AddLine(ImVec2(x, trebleTop), ImVec2(x, trebleBottom), staffInk, std::max(1.0f, space * 0.085f));
@@ -364,7 +625,6 @@ void ScoreOverlay::Render()
 		const bool treble = key >= 60;
 		const int base = treble ? (4 * 7 + 2) : (2 * 7 + 4); // E4 / G2, the bottom staff lines.
 		const float staffBottom = treble ? trebleBottom : bassBottom;
-		const int diatonicStep = StaffStep(key, base, flatKey);
 
 		auto begin = std::lower_bound(notes.tick.begin(), notes.tick.end(), (uint32_t)windowStart);
 		size_t index = (size_t)std::distance(notes.tick.begin(), begin);
@@ -386,17 +646,19 @@ void ScoreOverlay::Render()
 			}
 			previousTick = tick;
 
-			const float x = noteLeft + (float)((double)((long)tick - windowStart) / (double)pageTicks) * noteWidth;
+			const float x = tickToX((long)tick);
 			if (x < staffLeft || x > staffRight) continue;
 
 			const uint32_t gate = std::max<uint32_t>(1, notes.gate[index]);
+			const int glyphSharpsFlats = KeySharpsFlatsAtTick(seq, (long)tick);
 			NoteGlyph glyph;
 			glyph.x = x;
-			glyph.y = staffBottom - (float)diatonicStep * space * 0.5f;
+			glyph.y = staffBottom - (float)StaffStep(key, base, glyphSharpsFlats < 0) * space * 0.5f;
 			glyph.tick = tick;
 			glyph.gate = gate;
 			glyph.value = gate;
 			glyph.key = (uint32_t)key;
+			glyph.sharpsFlats = glyphSharpsFlats;
 			glyph.treble = treble;
 			// Plus2's red dot rides the cursor, not every sustained note on the page.
 			const bool recentAttack = currentTick - (long)tick <= std::max(1L, quarterTicks / 8);
@@ -419,17 +681,22 @@ void ScoreOverlay::Render()
 	bool measureHasBass[4] = { false, false, false, false };
 	for (const NoteGlyph& glyph : glyphs)
 	{
-		const long measure = ((long)glyph.tick - windowStart) / measureTicks;
-		if (measure < 0 || measure >= 4) continue;
-		if (glyph.treble)
-			measureHasTreble[measure] = true;
-		else
-			measureHasBass[measure] = true;
+		for (int measure = 0; measure < 4; ++measure)
+		{
+			if ((long)glyph.tick < pageMeasures[measure].startTick ||
+				(long)glyph.tick >= pageMeasures[measure].endTick)
+				continue;
+			if (glyph.treble)
+				measureHasTreble[measure] = true;
+			else
+				measureHasBass[measure] = true;
+			break;
+		}
 	}
 
 	auto drawWholeRest = [&](float staffTop, int measure)
 		{
-			const float centerX = contentLeft + ((float)measure + 0.5f) / 4.0f * contentWidth;
+			const float centerX = (pageMeasures[measure].left + pageMeasures[measure].right) * 0.5f;
 			// A whole rest hangs from the fourth line, not from the second.
 			DrawGlyph(sheetRestWhole.get(), centerX, staffTop + space * 3.55f, space * 0.58f, glyphTint);
 		};
@@ -874,7 +1141,7 @@ void ScoreOverlay::Render()
 				const Onset& previous = onsets[members.back()];
 				const Onset& next = onsets[sequence[pos + 1]];
 				if (next.tick - previous.tick > (uint32_t)quarterTicks * 2) break;
-				if (next.tick - onsets[members.front()].tick > (uint32_t)measureTicks) break;
+				if (next.tick - onsets[members.front()].tick > (uint32_t)longestMeasureTicks) break;
 				if (std::abs(onsetAverageY(sequence[pos + 1]) - onsetAverageY(members.back())) > space * 5.0f)
 					break;
 
@@ -1116,7 +1383,8 @@ void ScoreOverlay::Render()
 		const int bassBase = 2 * 7 + 4;
 		const int base = glyph.treble ? trebleBase : bassBase;
 		const float staffBottom = glyph.treble ? trebleBottom : bassBottom;
-		const int diatonicStep = StaffStep((int)glyph.key, base, flatKey);
+		const KeyState glyphKey = MakeKeyState(glyph.sharpsFlats);
+		const int diatonicStep = StaffStep((int)glyph.key, base, glyphKey.flatKey);
 
 		// Ledger lines only on line positions, never in the space next to the staff, and only
 		// between the staff and the note (a note in a space gets the line below it, not a
@@ -1145,12 +1413,12 @@ void ScoreOverlay::Render()
 		// keys as sharps, matching how the score is engraved.
 		const uint32_t pitchClass = glyph.key % 12;
 		const bool sharpNote = IsSharp((size_t)glyph.key);
-		const bool naturalSign = !sharpNote && keyAltered[pitchClass];
-		const bool altered = sharpNote && !inKey[pitchClass];
+		const bool naturalSign = !sharpNote && glyphKey.keyAltered[pitchClass];
+		const bool altered = sharpNote && !glyphKey.inKey[pitchClass];
 		if (altered || naturalSign)
 		{
 			const float accidentalHeight = space * 2.9f;
-			GPUImage* accidental = naturalSign ? sheetNatural.get() : (flatKey ? sheetFlat.get() : sheetSharp.get());
+			GPUImage* accidental = naturalSign ? sheetNatural.get() : (glyphKey.flatKey ? sheetFlat.get() : sheetSharp.get());
 			const float accidentalWidth = accidental && accidental->height > 0
 				? accidentalHeight * (float)accidental->width / (float)accidental->height
 				: space * 1.2f;

@@ -8,6 +8,7 @@
 #include "Render/MIDIRendererChannels.h"
 #include "Render/MIDIRendererVelocities.h"
 #include "Render/MIDIRendererCounter.h"
+#include "Render/MIDIRendererSheetMusic.h"
 #include "Render/NoteCounter/NoteCounterRenderer.h"
 #include "DialogMacros.h"
 #include "App/UI/Themes/Themes.h"
@@ -21,6 +22,7 @@
 #include "Telemetry/CrashReporter.h"
 #include "Telemetry/CometLog.h"
 #include <cstdio>
+#include <filesystem>
 #include <thread>
 
 namespace
@@ -506,6 +508,7 @@ void SettingsDialog::DrawVisualTab()
 								RENDERER_COMBO_ENTRY(RendererType::Channels, MIDIRendererChannels);
 								RENDERER_COMBO_ENTRY(RendererType::Velocities, MIDIRendererVelocities);
 								RENDERER_COMBO_ENTRY(RendererType::CounterOnly, MIDIRendererCounter);
+								RENDERER_COMBO_ENTRY(RendererType::SheetMusic, MIDIRendererSheetMusic);
 
 								ImGui::EndCombo();
 							}
@@ -521,9 +524,11 @@ void SettingsDialog::DrawVisualTab()
 
 				// The score view is shared by every renderer, so it lives outside the
 				// per-renderer settings rather than in the Synthesia tab.
+				const bool sheetMusicRenderer = config->render.GetCurrentRenderer() == RendererType::SheetMusic;
 				BEGIN_SECTION("##scoreView")
 				{
 					SETUP_SECTION;
+					if (sheetMusicRenderer) ImGui::BeginDisabled();
 					SECTION_ENTRY(SECTION_LABEL(localization->Get("renderer.synthesia.sheet", "Sheet music").c_str()),
 						{
 							ImGui::Checkbox("##showScore", &config->render.showScore);
@@ -536,8 +541,11 @@ void SettingsDialog::DrawVisualTab()
 							ImGui::SetNextItemWidth(-1.0f);
 							ImGui::SliderInt("##scoreScale", &config->render.scoreScale, 15, 100, "%d%% of screen");
 						});
+					if (sheetMusicRenderer) ImGui::EndDisabled();
 					END_SECTION;
 				}
+				if (sheetMusicRenderer)
+					ImGui::TextDisabled("The Sheet Music renderer always fills the window with the score.");
 
 				ImGui::Spacing();
 
@@ -891,7 +899,7 @@ void SettingsDialog::DrawVisualTab()
 						TABLE_LABEL_TOOLTIP(
 							"Show banner",
 							"Draws the song title over the first few seconds of a video render. Every visual "
-							"uses UMP's white title card; the Synthesia visual switches to a recreation of "
+							"uses UMP's title card; the Synthesia visual switches to a recreation of "
 							"Synthesia's title bar."
 						),
 						ImGui::Checkbox("##showBanner", &config->banner.enabled);
@@ -906,6 +914,161 @@ void SettingsDialog::DrawVisualTab()
 						),
 						ImGui::Checkbox("##showBannerPreview", &config->banner.showInPreview);
 					);
+
+					// These apply to both banner styles. The UMP card and Synthesia bar have different
+					// colors, but the same opening and artwork controls should follow the user.
+					SECTION_ENTRY(
+						TABLE_LABEL_TOOLTIP(
+							"Opening animation",
+							"How the banner enters a video or preview. Open from middle splits it at the "
+							"frame centre and reveals it outward."
+						),
+						{
+							const char* animations[] = { "Instant", "Fade in", "Open from middle", "Slide down" };
+							int animation = static_cast<int>(config->banner.animation);
+							if (ImGui::Combo("##bannerAnimation", &animation, animations, IM_ARRAYSIZE(animations)))
+								config->banner.animation = static_cast<BannerAnimation>(animation);
+						}
+					);
+
+					SECTION_ENTRY(
+						SECTION_LABEL("Animation length"),
+						{
+							ImGui::BeginDisabled(config->banner.animation == BannerAnimation::Instant);
+							ImGui::SliderFloat("##bannerAnimationSeconds", &config->banner.animationSeconds,
+								0.1f, 2.0f, "%.2f s");
+							ImGui::EndDisabled();
+						}
+					);
+
+					SECTION_ENTRY(
+						TABLE_LABEL_TOOLTIP(
+							"Artwork",
+							"Optional PNG, JPEG, BMP, TGA or GIF artwork drawn on the banner. The image keeps "
+							"its aspect ratio and is cached while the path stays the same."
+						),
+						{
+							std::filesystem::path artworkPath;
+							if (!config->banner.imagePath.empty())
+								artworkPath = std::filesystem::u8path(config->banner.imagePath);
+
+							Utils::AddFilePickerField("##bannerArtwork", artworkPath,
+								"png,jpg,jpeg,bmp,tga,gif", false);
+
+							const auto u8Path = artworkPath.u8string();
+							config->banner.imagePath.assign(u8Path.begin(), u8Path.end());
+
+							if (ImGui::Button("Clear##bannerArtwork"))
+							{
+								config->banner.imagePath.clear();
+								artworkPath.clear();
+							}
+						}
+					);
+
+					if (!config->banner.imagePath.empty())
+					{
+						SECTION_ENTRY(
+							SECTION_LABEL("Artwork placement"),
+							{
+								const char* alignments[] = { "Left", "Center", "Right" };
+								int alignment = static_cast<int>(config->banner.imageAlignment);
+								if (ImGui::Combo("##bannerImageAlignment", &alignment, alignments,
+									IM_ARRAYSIZE(alignments)))
+									config->banner.imageAlignment = static_cast<BannerImageAlignment>(alignment);
+							}
+						);
+
+													SECTION_ENTRY(
+								SECTION_LABEL("Artwork size"),
+								ImGui::SliderFloat("##bannerImageScale", &config->banner.imageScale, 0.1f, 1.0f,
+									"%.2fx of banner height");
+							);
+
+						SECTION_ENTRY(
+							SECTION_LABEL("Artwork offset"),
+							{
+								ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+								ImGui::SliderFloat("##bannerImageOffsetX", &config->banner.imageOffsetX,
+									-0.5f, 0.5f, "X %.2f");
+								ImGui::SameLine();
+								ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+								ImGui::SliderFloat("##bannerImageOffsetY", &config->banner.imageOffsetY,
+									-0.5f, 0.5f, "Y %.2f");
+							}
+						);
+					}
+
+					if (config->render.GetCurrentRenderer() == RendererType::Synthesia)
+					{
+													SECTION_ENTRY(
+								SECTION_LABEL("Customization"),
+								ImGui::TextDisabled("Theme-driven colors; the animation and artwork above still apply.");
+							);
+					}
+					else
+					{
+						SECTION_ENTRY(
+							TABLE_LABEL_TOOLTIP(
+								"Background color",
+								"Color of the UMP card's full-width band. Lower the alpha to make the band "
+								"translucent."
+							),
+							{
+								ImVec4 backgroundColor = config->banner.umpBackgroundCol;
+								if (ImGui::ColorEdit4("##umpBannerBg", &backgroundColor.x,
+									ImGuiColorEditFlags_AlphaBar))
+								{
+									config->banner.umpBackgroundCol = backgroundColor;
+								}
+							}
+						);
+
+						SECTION_ENTRY(
+							SECTION_LABEL("Title color"),
+							{
+								ImVec4 titleColor = config->banner.umpTitleCol;
+								if (ImGui::ColorEdit3("##umpBannerTitle", &titleColor.x))
+								{
+									config->banner.umpTitleCol = titleColor;
+								}
+							}
+						);
+
+						SECTION_ENTRY(
+							SECTION_LABEL("Credit color"),
+							{
+								ImVec4 creditColor = config->banner.umpCreditCol;
+								if (ImGui::ColorEdit3("##umpBannerCredit", &creditColor.x))
+								{
+									config->banner.umpCreditCol = creditColor;
+								}
+							}
+						);
+
+						SECTION_ENTRY(
+							TABLE_LABEL_TOOLTIP(
+								"Scale",
+								"Scales the UMP card's band and both text lines around the centre of the "
+								"frame. 1.00x matches the reference."
+							),
+							ImGui::SliderFloat("##umpBannerScale", &config->banner.umpScale,
+								MIN_UMP_BANNER_SCALE, MAX_UMP_BANNER_SCALE, "%.2fx");
+						);
+
+						SECTION_ENTRY(
+							SECTION_LABEL("Reset"),
+							{
+								if (ImGui::Button("Restore UMP defaults"))
+								{
+									config->banner.umpBackgroundCol = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+									config->banner.umpTitleCol = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+									config->banner.umpCreditCol = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+									config->banner.umpScale = 1.0f;
+								}
+							}
+						);
+					}
 
 					END_SECTION;
 				}

@@ -19,7 +19,8 @@ enum class RendererType
 	MIDITrail,
 	Channels,
 	Velocities,
-	CounterOnly
+	CounterOnly,
+	SheetMusic
 };
 
 enum class NoteCounterStyle
@@ -35,11 +36,53 @@ enum class NoteCounterAlignment
 	TopRight
 };
 
+enum class BannerAnimation
+{
+	Instant,
+	Fade,
+	OpenFromMiddle,
+	SlideDown
+};
+
+enum class BannerImageAlignment
+{
+	Left,
+	Center,
+	Right
+};
+
+inline const char* ToString(BannerAnimation animation)
+{
+	switch (animation)
+	{
+		case BannerAnimation::Instant:        return "Instant";
+		case BannerAnimation::Fade:           return "Fade in";
+		case BannerAnimation::OpenFromMiddle: return "Open from middle";
+		case BannerAnimation::SlideDown:      return "Slide down";
+	}
+
+	return "Instant";
+}
+
+inline const char* ToString(BannerImageAlignment alignment)
+{
+	switch (alignment)
+	{
+		case BannerImageAlignment::Left:   return "Left";
+		case BannerImageAlignment::Center: return "Center";
+		case BannerImageAlignment::Right:  return "Right";
+	}
+
+	return "Left";
+}
+
 static const NoteCounterStyle DEFAULT_NOTE_COUNTER_STYLE = NoteCounterStyle::UMP;
 static const NoteCounterAlignment DEFAULT_NOTE_COUNTER_ALIGNMENT = NoteCounterAlignment::TopRight;
 static const int DEFAULT_NOTE_COUNTER_WIDTH = 200;
 static constexpr float MIN_SYNTHESIA_BANNER_SCALE = 0.5f;
 static constexpr float MAX_SYNTHESIA_BANNER_SCALE = 2.0f;
+static constexpr float MIN_UMP_BANNER_SCALE = 0.5f;
+static constexpr float MAX_UMP_BANNER_SCALE = 2.0f;
 
 inline const std::string ToString(RendererType type)
 {
@@ -53,6 +96,7 @@ inline const std::string ToString(RendererType type)
 		case RendererType::Channels:    return "Channels";
 		case RendererType::Velocities:  return "Velocities";
 		case RendererType::CounterOnly: return "Counter Only";
+		case RendererType::SheetMusic:  return "Sheet Music";
 	}
 
 	return "Unknown";
@@ -118,7 +162,7 @@ struct MIDIPlayerConfig
 	};
 
 	// The opening banner baked into a video render, in the style of the selected visual: the
-	// white UMP-style title card, or a recreation of Synthesia's title bar.
+	// UMP-style title card, or a recreation of Synthesia's title bar.
 	struct ConfigBanner
 	{
 		bool enabled = true;
@@ -128,6 +172,27 @@ struct MIDIPlayerConfig
 		// Scales Synthesia's title bar and title around the bar's centre. 1.0 matches the reference.
 		// The bar stays full-width, as it is in Synthesia.
 		float synthesiaScale = 1.0f;
+
+		// UMP card colors. The background alpha controls the band's opacity. Synthesia's banner
+		// deliberately has no color settings: it follows the active app theme.
+		ImVec4 umpBackgroundCol = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+		ImVec4 umpTitleCol = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+		ImVec4 umpCreditCol = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+		// Scales the UMP card's band and text around the frame centre. 1.0 matches the reference.
+		float umpScale = 1.0f;
+
+		// Shared opening animation. Open from middle splits the banner at the frame centre and
+		// reveals it outward; the timing is intentionally short so the first notes are not delayed.
+		BannerAnimation animation = BannerAnimation::OpenFromMiddle;
+		float animationSeconds = 0.55f;
+
+		// Optional artwork drawn on the banner. The image is cached by path and loaded through the
+		// same stb_image/GPU texture path as the rest of Comet's assets.
+		std::string imagePath = "";
+		BannerImageAlignment imageAlignment = BannerImageAlignment::Left;
+		float imageScale = 0.75f;
+		float imageOffsetX = 0.0f;
+		float imageOffsetY = 0.0f;
 	};
 
 	struct ConfigMIDI

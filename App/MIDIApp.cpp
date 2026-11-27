@@ -23,6 +23,7 @@
 #include "../Render/MIDIRendererMIDITrail.h"
 #include "../Render/MIDIRendererVelocities.h"
 #include "../Render/MIDIRendererCounter.h"
+#include "../Render/MIDIRendererSheetMusic.h"
 #include "../Render/MIDIRenderer.h" // Textured renderer + AbstractMIDIRenderer full definition
 
 #include "../ResourcePack/DefaultResourcePack.h"
@@ -600,6 +601,9 @@ void MIDIApp::DeferPendingSequenceRenderer(std::shared_ptr<MIDISequence> sequenc
 	case RendererType::CounterOnly:
 		newRenderer = std::make_unique<MIDIRendererCounter>(this);
 		break;
+	case RendererType::SheetMusic:
+		newRenderer = std::make_unique<MIDIRendererSheetMusic>(this);
+		break;
 	default:
 		return;
 	}
@@ -678,6 +682,7 @@ template void MIDIApp::SetRenderer<MIDIRendererMIDITrail>();
 template void MIDIApp::SetRenderer<MIDIRendererChannels>();
 template void MIDIApp::SetRenderer<MIDIRendererVelocities>();
 template void MIDIApp::SetRenderer<MIDIRendererCounter>(); // <--- errors here
+template void MIDIApp::SetRenderer<MIDIRendererSheetMusic>();
 
 // called after glfw/glad initialization has finished, and is safe to load stuff, such as images, for rendering
 void MIDIApp::LoadResources()
@@ -730,6 +735,9 @@ void MIDIApp::LoadResources()
 		break;
 	case RendererType::CounterOnly:
 		SetRenderer<MIDIRendererCounter>();
+		break;
+	case RendererType::SheetMusic:
+		SetRenderer<MIDIRendererSheetMusic>();
 		break;
 	default:
 		SetRenderer<MIDIRendererPFA>();
@@ -837,11 +845,13 @@ void MIDIApp::Update()
 
 	UpdateOverlayRates();
 
+	const bool scoreActive = config.render.showScore ||
+		config.render.GetCurrentRenderer() == RendererType::SheetMusic;
 	for (auto& overlay : overlays)
 	{
 		// The score page is the focus when it is on; the counter/stats panels would sit on
 		// top of the notation as dark patches, so they are hidden for the score view.
-		if (config.render.showScore) continue;
+		if (scoreActive) continue;
 		if (!overlay->IsShown()) continue;
 
 		glm::vec2 counterResolution = overlay->GetOverlaySize();

@@ -110,6 +110,30 @@ void MIDIPlayerConfig::LoadConfigOrDefault()
 			banner.showInPreview = bannerSec->GetBoolean("showInPreview", false);
 			banner.synthesiaScale = std::clamp(bannerSec->GetFloat("synthesiaScale", 1.0f),
 				MIN_SYNTHESIA_BANNER_SCALE, MAX_SYNTHESIA_BANNER_SCALE);
+			banner.umpScale = std::clamp(bannerSec->GetFloat("umpScale", 1.0f),
+				MIN_UMP_BANNER_SCALE, MAX_UMP_BANNER_SCALE);
+			banner.animation = static_cast<BannerAnimation>(std::clamp(
+				bannerSec->GetInt("animation", (int)BannerAnimation::OpenFromMiddle), 0, 3));
+			banner.animationSeconds = std::clamp(bannerSec->GetFloat("animationSeconds", 0.55f),
+				0.05f, 3.0f);
+			banner.imagePath = bannerSec->GetString("imagePath", "");
+			banner.imageAlignment = static_cast<BannerImageAlignment>(std::clamp(
+				bannerSec->GetInt("imageAlignment", (int)BannerImageAlignment::Left), 0, 2));
+			banner.imageScale = std::clamp(bannerSec->GetFloat("imageScale", 0.75f), 0.1f, 1.0f);
+			banner.imageOffsetX = std::clamp(bannerSec->GetFloat("imageOffsetX", 0.0f), -0.5f, 0.5f);
+			banner.imageOffsetY = std::clamp(bannerSec->GetFloat("imageOffsetY", 0.0f), -0.5f, 0.5f);
+			{
+				LOAD_COLOR(root["banner"], "umpBackground", umpBgRgba, banner.umpBackgroundCol);
+				banner.umpBackgroundCol = ImVec4(umpBgRgba[0], umpBgRgba[1], umpBgRgba[2], umpBgRgba[3]);
+			}
+			{
+				LOAD_COLOR(root["banner"], "umpTitleColor", umpTitleRgba, banner.umpTitleCol);
+				banner.umpTitleCol = ImVec4(umpTitleRgba[0], umpTitleRgba[1], umpTitleRgba[2], 1.0f);
+			}
+			{
+				LOAD_COLOR(root["banner"], "umpCreditColor", umpCreditRgba, banner.umpCreditCol);
+				banner.umpCreditCol = ImVec4(umpCreditRgba[0], umpCreditRgba[1], umpCreditRgba[2], 1.0f);
+			}
 			this->banner = banner;
 		}
 
@@ -304,6 +328,17 @@ void MIDIPlayerConfig::SaveConfig()
 	config["banner"]["enabled"] = banner.enabled;
 	config["banner"]["showInPreview"] = banner.showInPreview;
 	config["banner"]["synthesiaScale"] = banner.synthesiaScale;
+	config["banner"]["umpBackground"] = Utils::EncodeColor(banner.umpBackgroundCol);
+	config["banner"]["umpTitleColor"] = Utils::EncodeColor(banner.umpTitleCol);
+	config["banner"]["umpCreditColor"] = Utils::EncodeColor(banner.umpCreditCol);
+	config["banner"]["umpScale"] = banner.umpScale;
+	config["banner"]["animation"] = static_cast<int>(banner.animation);
+	config["banner"]["animationSeconds"] = banner.animationSeconds;
+	config["banner"]["imagePath"] = banner.imagePath;
+	config["banner"]["imageAlignment"] = static_cast<int>(banner.imageAlignment);
+	config["banner"]["imageScale"] = banner.imageScale;
+	config["banner"]["imageOffsetX"] = banner.imageOffsetX;
+	config["banner"]["imageOffsetY"] = banner.imageOffsetY;
 
 	config["midi"]["multithreaded"] = midi.multithreadedLoading;
 	config["midi"]["timeBased"] = midi.timeBasedLoading;

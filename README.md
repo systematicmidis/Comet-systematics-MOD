@@ -8,11 +8,11 @@
 
 ## Current release
 
-**v1.11.20b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.20b)
+**v1.11.21b** — [download the latest release](https://github.com/systematicmidis/Comet-systematics-MOD/releases/tag/v1.11.21b)
 
 | Asset | Use it for |
 | --- | --- |
-| `Comet-Systematics-MOD-v1.11.20b-win64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
+| `Comet-Systematics-MOD-v1.11.21b-win64.zip` | Recommended: portable package with `Comet.exe`, assets, runtime DLLs, and documentation. |
 | `Comet-Release.exe` | Normal use and large MIDI files if you already have a Comet folder. |
 | `Comet-Debug.exe` | Debugging and diagnostics. It is much slower on large files. |
 
@@ -80,6 +80,7 @@ The Ziggy comparison is a parse-vs-load comparison on the 100M file. On an 8,000
 
 - **MIDI tab → Remember settings per file:** stores the active renderer's options, key range, and audio settings for the exact file path. Off by default; copying or moving a file starts a fresh preset.
 - **Mod tab → note multiplier:** purely cosmetic. It changes the counter and optionally the graph, never the actual notes, rendering, or audio.
+- **Visual → Banner → Opening animation / Artwork:** choose an instant, fade, center-reveal, or slide-down entrance, set its length, and add a PNG, JPEG, BMP, TGA, or GIF with left/center/right placement, scale, and X/Y offset. The UMP and Synthesia banners share these settings.
 - **Visual → MIDITrail → Aura size:** the value is the visual scale; stacked notes add a small logarithmic boost rather than drawing one aura per note.
 - **Audio → Audio engine:** choose Prerendered (renders the song ahead of playback) or Maestro (synthesises its notes live).
 
